@@ -17,8 +17,17 @@ import pickle
 
 ###################### PICKLE FILES ######################
 
-def save_pickle_files(path: object, file_name: object, var_name: object) -> object:
-    with open(path+file_name, 'wb') as f:
+import pickle
+from pathlib import Path
+
+def save_pickle_files(path: str, file_name: str, var_name: object) -> None:
+    # Convert string path to a Path object
+    dir_path = Path(path)
+    
+    dir_path.mkdir(parents=True, exist_ok=True)
+    
+    # Save the pickle file
+    with open(dir_path / file_name, 'wb') as f:
         pickle.dump(var_name, f)
 
 def open_pickle_files(file_path, file_name):
@@ -215,7 +224,398 @@ def create_mask(data, lon_initial, lon_final, lat_initial, lat_final):
     return mask_lat
 
 
+###################### REGION MASKS AND AGGREGATION (NOTEBOOK POST-PROCESSING) ######################
+
+def _normalize_lon_range(lon_range):
+    """Accept (lon_min, lon_max) in 0–360; None means full longitude."""
+    if lon_range is None:
+        return None
+    lon_min, lon_max = lon_range
+    return float(lon_min), float(lon_max)
+
+
+def _normalize_lat_range(lat_range):
+    """Accept (lat_min, lat_max); None means full latitude."""
+    if lat_range is None:
+        return None
+    lat_min, lat_max = lat_range
+    return float(lat_min), float(lat_max)
+
+
+def _parse_time_slice(time_slice):
+    """Convert None, slice, or (start, end) strings into an xarray time slice."""
+    if time_slice is None:
+        return slice(None)
+    if isinstance(time_slice, slice):
+        return time_slice
+    if isinstance(time_slice, (list, tuple)) and len(time_slice) == 2:
+        return slice(time_slice[0], time_slice[1])
+    raise TypeError(
+        "time_slice must be None, a slice, or a (start, end) pair of time labels"
+    )
+
+
+def _grid_cell_sizes(da):
+    """Mean grid spacing in radians for lat and lon."""
+    dlat = np.abs(np.deg2rad(np.diff(da.lat.data))).mean()
+    dlon = np.abs(np.deg2rad(np.diff(da.lon.data))).mean()
+    return dlat, dlon
+
+
+def _spatial_template(da):
+    """Reduce da to its lat/lon field for mask construction."""
+    template = da
+    if 'time' in template.dims:
+        template = template.isel(time=0, drop=True)
+    for dim in list(template.dims):
+        if dim not in ('lat', 'lon'):
+            template = template.isel({dim: 0}, drop=True)
+    return template
+
+
+def _spatial_weights(da, mask, edge_weighted=False):
+    """
+    Area weights for lat/lon aggregation.
+    mask may be binary or fractional; edge_weighted rebuilds fractional box weights
+    from mask.attrs when lon_range/lat_range are stored.
+
+    When the mask grid does not match the model's grid (different resolutions),
+    the mask is automatically rebuilt on the model's grid using the stored
+    lon_range/lat_range attrs, or interpolated if those attrs are absent.
+    """
+    dlat, dlon = _grid_cell_sizes(da)
+    data_template = _spatial_template(da)
+
+    def _grids_match(m, t):
+        return (
+            len(m.lat) == len(t.lat)
+            and len(m.lon) == len(t.lon)
+            and np.array_equal(m.lat.values, t.lat.values)
+            and np.array_equal(m.lon.values, t.lon.values)
+        )
+
+    def _rebuild_mask(template):
+        """Rebuild the region mask on an arbitrary spatial template."""
+        lon_min, lon_max = mask.attrs['lon_range']
+        lat_min, lat_max = mask.attrs['lat_range']
+        if edge_weighted:
+            rm = create_mask_weigth(template, lon_min, lon_max, lat_min, lat_max)
+        else:
+            rm = create_mask(template, lon_min, lon_max, lat_min, lat_max)
+        if 'surface' in mask.attrs and mask.attrs['surface'] not in (None, 'all'):
+            surface_mask = _land_sea_mask(
+                rm,
+                mask.attrs['surface'],
+                land_mask=mask.attrs.get('land_mask'),
+                land_mask_path=mask.attrs.get('land_mask_path'),
+            )
+            rm = rm * surface_mask
+        return rm
+
+    if edge_weighted and 'lon_range' in mask.attrs and 'lat_range' in mask.attrs:
+        region_mask = _rebuild_mask(data_template)
+    elif not _grids_match(mask, data_template):
+        # Model grid differs from the template used to build the mask — rebuild.
+        if 'lon_range' in mask.attrs and 'lat_range' in mask.attrs:
+            region_mask = _rebuild_mask(data_template)
+        else:
+            region_mask = mask.interp(
+                lat=data_template.lat, lon=data_template.lon, method='nearest'
+            )
+    else:
+        region_mask = mask
+
+    cell_area = np.cos(np.deg2rad(da.lat)) * dlat * dlon
+    weights = cell_area * region_mask
+    return weights, region_mask
+
+
+def _land_sea_mask(template, surface, land_mask=None, land_mask_path=None):
+    """
+    Return a 0/1 mask on the template grid for land or sea.
+
+    surface: 'land', 'sea', or 'all'
+    land_mask: xr.DataArray with 1=land, 0=sea (or fractional)
+    land_mask_path: netCDF path; looks for lsm, land, or land_mask variables
+    """
+    if surface in (None, 'all'):
+        return xr.ones_like(template)
+
+    if surface not in ('land', 'sea'):
+        raise ValueError("surface must be 'all', 'land', or 'sea'")
+
+    if land_mask is not None:
+        lsm = land_mask
+    elif land_mask_path is not None:
+        with xr.open_dataset(land_mask_path) as ds:
+            for var in ('lsm', 'land', 'land_mask', 'LAND_MASK'):
+                if var in ds:
+                    lsm = ds[var].load()
+                    break
+            else:
+                raise KeyError(
+                    f"No land-mask variable found in {land_mask_path}. "
+                    "Expected one of: lsm, land, land_mask, LAND_MASK"
+                )
+    else:
+        try:
+            import regionmask
+            land = regionmask.defined_regions.natural_earth_v5_0_0.land_110
+            lsm = land.mask(template.lon, template.lat) == 0
+        except ImportError as exc:
+            raise ValueError(
+                "Land/sea masking requires land_mask, land_mask_path, or the "
+                "'regionmask' package."
+            ) from exc
+
+    if not isinstance(lsm, xr.DataArray):
+        lsm = xr.DataArray(lsm, dims=('lat', 'lon'), coords={'lat': template.lat, 'lon': template.lon})
+
+    if 'lat' in lsm.dims and 'lon' in lsm.dims:
+        if not np.array_equal(lsm.lat.values, template.lat.values) or not np.array_equal(lsm.lon.values, template.lon.values):
+            lsm = lsm.interp(lat=template.lat, lon=template.lon, method='nearest')
+
+    lsm = (lsm >= 0.5).astype(float)
+
+    if surface == 'land':
+        return lsm
+    return 1.0 - lsm
+
+
+def create_region_mask(
+    template,
+    name,
+    lon_range=(0, 360),
+    lat_range=(-90, 90),
+    surface='all',
+    land_mask=None,
+    land_mask_path=None,
+    mask_registry=None,
+):
+    """
+    Build a named regional mask on the same lat/lon grid as template.
+
+    Parameters
+    ----------
+    template : xr.DataArray or xr.Dataset
+        Reference field (only lat/lon coordinates are used). Use any loaded
+        AeroCom variable, e.g. model_data['AOD550'].isel(time=0).
+    name : str
+        Name for this region (stored in mask.attrs and optionally in mask_registry).
+    lon_range : tuple or None
+        (lon_min, lon_max) in 0–360. None selects the full longitude range.
+        Supports wrap-around when lon_min > lon_max (e.g. 350, 8 for outflow).
+    lat_range : tuple or None
+        (lat_min, lat_max). None selects the full latitude range.
+    surface : str
+        'all', 'land', or 'sea'.
+    land_mask : xr.DataArray, optional
+        1=land, 0=sea on the same or interpolatable grid.
+    land_mask_path : str, optional
+        Path to a netCDF land-sea mask file.
+    mask_registry : dict, optional
+        If given, stores the mask as mask_registry[name] = mask.
+
+    Returns
+    -------
+    xr.DataArray
+        Mask with values 0/1 (lat, lon). Metadata is stored in .attrs for use
+        with regional_aggregate(..., edge_weighted=True).
+    """
+    if isinstance(template, xr.Dataset):
+        template = template[list(template.data_vars)[0]]
+
+    lon_range = _normalize_lon_range(lon_range)
+    lat_range = _normalize_lat_range(lat_range)
+
+    spatial_template = _spatial_template(template)
+
+    if lon_range is None and lat_range is None:
+        box_mask = xr.ones_like(spatial_template)
+    else:
+        lon_min, lon_max = lon_range if lon_range is not None else (0.0, 360.0)
+        lat_min, lat_max = lat_range if lat_range is not None else (-90.0, 90.0)
+        box_mask = create_mask(spatial_template, lon_min, lon_max, lat_min, lat_max)
+
+    surface_mask = _land_sea_mask(
+        spatial_template,
+        surface,
+        land_mask=land_mask,
+        land_mask_path=land_mask_path,
+    )
+    mask = (box_mask * surface_mask).astype(float)
+    mask.name = name
+    mask.attrs.update({
+        'name': name,
+        'lon_range': lon_range if lon_range is not None else (0.0, 360.0),
+        'lat_range': lat_range if lat_range is not None else (-90.0, 90.0),
+        'surface': surface,
+        'land_mask_path': land_mask_path,
+    })
+
+    if mask_registry is not None:
+        mask_registry[name] = mask
+
+    return mask
+
+
+def regional_aggregate(
+    da,
+    mask,
+    spatial='mean',
+    edge_weighted=False,
+    time_slice=None,
+    temporal='mean',
+    return_time_series=False,
+):
+    """
+    Spatially and/or temporally aggregate data using a mask from create_region_mask.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Field with lat, lon, and optionally time dimensions.
+    mask : xr.DataArray
+        Mask from create_region_mask (global mask = ones on full grid).
+    spatial : str
+        'mean' (area-weighted average) or 'total' (weighted sum over the region).
+    edge_weighted : bool
+        If True, use fractional grid-cell weights at the region boundaries.
+    time_slice : slice, (start, end), or None
+        Temporal subset applied before aggregation. None keeps all times.
+    temporal : str
+        'mean' or 'total' over the remaining time dimension after spatial reduction.
+        Ignored when return_time_series=True.
+    return_time_series : bool
+        If True, return the spatial aggregate at each time step without collapsing time.
+
+    Returns
+    -------
+    float or xr.DataArray
+        Scalar when temporal reduction is applied; otherwise a time series.
+    """
+    if spatial not in ('mean', 'total'):
+        raise ValueError("spatial must be 'mean' or 'total'")
+    if temporal not in ('mean', 'total'):
+        raise ValueError("temporal must be 'mean' or 'total'")
+
+    da_work = da
+    if 'bnds' in da_work.dims:
+        da_work = da_work.drop_dims('bnds', errors='ignore')
+    elif 'nbnd' in da_work.dims:
+        da_work = da_work.drop_dims('nbnd', errors='ignore')
+
+    if 'time' in da_work.dims:
+        da_work = da_work.sel(time=_parse_time_slice(time_slice))
+
+    weights, _ = _spatial_weights(da_work, mask, edge_weighted=edge_weighted)
+    weighted_field = da_work * weights
+
+    if spatial == 'mean':
+        norm = weights.sum(dim=['lat', 'lon'])
+        spatial_result = weighted_field.sum(dim=['lat', 'lon']) / norm
+    else:
+        spatial_result = weighted_field.sum(dim=['lat', 'lon'])
+
+    if return_time_series or 'time' not in spatial_result.dims:
+        return spatial_result
+
+    if temporal == 'mean':
+        return float(spatial_result.mean('time').values)
+    return float(spatial_result.sum('time').values)
+
+
+def aggregate_models(
+    model_dict,
+    var_name,
+    mask,
+    spatial='mean',
+    edge_weighted=False,
+    time_slice=None,
+    temporal='mean',
+    return_time_series=False,
+):
+    """
+    Apply regional_aggregate to every model in an AeroCom get_data() dictionary.
+
+    Returns
+    -------
+    dict
+        {model_name: aggregated value or time series}
+    """
+    result = {}
+    for model, model_data in model_dict.items():
+        if var_name not in model_data:
+            raise KeyError(f"Variable '{var_name}' not found for model '{model}'")
+        result[model] = regional_aggregate(
+            model_data[var_name],
+            mask,
+            spatial=spatial,
+            edge_weighted=edge_weighted,
+            time_slice=time_slice,
+            temporal=temporal,
+            return_time_series=return_time_series,
+        )
+    return result
+
+
 ###################### DATA HANDELING ######################
+
+def normalize_monthly_time(da):
+    """Normalize the time coordinate of a monthly DataArray to first-of-month.
+
+    AeroCom models use different timestamp conventions for monthly averages:
+    - mid-month  (e.g. 2010-01-16): represents January 2010
+    - end-of-month (e.g. 2010-01-31): represents January 2010
+    - next-month-start (e.g. 2010-02-01 for January): represents January 2010
+
+    All three are mapped to the first day of the represented month (2010-01-01).
+    This ensures consistent time coordinates when dividing DataArrays from
+    different variables or models (e.g. AOD / load for MEC, or abs / AOD for SSA).
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Monthly data with a 'time' dimension using datetime64[ns] coordinates.
+
+    Returns
+    -------
+    xr.DataArray
+        Same data with time coordinate normalised to first-of-month.
+    """
+    import pandas as pd
+
+    if 'time' not in da.dims or len(da.time) == 0:
+        return da
+
+    times = pd.DatetimeIndex(da.time.values)
+
+    # Detect "next-month-start" convention:
+    # All timestamps land on the 1st (possibly with sub-day offsets), and the
+    # series covers exactly 12 months ending in January of the following year
+    # (e.g. Feb 2010 → Jan 2011 represents Jan–Dec 2010).
+    # Files with 13 or more time steps are NOT shifted — the extra boundary
+    # value is simply excluded by the time_slice in regional_aggregate.
+    all_first = all(t.day == 1 for t in times)
+    is_next_month_start = (
+        all_first
+        and len(times) == 12
+        and times[-1].year == times[0].year + 1
+        and times[-1].month == 1
+    )
+
+    if is_next_month_start:
+        # Shift back one month and truncate to midnight.
+        new_times = [pd.Timestamp(t.year, t.month, 1) - pd.DateOffset(months=1) for t in times]
+    else:
+        # Mid-month, end-of-month, or start-of-month with sub-day offsets:
+        # truncate to midnight of the 1st of the same month.
+        new_times = [pd.Timestamp(t.year, t.month, 1) for t in times]
+
+    return da.assign_coords(
+        time=pd.DatetimeIndex(new_times).values.astype('datetime64[ns]')
+    )
+
 
 def convert_cftime_to_datetime(data_set):
 
