@@ -4,11 +4,11 @@
 # CONFIGURATION
 # ==========================================
 # Replace with your actual server username and hostname
-SERVER="user@your_server_address"
-DEST_DIR="Data/AP32026"
+SERVER="j.zhang3@vu.nl@aerocom-users.met.no"
+DEST_DIR="Data/AP3_2026/"
 
 # Base paths 
-PATH_AP3_2019="/metno/aerocom-users-database/AEROCOM-PHASE-III-CTRL2018"
+PATH_AP3_2019="/metno/aerocom-users-database/AEROCOM-PHASE-III-2019"
 PATH_AP3="/metno/aerocom-users-database/AEROCOM-PHASE-III"
 
 # ==========================================
@@ -59,43 +59,37 @@ MODELS=(
 # ==========================================
 # Create destination directory on local HPC
 mkdir -p "$DEST_DIR"
-
 for model in "${MODELS[@]}"; do
+    echo "========================================"
     echo "Processing model: $model"
-    
-    remote_dir=""
 
-    # 1. Check AP3 2019 path first
-    if ssh -q "$SERVER" "[ -d \"$PATH_AP3_2019/$model/renamed\" ]"; then
-        remote_dir="$PATH_AP3_2019/$model/renamed"
-        echo " -> Target located in AP3 2019 path."
-        
-    # 2. Fall back to AP3 path if the first fails
-    elif ssh -q "$SERVER" "[ -d \"$PATH_AP3/$model/renamed\" ]"; then
-        remote_dir="$PATH_AP3/$model/renamed"
-        echo " -> Target located in AP3 fallback path."
-        
-    # 3. Warning if completely missing
-    else
-        echo " -> [WARNING] Model folder missing in both AP3 2019 and AP3 paths. Skipping."
-        echo "----------------------------------------"
-        continue
-    fi
+    # NEW: Define and create the model-specific target subdirectory locally
+    LOCAL_MODEL_DIR="${DEST_DIR}/${model}"
+    mkdir -p "$LOCAL_MODEL_DIR"
 
-    # 4. Transfer Variables
     for var in "${VARIABLES[@]}"; do
-        # We use -q for quiet scp, redirect error to /dev/null, and capture the exit status.
-        scp -q "${SERVER}:\"${remote_dir}/*${var}*2010*\"" "${DEST_DIR}/" 2>/dev/null
-        
-        # If scp returns anything other than 0, the transfer failed (usually because the file is missing)
-        if [ $? -ne 0 ]; then
-            echo "    -> [MISSING] Variable '$var' not found for year 2010."
+        # Build the two potential remote path strings
+        SRC_PATH_2019="${SERVER}:${PATH_AP3_2019}/${model}/renamed/*${var}*2010*.nc"
+        SRC_PATH_AP3="${SERVER}:${PATH_AP3}/${model}/renamed/*${var}*2010*.nc"
+
+        # 1. Direct attempt from AP3 2019 (Saves directly to model subfolder)
+        scp "$SRC_PATH_2019" "${LOCAL_MODEL_DIR}/"
+
+        if [ $? -eq 0 ]; then
+            echo "    -> [COPIED] '$var' successfully pulled from AP3 2019."
         else
-            echo "    -> [COPIED] Variable '$var' transferred successfully."
+            # 2. Fall back to old AP3 path directly if first attempt failed
+            scp -q "$SRC_PATH_AP3" "${LOCAL_MODEL_DIR}/" 2>/dev/null
+
+            if [ $? -eq 0 ]; then
+                echo "    -> [COPIED] '$var' successfully pulled from AP3 Fallback."
+            else
+                # 3. Warning if completely missing from both target locations
+                echo "    -> [WARNING/MISSING] Variable '$var' (2010) failed or path does not exist in either server root."
+            fi
         fi
     done
-    
-    echo "----------------------------------------"
 done
 
-echo "Data transfer complete."
+echo "========================================"
+echo "Data transfer loop completed."

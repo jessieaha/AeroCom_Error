@@ -5,6 +5,17 @@ FRdM, 2nd of July 2024 """
 
 ###################### IMPORT MODULES ######################
 
+import sys
+from pathlib import Path
+
+# Add parent directory to sys.path to enable proper imports
+script_dir = Path(__file__).parent
+project_root = script_dir.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+if str(script_dir) not in sys.path:
+    sys.path.insert(0, str(script_dir))
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -70,21 +81,24 @@ models_AAOD = ['CAM5.3-Oslo_AP3-CTRL2016-PD', 'CAM5_CTRL2016', 'CAM5-ATRAS_AP3-C
                'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010', 'INCA_AP3-CTRL', 'SPRINTARS-T213_AP3-CTRL2016-PD',
                'MIROC-SPRINTARS_AP3-CTRL', 'TM5_AP3-CTRL2016', 'TM5-met2010_AP3-CTRL2019']
 
-path_original = '/Users/fionaromandemiguel/Library/CloudStorage/OneDrive-VrijeUniversiteitAmsterdam/VU/data/var_files/original/0average/'
-path_regrid = '/Users/fionaromandemiguel/Library/CloudStorage/OneDrive-VrijeUniversiteitAmsterdam/VU/data/var_files/regrid/0average/'
+save_path_average = f'{project_root}/Data/var_files/original/average/'
 
-emissions = {'africa': functions.open_pickle_files(path_original, 'emi_total.pickle')['africa'],
-             'amazon': functions.open_pickle_files(path_original, 'emi_total.pickle')['amazon']}
-emi_BC_OA = {'africa': functions.open_pickle_files(path_regrid, 'emi_BC_OA.pickle')['africa'],
-             'amazon': functions.open_pickle_files(path_regrid, 'emi_BC_OA.pickle')['amazon']}
-lifetime = {'africa': functions.open_pickle_files(path_original, 'lifetime.pickle')['africa'],
-             'amazon': functions.open_pickle_files(path_original, 'lifetime.pickle')['amazon']}
-lifetime_BC_OA = {'africa': functions.open_pickle_files(path_regrid, 'lifetime_BC_OA.pickle')['africa'],
-                  'amazon': functions.open_pickle_files(path_regrid, 'lifetime_BC_OA.pickle')['amazon']}
-MEC = {'africa': functions.open_pickle_files(path_original, 'MEC.pickle')['africa'],
-       'amazon': functions.open_pickle_files(path_original, 'MEC.pickle')['amazon']}
-MAC = {'africa': functions.open_pickle_files(path_regrid, 'MAC.pickle')['africa'],
-       'amazon': functions.open_pickle_files(path_regrid, 'MAC.pickle')['amazon']}
+emissions = {'africa': functions.open_pickle_files(save_path_average, 'emi_total.pickle')['africa'],
+             'amazon': functions.open_pickle_files(save_path_average, 'emi_total.pickle')['amazon']}
+emi_BC_OA = {'africa': functions.open_pickle_files(save_path_average, 'emi_BC_OA.pickle')['africa'],
+             'amazon': functions.open_pickle_files(save_path_average, 'emi_BC_OA.pickle')['amazon']}
+lifetime = {'africa': functions.open_pickle_files(save_path_average, 'lifetime.pickle')['africa'],
+             'amazon': functions.open_pickle_files(save_path_average, 'lifetime.pickle')['amazon']}
+lifetime_BC_OA = {'africa': functions.open_pickle_files(save_path_average, 'lifetime_BC_OA.pickle')['africa'],
+                  'amazon': functions.open_pickle_files(save_path_average, 'lifetime_BC_OA.pickle')['amazon']}
+MEC = {'africa': functions.open_pickle_files(save_path_average, 'MEC.pickle')['africa'],
+       'amazon': functions.open_pickle_files(save_path_average, 'MEC.pickle')['amazon']}
+MAC = {'africa': functions.open_pickle_files(save_path_average, 'MAC.pickle')['africa'],
+       'amazon': functions.open_pickle_files(save_path_average, 'MAC.pickle')['amazon']}
+od550 = {'africa': functions.open_pickle_files(save_path_average, 'od550cs.pickle')['africa'],
+         'amazon': functions.open_pickle_files(save_path_average, 'od550cs.pickle')['amazon']}
+abs550 = {'africa': functions.open_pickle_files(save_path_average, 'abs550.pickle')['africa'],
+          'amazon': functions.open_pickle_files(save_path_average, 'abs550.pickle')['amazon']}
 
 # constrained values
 emissions_c = {'africa': 2.83693*1e-10, 'amazon': 2.11718*1e-10}                   # units: kg/m2 s
@@ -149,11 +163,11 @@ plt.show(block=True)
 # plt.legend()
 # plt.title('AOD error regression')
 
-abs550_am_f = np.zeros(len(models_list))
-abs550_af_f = np.zeros(len(models_list))
-for i in range(len(models_list)):
-    abs550_af_f[i] = error_af['e_AOD'][models_list[i]]
-    abs550_am_f[i] = error_am['e_AOD'][models_list[i]]
+abs550_am_f = np.zeros(len(models_AAOD))
+abs550_af_f = np.zeros(len(models_AAOD))
+for i in range(len(models_AAOD)):
+    abs550_af_f[i] = error_af['e_AOD'][models_AAOD[i]]
+    abs550_am_f[i] = error_am['e_AOD'][models_AAOD[i]]
 
 abs550_am_q = np.array([-0.0045832940426074, -0.0019877324961679, -0.0022415290123654, 0.0207292126023339, 0.0421861643855045, 0.0031500184440183, 0.056398838022131, 0.0191209121602465, 0.0208035619461106, -0.0063672304408323, 0.0098030935379153, 0.0078442472390775, -0.0092986559637063, -0.0098670547936436, -0.0084124919938926, 0.0070904368066358, 0.0100332410537766])
 model_am = LinearRegression().fit(abs550_am_f.reshape(-1, 1), abs550_am_q)
