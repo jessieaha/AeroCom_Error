@@ -5,15 +5,16 @@ BEFORE RUNNING THIS FILE, CHECK:
     - WHERE THE FILES ARE BEING SAVED (save_path / save_path_average)
     - WHICH FILES ARE BEING OPENED (path_original / path_regrid)
 
-FRdM, 27th of September 2024 """
+"""
 
 
 ###################### IMPORT MODULES ######################
 
+from copyreg import pickle
 import sys
 import os
 from pathlib import Path
-
+import pickle
 # Add parent directory to sys.path to enable proper imports
 script_dir = Path(__file__).parent
 project_root = script_dir.parent
@@ -33,76 +34,156 @@ importlib.reload(functions)
 ###################### DEFINE STUFF ######################
 
 # YEAR = 2010
-temporal = 'monthly'
-models_AOD = ['CAM5.3-Oslo_AP3-CTRL2016-PD', 'ECHAM6-HAM2_AP3-CTRL2016-PD', 'ECHAM6-SALSA_CTRL2016-PD',
-              'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'TM5_AP3-CTRL2016',
-              'CAM5-ATRAS_AP3-CTRL',  'EC-Earth3-AerChem-met2010_AP3-CTRL2019', 'ECHAM6.3-HAM2.3-met2010_AP3-CTRL',
-              'ECHAM6.3-SALSA2.0-met2010_AP3-CTRL', 'GEOS-i33p2-met2010_AP3-CTRL', 'GFDL-AM4-met2010_AP3-CTRL',
-              'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010', 'INCA_AP3-CTRL',
-              'NorESM2-met2010_AP3-CTRL', 'MIROC-SPRINTARS_AP3-CTRL', 'TM5-met2010_AP3-CTRL2019']
-models_AAOD = ['CAM5.3-Oslo_AP3-CTRL2016-PD', 'CAM5_CTRL2016', 'CAM5-ATRAS_AP3-CTRL',
-               'EC-Earth3-AerChem-met2010_AP3-CTRL2019', 'ECHAM6-HAM2_AP3-CTRL2016-PD',
-               'ECHAM6.3-HAM2.3-met2010_AP3-CTRL', 'ECHAM6-SALSA_CTRL2016-PD',  'ECHAM6.3-SALSA2.0-met2010_AP3-CTRL',
-               'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'GEOS-i33p2-met2010_AP3-CTRL', 'GFDL-AM4-met2010_AP3-CTRL',
-               'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010', 'INCA_AP3-CTRL', 'SPRINTARS-T213_AP3-CTRL2016-PD',
-               'MIROC-SPRINTARS_AP3-CTRL', 'TM5_AP3-CTRL2016', 'TM5-met2010_AP3-CTRL2019']
-models_3hourly = ['CAM5.3-Oslo_AP3-CTRL2016-PD', 'CAM5_CTRL2016', 'ECHAM6-SALSA_CTRL2016-PD', 'ECHAM6-HAM2_AP3-CTRL2016-PD',
-                  'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'GEOS-i33p2-met2010_AP3-CTRL',
-                  'SPRINTARS-T213_AP3-CTRL2016-PD', 'MIROC-SPRINTARS_AP3-CTRL', 'TM5_AP3-CTRL2016']
-###double check 
-# Models in AOD but missing from AAOD
-missing_from_aaod = list(set(models_AOD) - set(models_AAOD))
-print("Missing from AAOD:", missing_from_aaod)
-# Output: ['GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 'NorESM2-met2010_AP3-CTRL']
+temporal = '3hourly'
+save_pickle = True
+save_nc = True
 
-# Models in AAOD but missing from AOD (Bonus check!)
-missing_from_aod = list(set(models_AAOD) - set(models_AOD))
-print("Missing from AOD:", missing_from_aod)
-###########################################
-# Output: ['SPRINTARS-T213_AP3-CTRL2016-PD', 'CAM5_CTRL2016']
-# path_regrid = './Data/AEROCOM_III_regrid/{}/aerocom3_{}_{}_{}__{}.nc'
-path_original = './Data/AEROCOM_III/{}/aerocom3_{}_{}_{}_2010_{}.nc'
+if temporal == 'monthly':
+    print('Getting monthly data')
+    models_AOD = ['CAM5.3-Oslo_AP3-CTRL2016-PD', 'ECHAM6-HAM2_AP3-CTRL2016-PD', 'ECHAM6-SALSA_CTRL2016-PD',
+                'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'TM5_AP3-CTRL2016',
+                'CAM5-ATRAS_AP3-CTRL',  'EC-Earth3-AerChem-met2010_AP3-CTRL2019', 'ECHAM6.3-HAM2.3-met2010_AP3-CTRL',
+                'ECHAM6.3-SALSA2.0-met2010_AP3-CTRL', 'GEOS-i33p2-met2010_AP3-CTRL', 'GFDL-AM4-met2010_AP3-CTRL',
+                'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010', 'INCA_AP3-CTRL',
+                'NorESM2-met2010_AP3-CTRL', 'MIROC-SPRINTARS_AP3-CTRL', 'TM5-met2010_AP3-CTRL2019']
+    models_AAOD = ['CAM5.3-Oslo_AP3-CTRL2016-PD', 'CAM5_CTRL2016', 'CAM5-ATRAS_AP3-CTRL',
+                'EC-Earth3-AerChem-met2010_AP3-CTRL2019', 'ECHAM6-HAM2_AP3-CTRL2016-PD',
+                'ECHAM6.3-HAM2.3-met2010_AP3-CTRL', 'ECHAM6-SALSA_CTRL2016-PD',  'ECHAM6.3-SALSA2.0-met2010_AP3-CTRL',
+                'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'GEOS-i33p2-met2010_AP3-CTRL', 'GFDL-AM4-met2010_AP3-CTRL',
+                'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010', 'INCA_AP3-CTRL', 'SPRINTARS-T213_AP3-CTRL2016-PD',
+                'MIROC-SPRINTARS_AP3-CTRL', 'TM5_AP3-CTRL2016', 'TM5-met2010_AP3-CTRL2019']
+    models_3hourly = ['CAM5.3-Oslo_AP3-CTRL2016-PD', 'CAM5_CTRL2016', 'ECHAM6-SALSA_CTRL2016-PD', 'ECHAM6-HAM2_AP3-CTRL2016-PD',
+                    'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'GEOS-i33p2-met2010_AP3-CTRL',
+                    'SPRINTARS-T213_AP3-CTRL2016-PD', 'MIROC-SPRINTARS_AP3-CTRL', 'TM5_AP3-CTRL2016']
+    
+    VARIABLES = (
+        "abs550aer", "depbc", "depdust", "depoa", "depso2", "depso4", "depss",
+        "emibc", "emidust", "emioa", "emiso2", "emiss", "loadbc", "loaddust",
+        "loadoa", "loadso2", "loadso4", "loadss", "od440aer", "od550aer",
+        "od870aer", "od865aer", "od550bc", "od550dust", "od550oa", "od550so4", "od550ss"
+    )
+    ###double check 
+    # Models in AOD but missing from AAOD
+    missing_from_aaod = list(set(models_AOD) - set(models_AAOD))
+    print("Missing from AAOD:", missing_from_aaod)
+    # Output: ['GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 'NorESM2-met2010_AP3-CTRL']
 
-save_path = f'./Data/var_files/original/{temporal}/'
-save_path_average = './Data/var_files/original/average/'
+    # Models in AAOD but missing from AOD (Bonus check!)
+    missing_from_aod = list(set(models_AAOD) - set(models_AOD))
+    print("Missing from AOD:", missing_from_aod)
+    ###########################################
+    # Output: ['SPRINTARS-T213_AP3-CTRL2016-PD', 'CAM5_CTRL2016']
+    # path_regrid = './Data/AEROCOM_III_regrid/{}/aerocom3_{}_{}_{}__{}.nc'
+    path_original = './Data/AEROCOM_III/{}/aerocom3_{}_{}_{}_2010_{}.nc'
+
+    save_path = f'./Data/var_files/original/{temporal}/'
+    save_path_average = './Data/var_files/original/average/'
 
 
-###################### CALCULATE VARIABLES AND SAVE FILES ######################
+    ###################### CALCULATE VARIABLES AND SAVE FILES ######################
 
-# for every model, get the whole dictionary containing only the data we want
+    # for every model, get the whole dictionary containing only the data we want
 
-# GET monthly AAOD data
-emi = aerocom_data.get_data(path_original, models_AOD, 'emi_total')
-functions.save_pickle_files(save_path, 'emi_total.pickle', emi)
-emi_BC_OA = aerocom_data.get_data(path_original, models_AAOD, 'emi_BC_OA',od550_freq = temporal, odother_freq = temporal, abs550_freq = temporal)
-functions.save_pickle_files(save_path, 'emi_BC_OA.pickle', emi_BC_OA, )
-emi_BC = aerocom_data.get_data(path_original, models_AAOD, 'emi_bc',od550_freq = temporal, odother_freq = temporal, abs550_freq = temporal)
-functions.save_pickle_files(save_path, 'emi_BC.pickle', emi_BC)
-emi_OA = aerocom_data.get_data(path_original, models_AAOD, 'emi_oa',od550_freq = temporal, odother_freq = temporal, abs550_freq = temporal)
-functions.save_pickle_files(save_path, 'emi_OA.pickle', emi_OA)
-print('emissions done')
+    # GET monthly AAOD data
+    emi = aerocom_data.get_data(path_original, models_AOD, 'emi_total')
+    functions.save_pickle_files(save_path, 'emi_total.pickle', emi)
+    emi_BC_OA = aerocom_data.get_data(path_original, models_AAOD, 'emi_BC_OA',od550_freq = temporal, odother_freq = temporal, abs550_freq = temporal)
+    functions.save_pickle_files(save_path, 'emi_BC_OA.pickle', emi_BC_OA, )
+    emi_BC = aerocom_data.get_data(path_original, models_AAOD, 'emi_bc',od550_freq = temporal, odother_freq = temporal, abs550_freq = temporal)
+    functions.save_pickle_files(save_path, 'emi_BC.pickle', emi_BC)
+    emi_OA = aerocom_data.get_data(path_original, models_AAOD, 'emi_oa',od550_freq = temporal, odother_freq = temporal, abs550_freq = temporal)
+    functions.save_pickle_files(save_path, 'emi_OA.pickle', emi_OA)
+    print('emissions done')
 
-# GET monthly AOD data
-load = aerocom_data.get_data(path_original, models_AOD, 'load_total')
-functions.save_pickle_files(save_path, 'load_total.pickle', load)
-load_BC_OA = aerocom_data.get_data(path_original, models_AAOD, 'load_BC_OA')
-functions.save_pickle_files(save_path, 'load_BC_OA.pickle', load_BC_OA)
-load_BC = aerocom_data.get_data(path_original, models_AAOD, 'load_bc')
-functions.save_pickle_files(save_path, 'load_BC.pickle', load_BC)
-load_OA = aerocom_data.get_data(path_original, models_AAOD, 'load_oa')
-functions.save_pickle_files(save_path, 'load_OA.pickle', load_OA)
-print('load done')
+    # GET monthly AOD data
+    load = aerocom_data.get_data(path_original, models_AOD, 'load_total')
+    functions.save_pickle_files(save_path, 'load_total.pickle', load)
+    load_BC_OA = aerocom_data.get_data(path_original, models_AAOD, 'load_BC_OA')
+    functions.save_pickle_files(save_path, 'load_BC_OA.pickle', load_BC_OA)
+    load_BC = aerocom_data.get_data(path_original, models_AAOD, 'load_bc')
+    functions.save_pickle_files(save_path, 'load_BC.pickle', load_BC)
+    load_OA = aerocom_data.get_data(path_original, models_AAOD, 'load_oa')
+    functions.save_pickle_files(save_path, 'load_OA.pickle', load_OA)
+    print('load done')
 
-# # GET 3hourly AOD data   
-# what is optical depth 1
-od550 = aerocom_data.get_data(path_original, models_AOD, 'AOD550', od550_freq=temporal)
-# od550cs = aerocom_data.get_data(path_original, models_AOD, 'AOD550')
-functions.save_pickle_files(save_path, 'od550.pickle', od550)
-od_other = aerocom_data.get_data(path_original, models_AOD, 'AOD440', od550_freq=temporal, odother_freq=temporal)
-functions.save_pickle_files(save_path, 'od_other.pickle', od_other)
-abs550 = aerocom_data.get_data(path_original, models_AAOD, 'AAOD550', od550_freq=temporal, odother_freq=temporal, abs550_freq=temporal)
-functions.save_pickle_files(save_path, 'abs550.pickle', abs550)
-print('optical depth done')
+    # # GET 3hourly AOD data   
+    # what is optical depth 1
+    od550 = aerocom_data.get_data(path_original, models_AOD, 'AOD550', od550_freq=temporal)
+    # od550cs = aerocom_data.get_data(path_original, models_AOD, 'AOD550')
+    functions.save_pickle_files(save_path, 'od550.pickle', od550)
+    od_other = aerocom_data.get_data(path_original, models_AOD, 'AOD440', od550_freq=temporal, odother_freq=temporal)
+    functions.save_pickle_files(save_path, 'od_other.pickle', od_other)
+    abs550 = aerocom_data.get_data(path_original, models_AAOD, 'AAOD550', od550_freq=temporal, odother_freq=temporal, abs550_freq=temporal)
+    functions.save_pickle_files(save_path, 'abs550.pickle', abs550)
+    print('optical depth done')
+elif temporal == '3hourly':
+    print('Getting 3hourly data')
+    var_3hour = (
+    "abs550aer", "od440aer", "od550aer", "od870aer", "od865aer", "od550bc", "od550dust", "od550oa", "od550so4", "od550ss"
+)
+    models_primary = [
+        'ECHAM6-SALSA_CTRL2016-PD',
+        'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD',
+        'ECMWF-IFS-CY45R1-CAMS-CTRL-met2010_AP3-CTRL',
+        'ECMWF-IFS-CY46R1-CAMS-CTRL-met2010_AP3-CTRL',
+        'GEOS-Chem-v11-01_AP3-CTRL2016-PD',
+        'HadGEM3-GA7.1_AP3-CTRL2016-PD',
+        'IMPACT_CTRL2016',
+        'MIROC-SPRINTARS_AP3-CTRL',
+        'SPRINTARS-T213_AP3-CTRL2016-PD',
+        'TM5_AP3-CTRL2016'
+    ]
+    dir_primary = "./Data/AP3_2026"
+
+    models_secondary_unique = [
+        'CAM5.3-Oslo_AP3-CTRL2016-PD',
+        'CAM5_CTRL2016',
+        'ECHAM6-HAM2_AP3-CTRL2016-PD',
+        'GEOS-i33p2-met2010_AP3-CTRL'
+    ]
+    dir_secondary = "./Data/AEROCOM_III"
+
+    # 2. Load data from both directories separately
+    print("Loading Primary Data (AP3_2026)...")
+    data_primary = aerocom_data.load_all_model_data(
+        base_dir=dir_primary, 
+        models=models_primary, 
+        variables=var_3hour,
+        temporal='3hourly'
+    )
+
+    print("\nLoading Secondary Unique Data (AEROCOM_III)...")
+    data_secondary = aerocom_data.load_all_model_data(
+        base_dir=dir_secondary, 
+        models=models_secondary_unique, 
+        variables=var_3hour,
+        temporal=temporal
+    )
+
+    # 3. Merge the two dictionaries into one master dataset
+    # (Using Python dictionary unpacking to combine them instantly)
+    all_data = {**data_primary, **data_secondary}
+    all_models = models_primary + models_secondary_unique
+
+    print("\n=============================================")
+    print(f" Master dataset created with {len(all_models)} total models.")
+    print("=============================================\n")
+
+    if save_pickle:
+        output_base_dir = './Data/var_files/original/3hourly/'
+        os.makedirs(output_base_dir, exist_ok=True)
+        print(f"\n📦 Saving entire dataset to a single PICKLE file in {output_base_dir} ...")
+        out_file = os.path.join(output_base_dir, f"{temporal}_aerocom_data.pickle")
+        
+        try:
+            with open(out_file, 'wb') as f:
+                pickle.dump(all_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"✅ Save Complete: Master dictionary saved to {out_file}")
+        except Exception as e:
+            print(f"❌ Error saving pickle file: {e}")
+    if save_nc:
+        aerocom_data.save_model_data_to_netcdf(all_data, output_base_dir="./Data/AP3_processed_3hourly")
+
 
 # prect = aerocom_data.get_data(path_original, models_AOD, 'prect')
 # functions.save_pickle_files(save_path, 'prect.pickle', prect)

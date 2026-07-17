@@ -1,0 +1,270 @@
+"""
+Script to convert POLDER GRASP NetCDF files to Parquet, and subsequently
+collocate AP3 Model data (AOD/AAOD) to the observational spatial-temporal tracks.
+
+Author: Jessie Zhang 07 2026 
+"""
+
+import os
+import glob
+import pandas as pd
+import numpy as np
+import xarray as xr
+from scipy.interpolate import RegularGridInterpolator
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+# =============================================================================
+# SETTINGS & CONFIGURATIONS
+# =============================================================================
+YEAR = 2010
+ROUND_TIME = '3h'  
+spatial_res_lat = 1.0          # Choose your grid box size (e.g., 0.1, 0.25, 0.5, 1.0)
+spatial_res_lon = 1.0          # Choose your grid box size (e.g., 0.1, 0.25, 0.5, 1.0)
+project_root = '.'  # Set your project root directory path here
+
+# control flags
+Convert_POLDER_Parquet = False  # True: Convert raw NC files to Parquet | False: Direct load existing parquets
+spatial_temp_resample = True       # True: Aggregate observations inside the same space-time window
+temporal_err = 'sd'            # Error calculation mode: 'sd' (standard deviation) or 'range' (max - min)
+
+polder_dir = f'{project_root}/Data/POLDER_GRASP'
+model_dir = f'{project_root}/Data/AP3_processed_3hourly/'     
+output_folder = f'{project_root}/Data/AP3_POLDER_Collocated'
+os.makedirs(output_folder, exist_ok=True)
+if spatial_temp_resample:
+    output_parquet = f'{output_folder}/POLDER_GRASP_coloc_{ROUND_TIME}_AP3_{YEAR}_lon0_{spatial_res_lon*10}_lat0_{spatial_res_lat*10}.parquet'
+else:
+    output_parquet = f'{output_folder}/POLDER_GRASP_coloc_{YEAR}.parquet'
+# Mapping input NetCDF variables to final DataFrame columns
+obs_rename_map = {
+    'od440aer': 'AOD_440',
+    'abs550aer': 'AAOD_550',
+    'od550aer': 'AOD_550',
+    'od865aer': 'AOD_870',
+    'od870aer': 'AOD_870'
+}
+
+# =============================================================================
+# STEP 1 & 2: READ/LOAD POLDER TRACKING DATA
+# =============================================================================
+df_list = []
+
+if Convert_POLDER_Parquet:
+    print("--- [STEP 1 & 2] CONVERTING RAW POLDER NC FILES TO PARQUET ---")
+    polder_nc_files = glob.glob(os.path.join(polder_dir, f'*{YEAR}*.nc'))
+    if not polder_nc_files:
+        raise FileNotFoundError(f"No valid POLDER NetCDF files found in {polder_dir} containing '{YEAR}'.")
+        
+    for nc_file in sorted(polder_nc_files):
+        parq_file = nc_file.replace('.nc', '.parquet')
+        print(f"Processing & Converting: {os.path.basename(nc_file)}")
+        try:
+            with xr.open_dataset(nc_file) as ds:
+                df = ds.to_dataframe().reset_index()
+                if 'data_length' in df.columns:
+                    df = df.drop(columns=['data_length'])
+                
+                rename_dict = {k: v for k, v in obs_rename_map.items() if k in df.columns}
+                df = df.rename(columns=rename_dict)
+                df = df.dropna(subset=['longitude', 'latitude', 'time'])
+                
+                df.to_parquet(parq_file, index=False)
+                df_list.append(df)
+        except Exception as e:
+            print(f"  ❌ Error processing {nc_file}: {e}")
+else:
+    print("--- [STEP 1 & 2] BYPASSING CONVERSION: LOADING EXISTING PARQUETS ---")
+    polder_parq_files = glob.glob(os.path.join(polder_dir, f'*{YEAR}*.parquet'))
+    # Safety Check: filter out the master collocation summary file if it sits in the same directory
+    polder_parq_files = [f for f in polder_parq_files if "coloc" not in os.path.basename(f)]
+    
+    if not polder_parq_files:
+        raise FileNotFoundError(f"No pre-existing POLDER Parquet files found in {polder_dir} matching '{YEAR}'.")
+        
+    for parq_file in sorted(polder_parq_files):
+        print(f"Loading Parquet track: {os.path.basename(parq_file)}")
+        try:
+            df = pd.read_parquet(parq_file)
+            df_list.append(df)
+        except Exception as e:
+            print(f"  ❌ Error loading {parq_file}: {e}")
+
+# Combine all loaded data blocks
+df_obs = pd.concat(df_list, ignore_index=True)
+
+# Generate tracking rounded timestamps
+df_obs['rounded_time'] = pd.to_datetime(df_obs['time']).dt.round(ROUND_TIME)
+
+# =============================================================================
+# SPATIO-TEMPORAL AGGREGATION & ERROR METRICS ENGINE  
+# =============================================================================
+if spatial_temp_resample:
+    print(f"\n Resampling tracks to {ROUND_TIME} and Spatial Res: ({spatial_res_lat}x{spatial_res_lon} degrees)...")
+    
+    # Mathematically snap coordinates to the nearest custom grid center
+    df_obs['grid_lat'] = np.round(df_obs['latitude'] / spatial_res_lat) * spatial_res_lat
+    df_obs['grid_lon'] = np.round(df_obs['longitude'] / spatial_res_lon) * spatial_res_lon
+    
+    val_cols = list(dict.fromkeys(v for v in obs_rename_map.values() if v in df_obs.columns))
+    groupby_keys = ['rounded_time', 'grid_lat', 'grid_lon']
+    
+    if temporal_err == 'sd':
+        err_func = 'std'
+    elif temporal_err == 'range':
+        err_func = lambda x: (x.max() - x.min()) if x.notna().sum() > 1 else np.nan
+    else:
+        raise ValueError("Invalid setting for 'temporal_err'. Choose either 'sd' or 'range'.")
+        
+    # Aggregate data inside the custom spatio-temporal grid boxes
+    df_grouped_mean = df_obs.groupby(groupby_keys)[val_cols].mean()
+    df_grouped_err = df_obs.groupby(groupby_keys)[val_cols].agg(err_func)
+    df_grouped_err = df_grouped_err.rename(columns={c: f"{c}_{ROUND_TIME}_err" for c in val_cols})
+    
+    # Merge means and errors together
+    df_obs = pd.concat([df_grouped_mean, df_grouped_err], axis=1).reset_index()
+    
+    # Map back to standard headers so downstream engines know where to interpolate
+    df_obs = df_obs.rename(columns={'grid_lat': 'latitude', 'grid_lon': 'longitude'})
+    df_obs['time'] = df_obs['rounded_time']  
+
+# Final drop of any duplicated columns
+df_obs = df_obs.loc[:, ~df_obs.columns.duplicated()]
+unique_times = df_obs['rounded_time'].unique()
+
+print(f"Total aggregated tracking points to collocate: {len(df_obs)}")
+print(f"Total unique timesteps to match: {len(unique_times)}")
+
+if os.path.exists(output_parquet):
+    os.remove(output_parquet)
+
+# =============================================================================
+# STEP 3: DYNAMICALLY DISCOVER & LAZY-LOAD MODEL DATASETS
+# =============================================================================
+print("\n--- [STEP 3] DISCOVERING & LAZY-LOADING AP3 MODEL DATA ---")
+model_datasets = {}
+all_discovered_models = set()
+
+for var in obs_rename_map.keys():
+    var_files = glob.glob(os.path.join(model_dir, var, f"*_{var}_processed.nc"))
+    
+    for mod_file in var_files:
+        filename = os.path.basename(mod_file)
+        suffix = f"_{var}_processed.nc"
+        
+        if filename.endswith(suffix):
+            model_name = filename[:-len(suffix)]
+            if model_name not in model_datasets:
+                model_datasets[model_name] = {}
+            
+            all_discovered_models.add(model_name)
+            try:
+                model_datasets[model_name][var] = xr.open_dataset(mod_file, chunks='auto')
+                print(f" Loaded model pointer: {model_name} -> {var}")
+            except Exception as e:
+                print(f" Failed to load model file {mod_file}: {e}")
+                model_datasets[model_name][var] = None
+
+all_discovered_models = sorted(list(all_discovered_models))
+print(f"\n=> Total unique models found for collocation: {len(all_discovered_models)}")
+# =============================================================================
+# EXPORT MODEL NAMES TO A TEXT FILE
+# =============================================================================
+models_txt_path = os.path.join(polder_dir, f"discovered_models_{YEAR}.txt")
+with open(models_txt_path, "w") as f:
+    for m in all_discovered_models:
+        f.write(f"{m}\n")
+print(f"📝 Exported discovered model names to text file: {models_txt_path}")
+
+if os.path.exists(output_parquet):
+    os.remove(output_parquet)
+# =============================================================================
+# STEP 4: INTERPOLATION ENGINE
+# =============================================================================
+
+print("\n--- [STEP 4] RUNNING INTERPOLATION ENGINE ---")
+pqwriter = None
+
+for obs_time in unique_times:
+    mask = df_obs['rounded_time'] == obs_time
+    df_sub = df_obs[mask].copy()
+    
+    allocated_cols = set()
+    for model in all_discovered_models:
+        for var, out_var in obs_rename_map.items():
+            if model_datasets[model].get(var) is not None:
+                col_name = f"{out_var}_{model}"
+                if col_name not in allocated_cols:
+                    df_sub[col_name] = np.nan
+                    allocated_cols.add(col_name)
+
+    # Base track points from POLDER data (Longitude is 0 to 360)
+    base_points = np.vstack([df_sub['latitude'], df_sub['longitude']]).T
+
+    for model in all_discovered_models:
+        for var, out_var in obs_rename_map.items():
+            ds_model = model_datasets[model].get(var)
+            if ds_model is None:
+                continue
+                
+            try:
+                model_slice = ds_model[var].sel(time=obs_time, method='nearest').compute()
+                actual_time = pd.to_datetime(model_slice.time.values)
+                if abs((actual_time - obs_time).total_seconds()) > 86400 * 7:
+                    continue
+
+                # -------------------------------------------------------------------------
+                # DYNAMIC LONGITUDE ALIGNMENT CHECK
+                # -------------------------------------------------------------------------
+                # If the model uses a -180 to 180 grid, dynamically adjust evaluation points
+                if (model_slice['lon'].values < 0).any():
+                    model_points = base_points.copy()
+                    # model_points[:, 1] is the Longitude column. Wrap values > 180 to negative space.
+                    model_points[:, 1] = np.where(model_points[:, 1] > 180, model_points[:, 1] - 360, model_points[:, 1])
+                else:
+                    # Model already natively shares the 0 to 360 grid alignment
+                    model_points = base_points
+                # -------------------------------------------------------------------------
+
+                interpolator = RegularGridInterpolator(
+                    (model_slice['lat'].values, model_slice['lon'].values),
+                    model_slice.values,
+                    method='linear',
+                    bounds_error=False,
+                    fill_value=np.nan
+                )
+                
+                # Run the interpolator using the properly scaled coordinate system
+                df_sub[f"{out_var}_{model}"] = interpolator(model_points)
+                
+            except Exception as e:
+                pass
+
+    # Clean up processing loops and remove duplicate schema names
+    df_sub = df_sub.drop(columns=['rounded_time'], errors='ignore')
+    df_sub = df_sub.loc[:, ~df_sub.columns.duplicated()]
+
+    # Force specific column arrangement (time -> longitude -> latitude)
+    leading_cols = ['time', 'longitude', 'latitude']
+    existing_lead = [c for c in leading_cols if c in df_sub.columns]
+    remaining_cols = [c for c in df_sub.columns if c not in existing_lead]
+    df_sub = df_sub[existing_lead + remaining_cols]
+
+    if not df_sub.empty:
+        table = pa.Table.from_pandas(df_sub)
+        if pqwriter is None:
+            pqwriter = pq.ParquetWriter(output_parquet, table.schema, use_dictionary=True, compression='snappy')
+        pqwriter.write_table(table)
+
+if pqwriter:
+    pqwriter.close()
+
+for model_dict in model_datasets.values():
+    for ds in model_dict.values():
+        if ds is not None:
+            ds.close()
+
+print("\n=============================================")
+print(f"PROCESS COMPLETE!")
+print(f"Collocated Master Year File Saved to: {output_parquet}")
+print("=============================================\n")
