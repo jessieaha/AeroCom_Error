@@ -330,25 +330,66 @@ def _spatial_weights(da, mask, edge_weighted=False):
     return weights, region_mask
 
 
+def land_mask_from_cartopy(template, resolution='110m'):
+    """
+    Build a 0/1 land mask from the Cartopy Natural Earth land feature.
+
+    Returns 1 for land and 0 for ocean on the template lat/lon grid.  The
+    template may use either 0--360 or -180--180 longitude; the polygons are
+    tested in the -180--180 frame and mapped back to the original grid.
+    """
+    import numpy as np
+    import xarray as xr
+    import cartopy.feature as cfeature
+    from shapely.vectorized import contains
+    from shapely.ops import unary_union
+
+    lat = np.asarray(template.lat.values)
+    lon = np.asarray(template.lon.values)
+
+    # Natural Earth land shapes are defined on -180..180
+    lon_wrapped = (lon + 180.0) % 360.0 - 180.0
+    lon2d, lat2d = np.meshgrid(lon_wrapped, lat)
+
+    land = cfeature.NaturalEarthFeature('physical', 'land', resolution)
+    geoms = list(land.geometries())
+    if not geoms:
+        raise ValueError(f"No land geometries loaded from Natural Earth '{resolution}'.")
+
+    union = unary_union(geoms)
+    mask = contains(union, lon2d, lat2d).astype(float)
+
+    return xr.DataArray(
+        mask,
+        dims=('lat', 'lon'),
+        coords={'lat': lat, 'lon': lon},
+        name='land_mask',
+    )
+
+
 def _land_sea_mask(template, surface, land_mask=None, land_mask_path=None):
     """
     Return a 0/1 mask on the template grid for land or sea.
 
-    surface: 'land', 'sea', or 'all'
+    surface: 'land', 'sea', 'ocean', or 'all' (ocean is treated as sea)
     land_mask: xr.DataArray with 1=land, 0=sea (or fractional)
     land_mask_path: netCDF path; looks for lsm, land, or land_mask variables
     """
     if surface in (None, 'all'):
         return xr.ones_like(template)
 
+    # Accept 'ocean' as an alias for 'sea'
+    if surface == 'ocean':
+        surface = 'sea'
+
     if surface not in ('land', 'sea'):
-        raise ValueError("surface must be 'all', 'land', or 'sea'")
+        raise ValueError("surface must be 'all', 'land', 'sea', or 'ocean'")
 
     if land_mask is not None:
         lsm = land_mask
     elif land_mask_path is not None:
         with xr.open_dataset(land_mask_path) as ds:
-            for var in ('lsm', 'land', 'land_mask', 'LAND_MASK'):
+            for var in ('lsm', 'land', 'land_mask', 'LAND_MASK', 'landf'):
                 if var in ds:
                     lsm = ds[var].load()
                     break
@@ -362,11 +403,14 @@ def _land_sea_mask(template, surface, land_mask=None, land_mask_path=None):
             import regionmask
             land = regionmask.defined_regions.natural_earth_v5_0_0.land_110
             lsm = land.mask(template.lon, template.lat) == 0
-        except ImportError as exc:
-            raise ValueError(
-                "Land/sea masking requires land_mask, land_mask_path, or the "
-                "'regionmask' package."
-            ) from exc
+        except ImportError:
+            try:
+                lsm = land_mask_from_cartopy(template)
+            except Exception as exc:
+                raise ValueError(
+                    "Land/sea masking requires land_mask, land_mask_path, "
+                    "the 'regionmask' package, or cartopy+shapely."
+                ) from exc
 
     if not isinstance(lsm, xr.DataArray):
         lsm = xr.DataArray(lsm, dims=('lat', 'lon'), coords={'lat': template.lat, 'lon': template.lon})
@@ -568,8 +612,9 @@ def normalize_monthly_time(da):
     - mid-month  (e.g. 2010-01-16): represents January 2010
     - end-of-month (e.g. 2010-01-31): represents January 2010
     - next-month-start (e.g. 2010-02-01 for January): represents January 2010
+    - numeric year-month (e.g. 201001): represents January 2010
 
-    All three are mapped to the first day of the represented month (2010-01-01).
+    All are mapped to the first day of the represented month (2010-01-01).
     This ensures consistent time coordinates when dividing DataArrays from
     different variables or models (e.g. AOD / load for MEC, or abs / AOD for SSA).
 
@@ -588,7 +633,14 @@ def normalize_monthly_time(da):
     if 'time' not in da.dims or len(da.time) == 0:
         return da
 
-    times = pd.DatetimeIndex(da.time.values)
+    raw = da.time.values
+    if raw.dtype.kind in 'iuf' and np.all(raw > 100000) and np.all(raw < 999999):
+        # Numeric year-month convention (e.g. GEOS-i33p2 stores 201001 ... 201012)
+        years = (raw // 100).astype(int)
+        months = (raw % 100).astype(int)
+        times = pd.to_datetime([f'{y:04d}-{m:02d}-01' for y, m in zip(years, months)])
+    else:
+        times = pd.DatetimeIndex(raw)
 
     # Detect "next-month-start" convention:
     # All timestamps land on the 1st (possibly with sub-day offsets), and the

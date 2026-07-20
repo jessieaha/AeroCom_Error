@@ -10,9 +10,15 @@ import glob
 import pandas as pd
 import numpy as np
 import xarray as xr
+import cftime
 from scipy.interpolate import RegularGridInterpolator
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+# Reuse the central longitude normalization so every model shares the POLDER grid
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from py.aerocom_data import normalize_longitude
 
 # =============================================================================
 # SETTINGS & CONFIGURATIONS
@@ -222,23 +228,41 @@ for obs_time in unique_times:
                 continue
                 
             try:
-                model_slice = ds_model[var].sel(time=obs_time, method='nearest').compute()
-                actual_time = pd.to_datetime(model_slice.time.values)
-                if abs((actual_time - obs_time).total_seconds()) > 86400 * 7:
+                # Some models use non-standard calendars (e.g. noleap, julian). Convert
+                # the target POLDER time to the model's calendar before selection.
+                time_cal = ds_model['time'].encoding.get('calendar')
+                if time_cal:
+                    target_time = cftime.datetime(
+                        obs_time.year, obs_time.month, obs_time.day,
+                        obs_time.hour, obs_time.minute, obs_time.second,
+                        calendar=time_cal
+                    )
+                else:
+                    target_time = obs_time
+
+                model_slice = ds_model[var].sel(time=target_time, method='nearest').compute()
+                actual_time = np.asarray(model_slice.time.values).item()
+
+                # Robust time-difference check across standard and cftime calendars
+                if hasattr(actual_time, 'calendar'):
+                    obs_cftime = cftime.datetime(
+                        obs_time.year, obs_time.month, obs_time.day,
+                        obs_time.hour, obs_time.minute, obs_time.second,
+                        calendar=actual_time.calendar
+                    )
+                    time_diff = abs((obs_cftime - actual_time).total_seconds())
+                else:
+                    actual_time = pd.to_datetime(actual_time)
+                    time_diff = abs((actual_time - obs_time).total_seconds())
+
+                if time_diff > 86400 * 7:
                     continue
 
-                # -------------------------------------------------------------------------
-                # DYNAMIC LONGITUDE ALIGNMENT CHECK
-                # -------------------------------------------------------------------------
-                # If the model uses a -180 to 180 grid, dynamically adjust evaluation points
-                if (model_slice['lon'].values < 0).any():
-                    model_points = base_points.copy()
-                    # model_points[:, 1] is the Longitude column. Wrap values > 180 to negative space.
-                    model_points[:, 1] = np.where(model_points[:, 1] > 180, model_points[:, 1] - 360, model_points[:, 1])
-                else:
-                    # Model already natively shares the 0 to 360 grid alignment
-                    model_points = base_points
-                # -------------------------------------------------------------------------
+                # Normalize the model slice to the same 0-360 longitude grid as POLDER
+                model_slice = normalize_longitude(model_slice)
+                model_points = base_points.copy()
+                # Wrap any observation longitudes at 360 back to 0
+                model_points[:, 1] = np.mod(model_points[:, 1], 360.0)
 
                 interpolator = RegularGridInterpolator(
                     (model_slice['lat'].values, model_slice['lon'].values),
@@ -247,10 +271,10 @@ for obs_time in unique_times:
                     bounds_error=False,
                     fill_value=np.nan
                 )
-                
-                # Run the interpolator using the properly scaled coordinate system
+
+                # Run the interpolator on the normalized 0-360 grid
                 df_sub[f"{out_var}_{model}"] = interpolator(model_points)
-                
+
             except Exception as e:
                 pass
 

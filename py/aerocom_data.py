@@ -75,6 +75,39 @@ AE_870_MODELS = {
 # AEROCOM_III/MIROC-SPRINTARS_AP3-CTRL/aerocom3_MIROC-SPRINTARS_AP3-CTRL_od550aer_Column_2010_3hourly.nc
 # AEROCOM_III/TM5_AP3-CTRL2016/aerocom3_TM5_AP3-CTRL2016_od550aer_Column_2010_3hourly.nc
 # ==============================================================================
+# LONGITUDE NORMALIZATION
+# ==============================================================================
+def normalize_longitude(ds, lon_name='lon'):
+    """
+    Normalize longitude coordinates to a consistent 0-360 range and sort the
+    dataset along the longitude axis so that coordinates are monotonically
+    increasing. This is required for correct interpolation against the POLDER
+    0-360 grid and avoids gaps at the -180/180 anti-meridian.
+    """
+    if lon_name not in ds.coords:
+        return ds
+
+    lon = ds[lon_name].values
+    # Already in 0-360 and sorted -> nothing to do
+    if np.all(lon >= 0) and np.all(lon <= 360) and np.all(np.diff(lon) >= 0):
+        return ds
+
+    # Wrap any -180..180 values into 0..360
+    lon360 = np.mod(lon + 360.0, 360.0)
+
+    ds = ds.assign_coords({lon_name: lon360})
+    ds = ds.sortby(lon_name)
+
+    # Drop any duplicate longitudes that can appear after wrapping (e.g. 0 and 360)
+    lon_sorted = ds[lon_name].values
+    _, unique_idx = np.unique(lon_sorted, return_index=True)
+    if len(unique_idx) < len(lon_sorted):
+        ds = ds.isel({lon_name: unique_idx})
+
+    return ds
+
+
+# ==============================================================================
 # COORDINATE STANDARDIZATION ENGINE
 # ==============================================================================
 def standardize_dataset(ds, var_name):
@@ -106,7 +139,10 @@ def standardize_dataset(ds, var_name):
         
     # Squeeze out singleton dimensions (like level or height) to simplify analytical shapes
     ds = ds.squeeze()
-    
+
+    # Normalize longitude to a consistent 0-360 grid for POLDER interpolation
+    ds = normalize_longitude(ds)
+
     # Keep only standardized dimensions & the variable itself
     dims_to_keep = [d for d in ['lon', 'lat', 'time'] if d in ds.coords]
     
@@ -188,6 +224,24 @@ def load_all_model_data(base_dir, models, variables, temporal, standardize=True)
 # ==============================================================================
 # VECTORIZED DERIVED VARIABLE CALCULATOR
 # ==============================================================================
+def _get_dataarray(value, var_name):
+    """Extract a DataArray from a Dataset, or pass a DataArray through."""
+    if value is None:
+        return None
+    if isinstance(value, xr.DataArray):
+        return value
+    if isinstance(value, xr.Dataset):
+        if var_name in value.data_vars:
+            return value[var_name]
+        data_vars = list(value.data_vars)
+        if len(data_vars) == 1:
+            return value[data_vars[0]]
+        raise KeyError(
+            f"Could not extract '{var_name}' from dataset with variables {data_vars}"
+        )
+    raise TypeError(f"Unsupported type for {var_name}: {type(value)}")
+
+
 def calculate_derived_var(model_data, model_name, derived_var):
     """
     Calculates complex aerosol diagnostics (MEC, MAC, SSA, AE) directly on the 
@@ -201,55 +255,70 @@ def calculate_derived_var(model_data, model_name, derived_var):
     try:
         if derived_var == 'MEC':
             # MEC = AOD_550 / (total_load * 1e3)
-            od = model_data.get('od550aer')
+            od = _get_dataarray(model_data.get('od550aer'), 'od550aer')
             # Sum up loaded variables dynamically (ignoring missing species cleanly if needed)
-            loads = [model_data.get(k) for k in ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss'] if model_data.get(k) is not None]
-            if not od or not loads:
+            loads = [
+                _get_dataarray(model_data.get(k), k)
+                for k in ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss']
+                if model_data.get(k) is not None
+            ]
+            if od is None or not loads:
                 raise ValueError("Missing 'od550aer' or loading fields.")
             total_load = sum(loads)
             
-            mec = od['od550aer'] / (total_load * 1e3)
+            mec = od / (total_load * 1e3)
             return mec.to_dataset(name='MEC')
             
         elif derived_var == 'MAC':
             # MAC = AAOD_550 / (load_BC_OA * 1e3)
-            abs550 = model_data.get('abs550aer')
-            bc = model_data.get('loadbc')
-            oa = model_data.get('loadoa')
-            if not abs550 or not bc or not oa:
+            abs550 = _get_dataarray(model_data.get('abs550aer'), 'abs550aer')
+            bc = _get_dataarray(model_data.get('loadbc'), 'loadbc')
+            oa = _get_dataarray(model_data.get('loadoa'), 'loadoa')
+            if abs550 is None or bc is None or oa is None:
                 raise ValueError("Missing absorption 'abs550aer' or loads (loadbc/loadoa).")
                 
-            mac = abs550['abs550aer'] / ((bc['loadbc'] + oa['loadoa']) * 1e3)
+            mac = abs550 / ((bc + oa) * 1e3)
             return mac.to_dataset(name='MAC')
             
         elif derived_var == 'SSA':
             # SSA = 1 - (AAOD_550 / AOD_550)
-            abs550 = model_data.get('abs550aer')
-            od550 = model_data.get('od550aer')
-            if not abs550 or not od550:
+            abs550 = _get_dataarray(model_data.get('abs550aer'), 'abs550aer')
+            od550 = _get_dataarray(model_data.get('od550aer'), 'od550aer')
+            if abs550 is None or od550 is None:
                 raise ValueError("Missing 'abs550aer' or 'od550aer'.")
                 
-            ssa = 1.0 - (abs550['abs550aer'] / od550['od550aer'])
+            ssa = 1.0 - (abs550 / od550)
             return ssa.to_dataset(name='SSA')
             
         elif derived_var == 'AE':
             # AE = - log(AOD_550 / AOD_other) / log(550 / other)
-            od550 = model_data.get('od550aer')
+            od550 = _get_dataarray(model_data.get('od550aer'), 'od550aer')
             
             if model_name in AE_870_MODELS:
-                od_other = model_data.get('od870aer') or model_data.get('od865aer')
-                other_wavelength = 870 if model_data.get('od870aer') else 865
+                od870 = _get_dataarray(model_data.get('od870aer'), 'od870aer')
+                od865 = _get_dataarray(model_data.get('od865aer'), 'od865aer')
+                if od870 is not None:
+                    od_other = od870
+                    other_wavelength = 870
+                elif od865 is not None:
+                    od_other = od865
+                    other_wavelength = 865
+                else:
+                    od_other = None
             else:
-                od_other = model_data.get('od440aer')
+                od_other = _get_dataarray(model_data.get('od440aer'), 'od440aer')
                 other_wavelength = 440
                 
-            if not od550 or not od_other:
+            if od550 is None or od_other is None:
                 raise ValueError(f"Missing spectral bands to compute Angstrom Exponent for {model_name}.")
             
-            var_other = 'od870aer' if other_wavelength == 870 else ('od865aer' if other_wavelength == 865 else 'od440aer')
+            var_other = (
+                'od870aer' if other_wavelength == 870
+                else ('od865aer' if other_wavelength == 865 else 'od440aer')
+            )
             divisor = np.log(550.0 / other_wavelength)
             
-            ae = - np.log(od550['od550aer'] / od_other[var_other]) / divisor
+            ae = - np.log(od550 / od_other) / divisor
             return ae.to_dataset(name='AE')
             
     except Exception as e:
