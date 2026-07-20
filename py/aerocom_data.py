@@ -152,9 +152,10 @@ def load_all_model_data(base_dir, models, variables, temporal, standardize=True)
         for var in variables:
             # Flexible pattern matching fallback
             patterns = [
-                os.path.join(model_dir, f"*{var}*Column*2010*{temporal}*.nc"),      # Standard layout
-                # os.path.join(model_dir, f"*{var}*Column*2010*.nc"),                  # Generic frequency
-                os.path.join(base_dir, f"*{model}*{var}*Column*2010*{temporal}*.nc") # Flat directory structure fallback
+                os.path.join(model_dir, f"*{var}_*Column*2010*{temporal}*.nc"),      # Column variables (e.g., loads, optical)
+                os.path.join(model_dir, f"*{var}_*Surface*2010*{temporal}*.nc"),     # Surface variables (e.g., emissions, deposition)
+                os.path.join(base_dir, f"*{model}*{var}_*Column*2010*{temporal}*.nc"), # Flat directory fallback
+                os.path.join(base_dir, f"*{model}*{var}_*Surface*2010*{temporal}*.nc") # Flat directory fallback (Surface)
             ]
             
             filepath = None

@@ -27,6 +27,7 @@ project_root = '.'  # Set your project root directory path here
 Convert_POLDER_Parquet = False  # True: Convert raw NC files to Parquet | False: Direct load existing parquets
 spatial_temp_resample = True       # True: Aggregate observations inside the same space-time window
 temporal_err = 'sd'            # Error calculation mode: 'sd' (standard deviation) or 'range' (max - min)
+SUBSET_N_MONTHS = int(os.environ.get('SUBSET_N_MONTHS', 0)) or None  # For quick tests: process only first N months
 
 polder_dir = f'{project_root}/Data/POLDER_GRASP'
 model_dir = f'{project_root}/Data/AP3_processed_3hourly/'     
@@ -96,6 +97,12 @@ df_obs = pd.concat(df_list, ignore_index=True)
 # Generate tracking rounded timestamps
 df_obs['rounded_time'] = pd.to_datetime(df_obs['time']).dt.round(ROUND_TIME)
 
+# Optional subset for quick testing without overwriting the full-year output
+if SUBSET_N_MONTHS:
+    df_obs = df_obs[df_obs['rounded_time'].dt.month <= SUBSET_N_MONTHS].copy()
+    output_parquet = output_parquet.replace('.parquet', f'_subset{SUBSET_N_MONTHS}mo.parquet')
+    print(f"SUBSET MODE: processing first {SUBSET_N_MONTHS} month(s) -> {len(df_obs)} rows")
+
 # =============================================================================
 # SPATIO-TEMPORAL AGGREGATION & ERROR METRICS ENGINE  
 # =============================================================================
@@ -108,7 +115,11 @@ if spatial_temp_resample:
     
     val_cols = list(dict.fromkeys(v for v in obs_rename_map.values() if v in df_obs.columns))
     groupby_keys = ['rounded_time', 'grid_lat', 'grid_lon']
-    
+
+    # Treat zero AOD/AAOD as missing/invalid (aerosol optical depths are positive)
+    for col in val_cols:
+        df_obs[col] = df_obs[col].mask(df_obs[col] == 0)
+
     if temporal_err == 'sd':
         err_func = 'std'
     elif temporal_err == 'range':
@@ -120,7 +131,10 @@ if spatial_temp_resample:
     df_grouped_mean = df_obs.groupby(groupby_keys)[val_cols].mean()
     df_grouped_err = df_obs.groupby(groupby_keys)[val_cols].agg(err_func)
     df_grouped_err = df_grouped_err.rename(columns={c: f"{c}_{ROUND_TIME}_err" for c in val_cols})
-    
+
+    # Zero spread is not a valid uncertainty estimate; treat as missing
+    df_grouped_err = df_grouped_err.mask(df_grouped_err == 0)
+
     # Merge means and errors together
     df_obs = pd.concat([df_grouped_mean, df_grouped_err], axis=1).reset_index()
     
@@ -243,6 +257,11 @@ for obs_time in unique_times:
     # Clean up processing loops and remove duplicate schema names
     df_sub = df_sub.drop(columns=['rounded_time'], errors='ignore')
     df_sub = df_sub.loc[:, ~df_sub.columns.duplicated()]
+
+    # Mask any remaining zero data values (observations, errors, or interpolated model)
+    # as missing. Aerosol optical depths are strictly positive; zero = fill/invalid.
+    data_cols = [c for c in df_sub.columns if c not in ['time', 'longitude', 'latitude']]
+    df_sub[data_cols] = df_sub[data_cols].mask(df_sub[data_cols] == 0)
 
     # Force specific column arrangement (time -> longitude -> latitude)
     leading_cols = ['time', 'longitude', 'latitude']
