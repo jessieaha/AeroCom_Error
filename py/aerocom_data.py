@@ -151,14 +151,28 @@ def standardize_dataset(ds, var_name):
         ds = ds[dims_to_keep + [var_name]]
     else:
         # Sometimes variable name inside NetCDF is slightly different than file pattern
-        # Find the main data variable that is not a coordinate
+        # Handle known aliases (e.g., precipitation files may use 'pr' internally)
+        aliases = {
+            'precip': ['pr', 'precipitation', 'PRECT', 'prect'],
+            'pr': ['precip', 'precipitation', 'PRECT', 'prect'],
+        }
+
         data_vars = list(ds.data_vars)
-        if len(data_vars) == 1:
+        target_var = None
+        for alt in aliases.get(var_name, []):
+            if alt in data_vars:
+                target_var = alt
+                break
+
+        if target_var is not None:
+            ds = ds.rename({target_var: var_name})
+            ds = ds[dims_to_keep + [var_name]]
+        elif len(data_vars) == 1:
             ds = ds.rename({data_vars[0]: var_name})
             ds = ds[dims_to_keep + [var_name]]
         else:
             raise KeyError(f"Could not reliably isolate data variable '{var_name}' in dataset variables: {data_vars}")
-            
+
     return ds
 
 
@@ -186,29 +200,41 @@ def load_all_model_data(base_dir, models, variables, temporal, standardize=True)
         logging.info(f"Scanning directory for model: {model} ...")
         
         for var in variables:
-            # Flexible pattern matching fallback
-            patterns = [
-                os.path.join(model_dir, f"*{var}_*Column*2010*{temporal}*.nc"),      # Column variables (e.g., loads, optical)
-                os.path.join(model_dir, f"*{var}_*Surface*2010*{temporal}*.nc"),     # Surface variables (e.g., emissions, deposition)
-                os.path.join(base_dir, f"*{model}*{var}_*Column*2010*{temporal}*.nc"), # Flat directory fallback
-                os.path.join(base_dir, f"*{model}*{var}_*Surface*2010*{temporal}*.nc") # Flat directory fallback (Surface)
-            ]
-            
+            # Allow precipitation files to be named either 'precip' or 'pr'
+            var_names = [var]
+            if var == 'precip':
+                var_names.append('pr')
+            elif var == 'pr':
+                var_names.append('precip')
+
+            patterns = []
+            for vn in var_names:
+                patterns.extend([
+                    os.path.join(model_dir, f"*{vn}_*Column*2010*{temporal}*.nc"),       # Column variables (e.g., loads, optical)
+                    os.path.join(model_dir, f"*{vn}_*Surface*2010*{temporal}*.nc"),      # Surface variables (e.g., emissions, deposition)
+                    os.path.join(model_dir, f"*{vn}_*ModelLevel*2010*{temporal}*.nc"),  # Model-level variables (e.g., some precipitation)
+                    os.path.join(model_dir, f"*{vn}_*2010*{temporal}*.nc"),             # Generic fallback
+                    os.path.join(base_dir, f"*{model}*{vn}_*Column*2010*{temporal}*.nc"),  # Flat directory fallback
+                    os.path.join(base_dir, f"*{model}*{vn}_*Surface*2010*{temporal}*.nc"), # Flat directory fallback (Surface)
+                    os.path.join(base_dir, f"*{model}*{vn}_*ModelLevel*2010*{temporal}*.nc"), # Flat directory fallback (ModelLevel)
+                    os.path.join(base_dir, f"*{model}*{vn}_*2010*{temporal}*.nc"),         # Flat directory generic fallback
+                ])
+
             filepath = None
             for pattern in patterns:
                 matches = glob.glob(pattern)
                 if matches:
                     filepath = matches[0]  # Pick first match
                     break
-            
+
             if filepath and os.path.exists(filepath):
                 try:
                     # Open dataset lazily without loading actual array bytes into RAM
-                    ds = xr.open_dataset(filepath,chunks = 'auto') 
-                    
+                    ds = xr.open_dataset(filepath, chunks='auto')
+
                     if standardize:
                         ds = standardize_dataset(ds, var)
-                        
+
                     data_dict[model][var] = ds
                     logging.debug(f"  ✓ Found & opened: {var} -> {os.path.basename(filepath)}")
                 except Exception as e:
