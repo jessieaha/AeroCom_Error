@@ -37,6 +37,7 @@ if str(py_dir) not in sys.path:
     sys.path.insert(0, str(py_dir))
 
 import functions
+import cameo_toolbox as ct
 import aerocom_data
 
 print(f'Project root: {project_root}')
@@ -44,9 +45,26 @@ print(f'Python dir:   {py_dir}')
 
 
 # -----------------------------------------------------------------------------
+# Configuration: model exclusion and lifetime filtering
+# -----------------------------------------------------------------------------
+# List of model names to exclude from all loops, regressions, and plots.
+# Names must match the keys in the monthly pickle exactly.
+EXCLUDE_MODELS = []  # e.g., ['GEOS-i33p2-met2010_AP3-CTRL', 'MIROC-SPRINTARS_AP3-CTRL']
+
+# Lifetime outlier filtering.  Values outside [LIFETIME_MIN_DAYS, LIFETIME_MAX_DAYS]
+# (including NaN/inf) are masked before aggregation and regressions.  Set to None
+# to disable either bound.
+LIFETIME_MAX_DAYS = 365   # mask lifetime values > 365 days
+LIFETIME_MIN_DAYS = 1e-3  # mask lifetime values < 0.001 days
+
+
+# -----------------------------------------------------------------------------
 # 1. Load monthly model data
 # -----------------------------------------------------------------------------
-monthly_pickle = project_root / 'Data' / 'var_files' / 'original' / 'monthly' / 'monthly_aerocom_data.pickle'
+# Two loading options:
+#   USE_PICKLE = False  -> load directly from Data/AP3_processed_monthly/ NetCDF files
+#   USE_PICKLE = True   -> load from the legacy master pickle (backward compatible)
+USE_PICKLE = True
 
 VARIABLES = [
     'abs550aer', 'depbc', 'depdust', 'depoa', 'depso2', 'depso4', 'depss',
@@ -56,12 +74,25 @@ VARIABLES = [
     'precip'
 ]
 
-print(f'Loading monthly pickle: {monthly_pickle}')
-with open(monthly_pickle, 'rb') as f:
-    raw_data = pickle.load(f)
+if USE_PICKLE:
+    monthly_pickle = project_root / 'Data' / 'var_files' / 'original' / 'monthly' / 'monthly_aerocom_data.pickle'
+    print(f'Loading monthly pickle: {monthly_pickle}')
+    with open(monthly_pickle, 'rb') as f:
+        raw_data = pickle.load(f)
+else:
+    print('Loading monthly data from processed NetCDF files...')
+    raw_data = aerocom_data.load_monthly_data_from_netcdf(
+        output_base_dir=str(project_root / 'Data' / 'AP3_processed_monthly'),
+        variables=VARIABLES,
+    )
 
-models = sorted(raw_data.keys())
-print(f'Number of models: {len(models)}')
+# Apply model exclusion list before any processing
+missing_excluded = [m for m in EXCLUDE_MODELS if m not in raw_data]
+if missing_excluded:
+    print(f'Warning: excluded models not found in data: {missing_excluded}')
+models = sorted([m for m in raw_data.keys() if m not in EXCLUDE_MODELS])
+actually_excluded = [m for m in EXCLUDE_MODELS if m in raw_data]
+print(f'Number of models: {len(models)} (excluded {len(actually_excluded)}: {actually_excluded})')
 
 
 # -----------------------------------------------------------------------------
@@ -169,8 +200,32 @@ for m in models:
 # -----------------------------------------------------------------------------
 # 3. Calculate derived variables
 # -----------------------------------------------------------------------------
+def filter_lifetime(da, model_name, var_name, max_days=None, min_days=None):
+    """Mask unrealistic lifetime values (NaN, inf, and outside thresholds).
+
+    Returns the filtered DataArray (invalid cells set to NaN) and a dict with
+    the total number of cells and how many were excluded.
+    """
+    if da is None:
+        return None, {'n_total': 0, 'n_excluded': 0}
+    if max_days is None and min_days is None:
+        return da, {'n_total': int(da.size), 'n_excluded': 0}
+
+    bad = np.isnan(da) | np.isinf(da)
+    if max_days is not None:
+        bad = bad | (da > max_days)
+    if min_days is not None:
+        bad = bad | (da < min_days)
+    n_excluded = int(bad.sum())
+    if n_excluded:
+        print(f'  Lifetime filter: {model_name} {var_name} excluded {n_excluded:,} / {da.size:,} values '
+              f'({n_excluded / da.size * 100:.2f}%) outside [{min_days}, {max_days}] days')
+    return da.where(~bad), {'n_total': int(da.size), 'n_excluded': n_excluded}
+
+
 derived_vars = ['MEC', 'MAC', 'SSA', 'AE']
 derived = {m: {} for m in models}
+lifetime_filter_stats = []
 
 for m in models:
     for dv in derived_vars:
@@ -185,7 +240,10 @@ for m in models:
     if data[m].get('load_BC_OA') is not None and data[m].get('emi_BC_OA') is not None:
         load_da = data[m]['load_BC_OA']['load_BC_OA']
         emi_da = data[m]['emi_BC_OA']['emi_BC_OA']
-        derived[m]['lifetime_BC_OA'] = load_da / (emi_da * 3600 * 24)
+        lt = load_da / (emi_da * 3600 * 24)
+        lt, stats = filter_lifetime(lt, m, 'lifetime_BC_OA', LIFETIME_MAX_DAYS, LIFETIME_MIN_DAYS)
+        derived[m]['lifetime_BC_OA'] = lt
+        lifetime_filter_stats.append({'model': m, 'var': 'lifetime_BC_OA', **stats})
     else:
         derived[m]['lifetime_BC_OA'] = None
 
@@ -193,9 +251,19 @@ for m in models:
     if data[m].get('load_total') is not None and data[m].get('emi_total') is not None:
         load_da = data[m]['load_total']['load_total']
         emi_da = data[m]['emi_total']['emi_total']
-        derived[m]['lifetime'] = load_da / (emi_da * 3600 * 24)
+        lt = load_da / (emi_da * 3600 * 24)
+        lt, stats = filter_lifetime(lt, m, 'lifetime', LIFETIME_MAX_DAYS, LIFETIME_MIN_DAYS)
+        derived[m]['lifetime'] = lt
+        lifetime_filter_stats.append({'model': m, 'var': 'lifetime', **stats})
     else:
         derived[m]['lifetime'] = None
+
+# Summary of lifetime filtering
+if lifetime_filter_stats:
+    total_excluded = sum(s['n_excluded'] for s in lifetime_filter_stats)
+    total_cells = sum(s['n_total'] for s in lifetime_filter_stats)
+    print(f'\nLifetime filter summary: excluded {total_excluded:,} / {total_cells:,} '
+          f'grid-cell values ({total_excluded / total_cells * 100:.2f}%)')
 
 # Flatten to DataArrays for aggregation
 data_derived = {}
@@ -240,17 +308,21 @@ sample_model = next((m for m in models if data[m].get('od550aer') is not None), 
 template = data[sample_model]['od550aer'].isel(time=0)
 print(f'Template grid from {sample_model}: {template.dims}')
 
+SURFACE_TYPE = 'all'  # 'all', 'land', or 'ocean'
+
 masks = {}
 for name, cfg in REGIONS.items():
-    masks[name] = functions.create_region_mask(
-        template, name=name,
-        lon_range=cfg['lon_range'], lat_range=cfg['lat_range'],
-        surface='all', mask_registry=masks,
+    masks[name] = ct.create_region_mask(
+        template, region=name,
+        surface_type=SURFACE_TYPE,
+        mask_registry=masks,
     )
 print('Regions created:', list(masks.keys()))
+for name, mask in masks.items():
+    print(f'  {name}: surface_type={mask.attrs["surface"]}')
 
 
-def aggregate_region(model_dict, var_name, region_name, return_time_series=False):
+def aggregate_region(model_dict, var_name, region_name, return_time_series=False, skipna=False):
     """Spatially aggregate `var_name` for every model, returning time series or seasonal mean."""
     cfg = REGIONS[region_name]
     result = {}
@@ -258,11 +330,12 @@ def aggregate_region(model_dict, var_name, region_name, return_time_series=False
         if var_name not in model_data or model_data[var_name] is None:
             continue
         try:
-            val = functions.regional_aggregate(
+            val = ct.regional_aggregate(
                 model_data[var_name], masks[region_name],
                 spatial='mean', edge_weighted=cfg['edge_weighted'],
                 time_slice=cfg['time_slice'], temporal='mean',
                 return_time_series=return_time_series,
+                skipna=skipna,
             )
             result[model] = val
         except Exception as e:
@@ -272,12 +345,16 @@ def aggregate_region(model_dict, var_name, region_name, return_time_series=False
 
 # Monthly time series for model variables
 variables_to_aggregate = ['MEC', 'MAC', 'SSA', 'AE', 'lifetime_BC_OA', 'load_BC_OA', 'emi_BC_OA', 'precip']
-model_monthly = {region: {var: aggregate_region(data_derived, var, region, return_time_series=True)
+# Lifetime variables may contain masked NaNs from the outlier filter; skip them during aggregation.
+LIFETIME_VARS = {'lifetime_BC_OA', 'lifetime'}
+model_monthly = {region: {var: aggregate_region(data_derived, var, region, return_time_series=True,
+                                                  skipna=(var in LIFETIME_VARS))
                           for var in variables_to_aggregate}
                  for region in REGIONS}
 
 # Seasonal means for model variables (used for the paper-style regressions)
-model_seasonal = {region: {var: aggregate_region(data_derived, var, region, return_time_series=False)
+model_seasonal = {region: {var: aggregate_region(data_derived, var, region, return_time_series=False,
+                                                   skipna=(var in LIFETIME_VARS))
                            for var in variables_to_aggregate}
                   for region in REGIONS}
 
@@ -410,6 +487,7 @@ print('\n--- Model regressions ---')
 # Build regression DataFrame: one row per model per region (seasonal mean)
 # This follows the paper (Fig. 2 and Fig. S3), which use seasonally averaged data per model.
 regression_rows = []
+regression_excluded = []
 for region in REGIONS:
     if region == 'global':
         continue  # paper focuses on source/outflow regions
@@ -421,12 +499,19 @@ for region in REGIONS:
         precip = model_seasonal[region]['precip'].get(model)
         if not all([v is not None for v in [ssa, mac, ae, lt, precip]]):
             continue
+        if not np.isfinite(float(lt)):
+            regression_excluded.append({'region': region, 'model': model, 'reason': 'non-finite lifetime'})
+            continue
         regression_rows.append({
             'region': region, 'model': model,
             'SSA': float(ssa), 'MAC': float(mac), 'AE': float(ae),
             'lifetime': float(lt), 'inv_lifetime': 1.0 / float(lt),
             'precip': float(precip),
         })
+if regression_excluded:
+    print(f'  Excluded {len(regression_excluded)} model/region regression points due to lifetime filtering:')
+    for item in regression_excluded:
+        print(f'    {item["model"]} {item["region"]}')
 reg_df = pd.DataFrame(regression_rows)
 print(f'Regression data rows (seasonal means): {len(reg_df)}')
 

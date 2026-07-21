@@ -387,3 +387,90 @@ def save_model_data_to_netcdf(data_dict, output_base_dir="./Data/AEROCOM_Process
     print(f"Save Complete: {saved_count} files saved successfully.")
     print(f"Skipped {missing_count} missing variables.")
     print("=============================================\n")
+
+
+def load_monthly_data_from_netcdf(
+    output_base_dir="./Data/AP3_processed_monthly",
+    variables=None,
+    models=None,
+    standardize=True,
+):
+    """
+    Reconstruct the monthly AeroCom data dictionary directly from processed NetCDF files.
+
+    Reads files structured as:
+        <output_base_dir>/<variable>/<model>_<variable>_processed.nc
+
+    and returns the same dictionary structure that the legacy master pickle used:
+        data[model][variable] = xr.Dataset
+
+    Missing variables are returned as None. This function lets downstream notebooks
+    and scripts work without relying on the master pickle.
+
+    Parameters
+    ----------
+    output_base_dir : str
+        Root directory containing the variable sub-folders (default: Data/AP3_processed_monthly).
+    variables : list of str, optional
+        Variables to load. If None, all sub-folders of output_base_dir are scanned.
+    models : list of str, optional
+        Models to load. If None, all models with at least one file are loaded.
+    standardize : bool, default True
+        Apply standardize_dataset() to align coordinates and variable names.
+
+    Returns
+    -------
+    dict
+        {model: {variable: xr.Dataset or None}}
+    """
+    if not os.path.isdir(output_base_dir):
+        raise FileNotFoundError(f"Processed monthly directory not found: {output_base_dir}")
+
+    if variables is None:
+        variables = sorted(
+            d for d in os.listdir(output_base_dir)
+            if os.path.isdir(os.path.join(output_base_dir, d)) and d != "derived"
+        )
+    else:
+        variables = list(variables)
+
+    data_dict = {}
+    loaded_count = 0
+
+    for var in variables:
+        var_dir = os.path.join(output_base_dir, var)
+        if not os.path.isdir(var_dir):
+            continue
+
+        for fname in os.listdir(var_dir):
+            if not fname.endswith("_processed.nc"):
+                continue
+
+            # Filenames are: <model>_<variable>_processed.nc
+            parts = fname.rsplit("_", 2)
+            if len(parts) != 3 or parts[1] != var or parts[2] != "processed.nc":
+                continue
+            model = parts[0]
+
+            if models is not None and model not in models:
+                continue
+
+            fpath = os.path.join(var_dir, fname)
+            try:
+                ds = xr.open_dataset(fpath)
+                if standardize:
+                    ds = standardize_dataset(ds, var)
+                data_dict.setdefault(model, {})[var] = ds
+                loaded_count += 1
+            except Exception as e:
+                logging.warning(f"Could not load {fpath}: {e}")
+                data_dict.setdefault(model, {})[var] = None
+
+    # Ensure every model has an entry for every requested variable
+    for model in data_dict:
+        for var in variables:
+            if var not in data_dict[model]:
+                data_dict[model][var] = None
+
+    print(f"Loaded {loaded_count} NetCDF files for {len(data_dict)} models from {output_base_dir}")
+    return data_dict

@@ -1,14 +1,22 @@
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
+import xarray as xr
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.patheffects as PathEffects
+import matplotlib.ticker as mticker
+import matplotlib.cm as cm
 from matplotlib.patches import Rectangle
 
 import cartopy
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import cartopy.io.img_tiles as cimgt
+
+import warnings
+warnings.filterwarnings('ignore', category=cartopy.io.DownloadWarning)
 
 from typing import List, Optional, Union, Tuple, Literal
 from mpl_toolkits.axes_grid1 import ImageGrid
@@ -211,8 +219,8 @@ def uba_map_flex(
     mycolor: Union[str, List[str], None] = None,
     projection_type: Literal["regular", "curved"] = "curved",
     n_colors: Optional[int] = None,  
-    extent: Union[Literal["data", "global"], List[float]] = "data", 
-    gridline: bool = False,  
+    extent: Union[Literal["data", "global"], List[float], dict] = "data",
+    gridline: bool = False,
     cbar_tick_mode: Literal["bounds", "centers"] = "bounds",
     cbar_mode: Literal["single", "each"] = "single",
     cbar_size: str = "2.5%",     
@@ -319,7 +327,12 @@ def uba_map_flex(
     proj = ccrs.Robinson() if projection_type == "curved" else ccrs.PlateCarree()
     num_panels = len(data_list)
     titles = [title] * num_panels if isinstance(title, str) else title
-    
+
+    # Remember dict keys so per-panel extent can be keyed by data name.
+    data_keys = None
+    if isinstance(data, dict):
+        data_keys = list(data.keys())
+
     ncols = min(3, num_panels)
     nrows = int(np.ceil(num_panels / ncols))
     
@@ -331,26 +344,63 @@ def uba_map_flex(
                      axes_class=(GeoAxes, dict(projection=proj)))
 
     # --- 4. Plotting Loop ---
+    # Use a local Cartopy cache if one exists, otherwise rely on the default.
+    local_cartopy_dir = Path.home() / '.local' / 'share' / 'cartopy'
+    if local_cartopy_dir.exists():
+        cartopy.config['data_dir'] = str(local_cartopy_dir)
+
     for i, data_val in enumerate(data_list):
         ax = grid[i]
         mesh = ax.pcolormesh(lon, lat, data_val, transform=ccrs.PlateCarree(), 
                              cmap=cmap, norm=norm, shading='auto')
 
-        ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=land_alpha)
-        ax.add_feature(cfeature.COASTLINE, linewidth=edge_lw, alpha=coast_alpha)
-        if province_border: 
-            ax.add_feature(cfeature.BORDERS,linewidth=edge_lw, alpha=borders_alpha)
-            prov_lines = cfeature.NaturalEarthFeature(
-                category='cultural',
-                name='admin_1_states_provinces_lines',
-                scale='10m',
-                facecolor='none'
-            )
-            ax.add_feature(prov_lines, edgecolor='black', linewidth=edge_lw, alpha=borders_alpha)
-        if extent == 'global': ax.set_global()
-        elif extent == 'data':
+        try:
+            # Force Cartopy to resolve the land feature now so any missing-data
+            # error is caught here rather than at draw/save time.  Use the 110m
+            # resolution so a local cache can be used without auto-scaling.
+            land_feat = cfeature.LAND.with_scale('110m')
+            next(iter(land_feat.geometries()))
+            ax.add_feature(land_feat, facecolor='lightgray', alpha=land_alpha)
+        except Exception:
+            pass
+        try:
+            coast_feat = cfeature.COASTLINE.with_scale('110m')
+            next(iter(coast_feat.geometries()))
+            ax.add_feature(coast_feat, linewidth=edge_lw, alpha=coast_alpha)
+        except Exception:
+            pass
+        if province_border:
+            try:
+                borders_feat = cfeature.BORDERS.with_scale('110m')
+                next(iter(borders_feat.geometries()))
+                ax.add_feature(borders_feat, linewidth=edge_lw, alpha=borders_alpha)
+                prov_lines = cfeature.NaturalEarthFeature(
+                    category='cultural',
+                    name='admin_1_states_provinces_lines',
+                    scale='110m',
+                    facecolor='none'
+                )
+                next(iter(prov_lines.geometries()))
+                ax.add_feature(prov_lines, edgecolor='black', linewidth=edge_lw, alpha=borders_alpha)
+            except Exception:
+                pass
+
+        # Resolve per-panel extent (dict extent keyed by data key or title)
+        panel_extent = extent
+        if isinstance(extent, dict):
+            key = data_keys[i] if data_keys is not None and i < len(data_keys) else titles[i]
+            panel_extent = extent.get(key, 'data')
+
+        if panel_extent == 'global':
+            ax.set_global()
+        elif panel_extent == 'data':
             ax.set_extent([np.nanmin(lon), np.nanmax(lon), np.nanmin(lat), np.nanmax(lat)], crs=ccrs.PlateCarree())
-        else: ax.set_extent(extent, crs=ccrs.PlateCarree())
+        else:
+            ext = list(panel_extent)
+            # Cartopy expects monotonic longitudes; unwrap dateline-crossing windows.
+            if ext[0] > ext[1]:
+                ext[0] -= 360
+            ax.set_extent(ext, crs=ccrs.PlateCarree())
 
         ax.set_title(titles[i], fontsize=title_fontsize)
 
@@ -468,7 +518,7 @@ def uba_map_city(
     mycolor: Union[str, List[str], None] = None,
     projection_type: Literal["regular", "curved"] = "regular",  # ignored when use_osm=True
     n_colors: Optional[int] = None,
-    extent: Union[Literal["data", "global"], List[float]] = "data",
+    extent: Union[Literal["data", "global"], List[float], dict] = "data",
     gridline: bool = False,
     cbar_tick_mode: Literal["bounds", "centers"] = "bounds",
     cbar_mode: Literal["single", "each"] = "single",
@@ -966,3 +1016,552 @@ def plot_timeseries_with_components(
     plt.tight_layout()
     plt.show()
 
+
+###################### REGION MASKS AND AGGREGATION ######################
+
+# Default region boxes (longitude in 0--360) and surface-type defaults.
+_REGION_DEFINITIONS = {
+    'global':     {'lon_range': (0, 360),   'lat_range': (-90, 90),  'surface_type': 'all'},
+    'africa':     {'lon_range': (15, 37),   'lat_range': (-15, 0),   'surface_type': 'land'},
+    'amazon':     {'lon_range': (287, 317), 'lat_range': (-17, -3),  'surface_type': 'land'},
+    'outflow_af': {'lon_range': (350, 8),   'lat_range': (-15, 3),   'surface_type': 'ocean'},
+    'tropical':   {'lon_range': (0, 360),   'lat_range': (-23.5, 23.5), 'surface_type': 'all'},
+}
+
+_UNSET = object()
+
+
+def _default_land_mask_path():
+    """Return the project CAM5.3-Oslo land-fraction file path if it exists."""
+    path = Path(__file__).parent.parent / (
+        'Data/AEROCOM_III/CAM5.3-Oslo_AP3-CTRL2016-PD/'
+        'aerocom3_CAM5.3-Oslo_AP3-CTRL2016-PD_landf_Surface_2010_monthly.nc'
+    )
+    return path if path.exists() else None
+
+
+def shift360(data):
+    """Shift the longitude from -180,180 to 0,360 and sort."""
+    data_shifted = data.copy()
+    data_shifted['lon'] = (data_shifted['lon'] + 360) % 360
+    data_shifted = data_shifted.sortby('lon')
+    return data_shifted
+
+
+def create_mask_weigth(data, lon_initial, lon_final, lat_initial, lat_final):
+    """Create a fractional-area lat/lon box mask (0--360 longitude)."""
+    data_ones = xr.ones_like(data)
+    dlat = np.abs(np.diff(data.lat.data)).mean()
+    dlon = np.abs(np.diff(data.lon.data)).mean()
+
+    if lon_initial > lon_final:
+        mask_lon = data_ones.where((data.lon >= lon_initial) | (data.lon <= lon_final), 0)
+    else:
+        mask_lon = data_ones.where((data.lon >= lon_initial) & (data.lon <= lon_final), 0)
+
+    mask_lat = mask_lon.where((data.lat >= lat_initial) & (data.lat <= lat_final), 0)
+
+    # corner weights
+    mask1 = mask_lat.where(~((np.abs(lat_initial - mask_lat.lat) < dlat / 2) &
+                             (np.abs(lon_initial - mask_lat.lon) < dlon / 2)),
+                           ((mask_lat.lat + dlat / 2 - lat_initial) / dlat) *
+                           (dlon / 2 + mask_lat.lon - lon_initial) / dlon)
+
+    mask2 = mask1.where(~((np.abs(lat_initial - mask1.lat) < dlat / 2) &
+                          (np.abs(lon_final - mask1.lon) < dlon / 2)),
+                        ((mask1.lat + dlat / 2 - lat_initial) / dlat) *
+                        ((lon_final + dlon / 2 - mask1.lon) / dlon))
+
+    mask3 = mask2.where(~((np.abs(lat_final - mask2.lat) < dlat / 2) &
+                          (np.abs(lon_initial - mask2.lon) < dlon / 2)),
+                        ((-mask2.lat + dlat / 2 + lat_final) / dlat) *
+                        ((dlon / 2 + mask2.lon - lon_initial) / dlon))
+
+    mask4 = mask3.where(~((np.abs(lat_final - mask3.lat) < dlat / 2) &
+                          (np.abs(lon_final - mask3.lon) < dlon / 2)),
+                        ((-mask3.lat + dlat / 2 + lat_final) / dlat) *
+                        ((lon_final + dlon / 2 - mask3.lon) / dlon))
+
+    mask_low = mask4.where(~((np.abs(lat_initial - mask4.lat) < dlat / 2) &
+                             (lon_initial <= mask4.lon - dlon / 2) &
+                             (lon_final >= mask4.lon + dlon / 2)),
+                           ((mask4.lat + dlat / 2 - lat_initial) / dlat))
+
+    mask_up = mask_low.where(~((np.abs(lat_final - mask_low.lat) < dlat / 2) &
+                               (lon_initial <= mask_low.lon - dlon / 2) &
+                               (lon_final >= mask_low.lon + dlon / 2)),
+                             ((-mask_low.lat + dlat / 2 + lat_final) / dlat))
+
+    mask_left = mask_up.where(~((lat_initial <= mask_up.lat - dlat / 2) &
+                                (lat_final >= mask_up.lat + dlat / 2) &
+                                (np.abs(lon_initial - mask_up.lon) < dlon / 2)),
+                              ((dlon / 2 + mask_up.lon - lon_initial) / dlon))
+
+    mask_right = mask_left.where(~((lat_initial <= mask_left.lat - dlat / 2) &
+                                   (lat_final >= mask_left.lat + dlat / 2) &
+                                   (np.abs(lon_final - mask_left.lon) < dlon / 2)),
+                                 ((lon_final + dlon / 2 - mask_left.lon) / dlon))
+
+    return mask_right
+
+
+def create_mask(data, lon_initial, lon_final, lat_initial, lat_final):
+    """Create a binary 0/1 lat/lon box mask (cell-center based)."""
+    data_ones = xr.ones_like(data)
+
+    if lon_initial > lon_final:
+        mask_lon = data_ones.where((data.lon >= lon_initial) | (data.lon <= lon_final), 0)
+    else:
+        mask_lon = data_ones.where((data.lon >= lon_initial) & (data.lon <= lon_final), 0)
+
+    mask_lat = mask_lon.where((data.lat >= lat_initial) & (data.lat <= lat_final), 0)
+    return mask_lat
+
+
+def _normalize_lon_range(lon_range):
+    """Accept (lon_min, lon_max) in 0--360; None means full longitude."""
+    if lon_range is None:
+        return None
+    lon_min, lon_max = lon_range
+    return float(lon_min), float(lon_max)
+
+
+def _normalize_lat_range(lat_range):
+    """Accept (lat_min, lat_max); None means full latitude."""
+    if lat_range is None:
+        return None
+    lat_min, lat_max = lat_range
+    return float(lat_min), float(lat_max)
+
+
+def _parse_time_slice(time_slice):
+    """Convert None, slice, or (start, end) strings into an xarray time slice."""
+    if time_slice is None:
+        return slice(None)
+    if isinstance(time_slice, slice):
+        return time_slice
+    if isinstance(time_slice, (list, tuple)) and len(time_slice) == 2:
+        return slice(time_slice[0], time_slice[1])
+    raise TypeError("time_slice must be None, a slice, or a (start, end) pair of time labels")
+
+
+def _grid_cell_sizes(da):
+    """Mean grid spacing in radians for lat and lon."""
+    dlat = np.abs(np.deg2rad(np.diff(da.lat.data))).mean()
+    dlon = np.abs(np.deg2rad(np.diff(da.lon.data))).mean()
+    return dlat, dlon
+
+
+def _spatial_template(da):
+    """Reduce da to its lat/lon field for mask construction."""
+    template = da
+    if 'time' in template.dims:
+        template = template.isel(time=0, drop=True)
+    for dim in list(template.dims):
+        if dim not in ('lat', 'lon'):
+            template = template.isel({dim: 0}, drop=True)
+    return template
+
+
+def _grids_match(m, t):
+    """Return True if two (lat, lon) DataArrays share the same grid."""
+    return (
+        len(m.lat) == len(t.lat)
+        and len(m.lon) == len(t.lon)
+        and np.array_equal(m.lat.values, t.lat.values)
+        and np.array_equal(m.lon.values, t.lon.values)
+    )
+
+
+def land_mask_from_cartopy(template, resolution='110m'):
+    """
+    Build a 0/1 land mask from the Cartopy Natural Earth land feature.
+
+    Returns 1 for land and 0 for ocean on the template lat/lon grid.  The
+    template may use either 0--360 or -180--180 longitude; the polygons are
+    tested in the -180--180 frame and mapped back to the original grid.
+    """
+    import cartopy.feature as cfeature
+    from shapely.vectorized import contains
+    from shapely.ops import unary_union
+
+    lat = np.asarray(template.lat.values)
+    lon = np.asarray(template.lon.values)
+
+    lon_wrapped = (lon + 180.0) % 360.0 - 180.0
+    lon2d, lat2d = np.meshgrid(lon_wrapped, lat)
+
+    land = cfeature.NaturalEarthFeature('physical', 'land', resolution)
+    geoms = list(land.geometries())
+    if not geoms:
+        raise ValueError(f"No land geometries loaded from Natural Earth '{resolution}'.")
+
+    union = unary_union(geoms)
+    mask = contains(union, lon2d, lat2d).astype(float)
+
+    return xr.DataArray(
+        mask,
+        dims=('lat', 'lon'),
+        coords={'lat': lat, 'lon': lon},
+        name='land_mask',
+    )
+
+
+def _land_sea_mask(template, surface_type, land_mask=None, land_mask_path=None):
+    """
+    Return a 0/1 mask on the template grid for land or sea.
+
+    surface_type: 'all', 'land', 'sea', or 'ocean' (ocean is treated as sea)
+    land_mask: xr.DataArray with 1=land, 0=sea (or fractional)
+    land_mask_path: netCDF path; looks for lsm, land, land_mask, or landf variables
+    """
+    surface_type = 'all' if surface_type is None else surface_type
+
+    if surface_type == 'ocean':
+        surface_type = 'sea'
+
+    if surface_type not in ('all', 'land', 'sea', 'ocean'):
+        raise ValueError("surface_type must be 'all', 'land', 'sea', or 'ocean'")
+
+    if surface_type == 'all':
+        return xr.ones_like(template)
+
+    if land_mask is None and land_mask_path is None:
+        default_path = _default_land_mask_path()
+        if default_path is not None:
+            land_mask_path = str(default_path)
+
+    if land_mask is not None:
+        lsm = land_mask
+    elif land_mask_path is not None:
+        try:
+            with xr.open_dataset(land_mask_path) as ds:
+                for var in ('lsm', 'land', 'land_mask', 'LAND_MASK', 'landf'):
+                    if var in ds:
+                        lsm = ds[var].load()
+                        break
+                else:
+                    raise KeyError(
+                        f"No land-mask variable found in {land_mask_path}. "
+                        "Expected one of: lsm, land, land_mask, LAND_MASK, landf"
+                    )
+        except Exception as exc:
+            # Fall back to cartopy/regionmask if the provided/default file fails
+            try:
+                import regionmask
+                land = regionmask.defined_regions.natural_earth_v5_0_0.land_110
+                lsm = land.mask(template.lon, template.lat) == 0
+            except Exception:
+                try:
+                    lsm = land_mask_from_cartopy(template)
+                except Exception as exc2:
+                    raise ValueError(
+                        "Land/sea masking requires land_mask, land_mask_path, "
+                        "the 'regionmask' package, or cartopy+shapely."
+                    ) from exc2
+    else:
+        try:
+            import regionmask
+            land = regionmask.defined_regions.natural_earth_v5_0_0.land_110
+            lsm = land.mask(template.lon, template.lat) == 0
+        except ImportError:
+            try:
+                lsm = land_mask_from_cartopy(template)
+            except Exception as exc:
+                raise ValueError(
+                    "Land/sea masking requires land_mask, land_mask_path, "
+                    "the 'regionmask' package, or cartopy+shapely."
+                ) from exc
+
+    if not isinstance(lsm, xr.DataArray):
+        lsm = xr.DataArray(lsm, dims=('lat', 'lon'), coords={'lat': template.lat, 'lon': template.lon})
+
+    if 'lat' in lsm.dims and 'lon' in lsm.dims:
+        if not np.array_equal(lsm.lat.values, template.lat.values) or not np.array_equal(lsm.lon.values, template.lon.values):
+            lsm = lsm.interp(lat=template.lat, lon=template.lon, method='nearest')
+
+    # If the land mask has a time dimension, take the first time step
+    if 'time' in lsm.dims:
+        lsm = lsm.isel(time=0, drop=True)
+
+    lsm = (lsm >= 0.5).astype(float)
+
+    if surface_type == 'land':
+        return lsm
+    return 1.0 - lsm
+
+
+def _spatial_weights(da, mask, edge_weighted=False):
+    """
+    Area weights for lat/lon aggregation.
+
+    When the mask grid does not match the model's grid, the mask is rebuilt
+    on the model's grid using the stored lon_range/lat_range attrs, or
+    interpolated if those attrs are absent.
+    """
+    dlat, dlon = _grid_cell_sizes(da)
+    data_template = _spatial_template(da)
+
+    def _rebuild_mask(template):
+        """Rebuild the region mask on an arbitrary spatial template."""
+        lon_min, lon_max = mask.attrs['lon_range']
+        lat_min, lat_max = mask.attrs['lat_range']
+        if edge_weighted:
+            rm = create_mask_weigth(template, lon_min, lon_max, lat_min, lat_max)
+        else:
+            rm = create_mask(template, lon_min, lon_max, lat_min, lat_max)
+        if 'surface' in mask.attrs and mask.attrs['surface'] not in (None, 'all'):
+            surface_mask = _land_sea_mask(
+                rm,
+                mask.attrs['surface'],
+                land_mask=mask.attrs.get('land_mask'),
+                land_mask_path=mask.attrs.get('land_mask_path'),
+            )
+            rm = rm * surface_mask
+        return rm
+
+    if edge_weighted and 'lon_range' in mask.attrs and 'lat_range' in mask.attrs:
+        region_mask = _rebuild_mask(data_template)
+    elif not _grids_match(mask, data_template):
+        if 'lon_range' in mask.attrs and 'lat_range' in mask.attrs:
+            region_mask = _rebuild_mask(data_template)
+        else:
+            region_mask = mask.interp(
+                lat=data_template.lat, lon=data_template.lon, method='nearest'
+            )
+    else:
+        region_mask = mask
+
+    cell_area = np.cos(np.deg2rad(da.lat)) * dlat * dlon
+    weights = cell_area * region_mask
+    return weights, region_mask
+
+
+def create_region_mask(
+    template,
+    region=None,
+    surface_type=_UNSET,
+    lon_range=None,
+    lat_range=None,
+    name=None,
+    surface=None,
+    land_mask=None,
+    land_mask_path=None,
+    mask_registry=None,
+):
+    """
+    Build a named regional mask on the same lat/lon grid as `template`.
+
+    New interface (recommended)
+    ---------------------------
+    Use the `region` and `surface_type` arguments for the four study regions:
+
+    >>> create_region_mask(pr, region='africa')               # land by default
+    >>> create_region_mask(pr, region='outflow_af', surface_type='ocean')
+    >>> create_region_mask(pr, region='global', surface_type='all')
+
+    Parameters
+    ----------
+    template : xr.DataArray or xr.Dataset
+        Reference field (only lat/lon coordinates are used). Use any loaded
+        AeroCom variable, e.g. model_data['AOD550'].isel(time=0).
+    region : str, optional
+        One of 'global', 'africa', 'amazon', 'outflow_af', or 'tropical'.
+        When passed as the second positional argument it is auto-detected.
+    surface_type : {'all', 'land', 'ocean'}, optional
+        'land' / 'ocean' apply a land-sea mask. Region defaults:
+        global='all', africa='land', amazon='land', outflow_af='ocean'.
+    lon_range, lat_range : tuple, optional
+        Override the region defaults. Enables custom regions.
+    name : str, optional
+        Name stored in mask.attrs. Defaults to `region`.
+    surface : str, optional
+        Backward-compatible alias for `surface_type`.
+    land_mask : xr.DataArray, optional
+        1=land, 0=sea on the same or an interpolatable grid.
+    land_mask_path : str or Path, optional
+        Path to a netCDF land-sea mask file. If None and surface_type is
+        'land'/'ocean', the project CAM5.3-Oslo land-fraction file is tried,
+        falling back to cartopy/regionmask if it is unavailable.
+    mask_registry : dict, optional
+        If given, stores the mask as mask_registry[name] = mask.
+
+    Returns
+    -------
+    xr.DataArray
+        Mask with values 0/1 (lat, lon). Metadata is stored in .attrs for use
+        with `regional_aggregate(..., edge_weighted=True)`.
+    """
+    if isinstance(template, xr.Dataset):
+        template = template[list(template.data_vars)[0]]
+
+    # Backward compatibility: if the second positional argument is not a
+    # recognized region, treat it as the old `name` argument.
+    if region is not None and region not in _REGION_DEFINITIONS:
+        if name is None:
+            name = region
+        region = None
+
+    # Resolve region defaults
+    if region is not None:
+        cfg = _REGION_DEFINITIONS[region]
+        lon_range = cfg['lon_range'] if lon_range is None else lon_range
+        lat_range = cfg['lat_range'] if lat_range is None else lat_range
+        if surface_type is _UNSET:
+            surface_type = cfg.get('surface_type', 'all')
+        if name is None:
+            name = region
+    else:
+        if lon_range is None:
+            lon_range = (0.0, 360.0)
+        if lat_range is None:
+            lat_range = (-90.0, 90.0)
+        if name is None:
+            raise ValueError("name is required when region is not specified")
+        if surface_type is _UNSET:
+            surface_type = 'all'
+
+    # Backward-compatible alias
+    if surface is not None:
+        surface_type = surface
+
+    lon_range = _normalize_lon_range(lon_range)
+    lat_range = _normalize_lat_range(lat_range)
+
+    spatial_template = _spatial_template(template)
+
+    if lon_range is None and lat_range is None:
+        box_mask = xr.ones_like(spatial_template)
+    else:
+        lon_min, lon_max = lon_range if lon_range is not None else (0.0, 360.0)
+        lat_min, lat_max = lat_range if lat_range is not None else (-90.0, 90.0)
+        box_mask = create_mask(spatial_template, lon_min, lon_max, lat_min, lat_max)
+
+    surface_mask = _land_sea_mask(
+        spatial_template,
+        surface_type,
+        land_mask=land_mask,
+        land_mask_path=land_mask_path,
+    )
+    mask = (box_mask * surface_mask).astype(float)
+    mask.name = name
+    mask.attrs.update({
+        'name': name,
+        'lon_range': lon_range if lon_range is not None else (0.0, 360.0),
+        'lat_range': lat_range if lat_range is not None else (-90.0, 90.0),
+        'surface': surface_type,
+        'land_mask_path': land_mask_path,
+    })
+
+    if mask_registry is not None:
+        mask_registry[name] = mask
+
+    return mask
+
+
+def regional_aggregate(
+    da,
+    mask,
+    spatial='mean',
+    edge_weighted=False,
+    time_slice=None,
+    temporal='mean',
+    return_time_series=False,
+    skipna=False,
+):
+    """
+    Spatially and/or temporally aggregate data using a mask from create_region_mask.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Field with lat, lon, and optionally time dimensions.
+    mask : xr.DataArray
+        Mask from create_region_mask (global mask = ones on full grid).
+    spatial : str
+        'mean' (area-weighted average) or 'total' (weighted sum over the region).
+    edge_weighted : bool
+        If True, use fractional grid-cell weights at the region boundaries.
+    time_slice : slice, (start, end), or None
+        Temporal subset applied before aggregation. None keeps all times.
+    temporal : str
+        'mean' or 'total' over the remaining time dimension after spatial reduction.
+        Ignored when return_time_series=True.
+    return_time_series : bool
+        If True, return the spatial aggregate at each time step without collapsing time.
+    skipna : bool
+        If True, NaN values are omitted from the aggregation (both spatial and temporal).
+        This is useful when fields such as lifetime have been masked for outliers.
+
+    Returns
+    -------
+    float or xr.DataArray
+        Scalar when temporal reduction is applied; otherwise a time series.
+    """
+    if spatial not in ('mean', 'total'):
+        raise ValueError("spatial must be 'mean' or 'total'")
+    if temporal not in ('mean', 'total'):
+        raise ValueError("temporal must be 'mean' or 'total'")
+
+    da_work = da
+    if 'bnds' in da_work.dims:
+        da_work = da_work.drop_dims('bnds', errors='ignore')
+    elif 'nbnd' in da_work.dims:
+        da_work = da_work.drop_dims('nbnd', errors='ignore')
+
+    if 'time' in da_work.dims:
+        da_work = da_work.sel(time=_parse_time_slice(time_slice))
+
+    weights, _ = _spatial_weights(da_work, mask, edge_weighted=edge_weighted)
+    weighted_field = da_work * weights
+
+    if spatial == 'mean':
+        if skipna:
+            norm = weights.where(da_work.notnull()).sum(dim=['lat', 'lon'])
+            spatial_result = weighted_field.sum(dim=['lat', 'lon'], skipna=True) / norm.where(norm > 0)
+        else:
+            norm = weights.sum(dim=['lat', 'lon'])
+            spatial_result = weighted_field.sum(dim=['lat', 'lon']) / norm
+    else:
+        spatial_result = weighted_field.sum(dim=['lat', 'lon'], skipna=skipna)
+
+    if return_time_series or 'time' not in spatial_result.dims:
+        return spatial_result
+
+    if temporal == 'mean':
+        return float(spatial_result.mean('time', skipna=skipna).values)
+    return float(spatial_result.sum('time').values)
+
+
+def aggregate_models(
+    model_dict,
+    var_name,
+    mask,
+    spatial='mean',
+    edge_weighted=False,
+    time_slice=None,
+    temporal='mean',
+    return_time_series=False,
+):
+    """
+    Apply regional_aggregate to every model in an AeroCom get_data() dictionary.
+
+    Returns
+    -------
+    dict
+        {model_name: aggregated value or time series}
+    """
+    result = {}
+    for model, model_data in model_dict.items():
+        if var_name not in model_data:
+            raise KeyError(f"Variable '{var_name}' not found for model '{model}'")
+        result[model] = regional_aggregate(
+            model_data[var_name],
+            mask,
+            spatial=spatial,
+            edge_weighted=edge_weighted,
+            time_slice=time_slice,
+            temporal=temporal,
+            return_time_series=return_time_series,
+        )
+    return result
