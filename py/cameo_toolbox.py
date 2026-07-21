@@ -1157,6 +1157,10 @@ def _spatial_template(da):
     template = da
     if 'time' in template.dims:
         template = template.isel(time=0, drop=True)
+    # Also drop any scalar time coordinate that may have been preserved by isel
+    for coord in list(template.coords):
+        if coord not in ('lat', 'lon'):
+            template = template.drop_vars(coord, errors='ignore')
     for dim in list(template.dims):
         if dim not in ('lat', 'lon'):
             template = template.isel({dim: 0}, drop=True)
@@ -1276,13 +1280,18 @@ def _land_sea_mask(template, surface_type, land_mask=None, land_mask_path=None):
     if not isinstance(lsm, xr.DataArray):
         lsm = xr.DataArray(lsm, dims=('lat', 'lon'), coords={'lat': template.lat, 'lon': template.lon})
 
+    # If the land mask has a time dimension, take the first time step BEFORE
+    # any interpolation so that the time coordinate cannot conflict with the
+    # spatial template grid.
+    if 'time' in lsm.dims:
+        lsm = lsm.isel(time=0, drop=True)
+    for coord in list(lsm.coords):
+        if coord not in ('lat', 'lon'):
+            lsm = lsm.drop_vars(coord, errors='ignore')
+
     if 'lat' in lsm.dims and 'lon' in lsm.dims:
         if not np.array_equal(lsm.lat.values, template.lat.values) or not np.array_equal(lsm.lon.values, template.lon.values):
             lsm = lsm.interp(lat=template.lat, lon=template.lon, method='nearest')
-
-    # If the land mask has a time dimension, take the first time step
-    if 'time' in lsm.dims:
-        lsm = lsm.isel(time=0, drop=True)
 
     lsm = (lsm >= 0.5).astype(float)
 

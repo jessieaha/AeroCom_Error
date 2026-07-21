@@ -57,6 +57,10 @@ EXCLUDE_MODELS = []  # e.g., ['GEOS-i33p2-met2010_AP3-CTRL', 'MIROC-SPRINTARS_AP
 LIFETIME_MAX_DAYS = 365   # mask lifetime values > 365 days
 LIFETIME_MIN_DAYS = 1e-3  # mask lifetime values < 0.001 days
 
+# Save figure PNG files to disk?  Default False so figures are rendered in the
+# notebook first.  CSV output is still saved by default.
+SAVE_FIGURE = False
+
 
 # -----------------------------------------------------------------------------
 # 1. Load monthly model data
@@ -287,18 +291,22 @@ for dv in derived_vars + ['lifetime', 'lifetime_BC_OA']:
 # -----------------------------------------------------------------------------
 REGIONS = {
     'global': {
+        'surface_type': 'all',
         'lon_range': (0, 360), 'lat_range': (-90, 90),
         'time_slice': ('2010-01-01', '2010-12-31'), 'edge_weighted': False,
     },
     'africa': {
+        'surface_type': 'land',
         'lon_range': (15, 37), 'lat_range': (-15, 0),
         'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': False,
     },
     'amazon': {
+        'surface_type': 'land',
         'lon_range': (287, 317), 'lat_range': (-17, -3),
         'time_slice': ('2010-07-01', '2010-10-31'), 'edge_weighted': False,
     },
     'outflow_af': {
+        'surface_type': 'ocean',
         'lon_range': (350, 8), 'lat_range': (-15, 3),
         'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': True,
     },
@@ -308,13 +316,14 @@ sample_model = next((m for m in models if data[m].get('od550aer') is not None), 
 template = data[sample_model]['od550aer'].isel(time=0)
 print(f'Template grid from {sample_model}: {template.dims}')
 
-SURFACE_TYPE = 'all'  # 'all', 'land', or 'ocean'
+# Global override (legacy).  If None, each region's own surface_type is used.
+SURFACE_TYPE = None  # 'all', 'land', 'ocean', or None to use per-region defaults
 
 masks = {}
 for name, cfg in REGIONS.items():
     masks[name] = ct.create_region_mask(
         template, region=name,
-        surface_type=SURFACE_TYPE,
+        surface_type=SURFACE_TYPE if SURFACE_TYPE is not None else cfg.get('surface_type', 'all'),
         mask_registry=masks,
     )
 print('Regions created:', list(masks.keys()))
@@ -517,9 +526,12 @@ print(f'Regression data rows (seasonal means): {len(reg_df)}')
 
 # MAC vs SSA: regression through origin (user request)
 mac_ssa_results = {}
-for region in ['africa', 'amazon']:
+for region in REGIONS:
+    if region == 'global':
+        continue
     sub = reg_df[reg_df['region'] == region].dropna(subset=['MAC', 'SSA'])
     if len(sub) < 3:
+        print(f'{region}: skipped MAC vs SSA regression (only {len(sub)} valid points)')
         continue
     x = sub['SSA'].values
     y = sub['MAC'].values
@@ -532,9 +544,12 @@ for region in ['africa', 'amazon']:
 
 # 1/lifetime vs precipitation + AE: multiple linear regression
 inv_lt_results = {}
-for region in ['africa', 'amazon']:
+for region in REGIONS:
+    if region == 'global':
+        continue
     sub = reg_df[reg_df['region'] == region].dropna(subset=['inv_lifetime', 'precip', 'AE'])
     if len(sub) < 4:
+        print(f'{region}: skipped 1/tau regression (only {len(sub)} valid points)')
         continue
     X = np.column_stack([sub['precip'].values, sub['AE'].values])
     y = sub['inv_lifetime'].values
@@ -559,9 +574,15 @@ print('\n--- Constrained estimates from observations ---')
 
 # Constrained estimates from seasonal-mean observations (following the paper)
 constrained = []
-for region in ['africa', 'amazon']:
+for region in REGIONS:
+    if region == 'global':
+        continue
     polder_df_region = polder_monthly[region]
     if polder_df_region.empty:
+        print(f'  {region}: skipped constrained estimate (no POLDER data)')
+        continue
+    if region not in mac_ssa_results or region not in inv_lt_results:
+        print(f'  {region}: skipped constrained estimate (no model regression)')
         continue
     gpcp_ts = gpcp_region[region]
     mac_params = mac_ssa_results[region]
@@ -600,7 +621,18 @@ print('\n--- Error decomposition ---')
 
 # Model seasonal means for variables used in error decomposition
 decomp_rows = []
-for region in ['africa', 'amazon']:
+for region in REGIONS:
+    if region == 'global':
+        continue
+    csub = constrained_df[constrained_df['region'] == region]
+    if csub.empty:
+        print(f'  {region}: skipped error decomposition (no constrained estimate)')
+        continue
+    mac_c = csub['MAC_c'].mean()
+    tau_c = csub['tau_c'].mean()
+    aaod_c = csub['AAOD_obs'].mean()
+    e_c = csub['E_c'].mean()
+
     for model in models:
         mac_model = model_seasonal[region]['MAC'].get(model)
         lt_model = model_seasonal[region]['lifetime_BC_OA'].get(model)
@@ -611,15 +643,6 @@ for region in ['africa', 'amazon']:
             aaod_model = float(model_seasonal[region]['MAC'][model]) * float(model_seasonal[region]['load_BC_OA'][model])
         # Model emission
         emi_model = model_seasonal[region].get('emi_BC_OA', {}).get(model)
-
-        # Constrained values (seasonal means over observations)
-        csub = constrained_df[constrained_df['region'] == region]
-        if csub.empty:
-            continue
-        mac_c = csub['MAC_c'].mean()
-        tau_c = csub['tau_c'].mean()
-        aaod_c = csub['AAOD_obs'].mean()
-        e_c = csub['E_c'].mean()
 
         if any(v is None or np.isnan(v) for v in [mac_model, lt_model, emi_model, mac_c, tau_c, aaod_c, e_c]):
             continue
@@ -681,9 +704,13 @@ fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
 # (a) MAC vs SSA regression with model monthly points and observation mean
 ax = axes[0, 0]
-colors = {'africa': '#ff7f0e', 'amazon': '#2ca02c'}
-for region in ['africa', 'amazon']:
+colors = {'africa': '#ff7f0e', 'amazon': '#2ca02c', 'outflow_af': '#9467bd'}
+for region in ['africa', 'amazon', 'outflow_af']:
+    if region not in mac_ssa_results:
+        continue
     sub = reg_df[reg_df['region'] == region].dropna(subset=['MAC', 'SSA'])
+    if sub.empty:
+        continue
     ax.scatter(sub['SSA'], sub['MAC'], s=25, alpha=0.4, color=colors[region], label=f'{region} model')
     F = mac_ssa_results[region]['F']
     x_line = np.linspace(sub['SSA'].min(), sub['SSA'].max(), 100)
@@ -702,11 +729,16 @@ ax.legend(fontsize=8)
 
 # (b) 1/lifetime vs precipitation + AE (model points colored by region)
 ax = axes[0, 1]
-for region in ['africa', 'amazon']:
+for region in ['africa', 'amazon', 'outflow_af']:
+    if region not in inv_lt_results:
+        continue
     sub = reg_df[reg_df['region'] == region].dropna(subset=['inv_lifetime', 'precip', 'AE'])
+    if sub.empty:
+        continue
     sc = ax.scatter(sub['precip'], sub['inv_lifetime'], c=sub['AE'], cmap='viridis',
                     s=25, alpha=0.5, label=region)
-plt.colorbar(sc, ax=ax, label='AE')
+if 'sc' in locals():
+    plt.colorbar(sc, ax=ax, label='AE')
 ax.set_xlabel('Precipitation (mm/day)', fontweight='bold')
 ax.set_ylabel('1 / lifetime (day⁻¹)', fontweight='bold')
 ax.set_title('(b) 1/lifetime vs precipitation colored by AE', fontweight='bold')
@@ -719,7 +751,9 @@ metrics = ['MAC', 'tau', 'E']
 metric_labels = {'MAC': 'MAC (m² g⁻¹)', 'tau': 'Lifetime (days)', 'E': 'Emission (kg m⁻² s⁻¹)'}
 width = 0.35
 x = np.arange(len(metrics))
-for idx, region in enumerate(['africa', 'amazon']):
+for idx, region in enumerate(['africa', 'amazon', 'outflow_af']):
+    if region not in colors:
+        continue
     sub = decomp_df[decomp_df['region'] == region]
     if sub.empty:
         continue
@@ -736,7 +770,7 @@ ax.legend()
 
 # (d) AAOD error decomposition (stacked bars per model, averaged by region)
 ax = axes[1, 1]
-for idx, region in enumerate(['africa', 'amazon']):
+for idx, region in enumerate(['africa', 'amazon', 'outflow_af']):
     sub = decomp_df[decomp_df['region'] == region].sort_values('dAAOD_total', key=abs, ascending=False)
     if sub.empty:
         continue
@@ -759,14 +793,18 @@ ax.grid(True, alpha=0.3, axis='y')
 plt.suptitle('Figure 3: Regression-based error attribution (Zhong et al. 2023)', fontsize=15, fontweight='bold')
 plt.tight_layout()
 fig_path = project_root / 'notebooks' / 'figure3_error_attribution.png'
-plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-print(f'Saved: {fig_path}')
+if SAVE_FIGURE:
+    plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+    print(f'Saved: {fig_path}')
 plt.close()
 
 
 # Per-region bar chart of mean percentage contributions
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-for idx, region in enumerate(['africa', 'amazon']):
+plot_regions = [r for r in ['africa', 'amazon', 'outflow_af'] if not decomp_df[decomp_df['region'] == r].empty]
+fig, axes = plt.subplots(1, len(plot_regions), figsize=(6 * len(plot_regions), 5))
+if len(plot_regions) == 1:
+    axes = [axes]
+for idx, region in enumerate(plot_regions):
     ax = axes[idx]
     sub = decomp_df[decomp_df['region'] == region]
     if sub.empty:
@@ -783,8 +821,9 @@ for idx, region in enumerate(['africa', 'amazon']):
 plt.suptitle('Figure 3 (detail): Mean AAOD error attribution by region', fontweight='bold')
 plt.tight_layout()
 fig_path2 = project_root / 'notebooks' / 'figure3_error_attribution_mean_pct.png'
-plt.savefig(fig_path2, dpi=300, bbox_inches='tight')
-print(f'Saved: {fig_path2}')
+if SAVE_FIGURE:
+    plt.savefig(fig_path2, dpi=300, bbox_inches='tight')
+    print(f'Saved: {fig_path2}')
 plt.close()
 
 
