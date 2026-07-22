@@ -30,7 +30,9 @@ def fake_uba_map(
     region_linestyle='--',
     show_region_labels=True,
     cbar_orientation='vertical',  # NEW: 'vertical' or 'horizontal'
-    cbar_extend='auto'            # NEW: 'auto' | 'neither' | 'min' | 'max' | 'both'
+    cbar_extend='auto',           # NEW: 'auto' | 'neither' | 'min' | 'max' | 'both'
+    show=True,
+    savefile=None,
 ):
     """
     Plot a pcolormesh with cartopy and a flexible colorbar.
@@ -193,6 +195,14 @@ def fake_uba_map(
     ax.set_title(title, fontsize=16)
     ax.set_xticks([])
     ax.set_yticks([])
+
+    if savefile:
+        plt.savefig(savefile, bbox_inches='tight', dpi=300)
+
+    if show:
+        plt.show()
+        return None
+    return fig
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
@@ -1021,11 +1031,13 @@ def plot_timeseries_with_components(
 
 # Default region boxes (longitude in 0--360) and surface-type defaults.
 _REGION_DEFINITIONS = {
-    'global':     {'lon_range': (0, 360),   'lat_range': (-90, 90),  'surface_type': 'all'},
-    'africa':     {'lon_range': (15, 37),   'lat_range': (-15, 0),   'surface_type': 'land'},
-    'amazon':     {'lon_range': (287, 317), 'lat_range': (-17, -3),  'surface_type': 'land'},
-    'outflow_af': {'lon_range': (350, 8),   'lat_range': (-15, 3),   'surface_type': 'ocean'},
-    'tropical':   {'lon_range': (0, 360),   'lat_range': (-23.5, 23.5), 'surface_type': 'all'},
+    'global':        {'lon_range': (0, 360),   'lat_range': (-90, 90),  'surface_type': 'all'},
+    'africa':        {'lon_range': (15, 37),   'lat_range': (-15, 0),   'surface_type': 'land'},
+    'amazon':        {'lon_range': (287, 317), 'lat_range': (-17, -3),  'surface_type': 'land'},
+    'outflow_af':    {'lon_range': (350, 8),   'lat_range': (-15, 3),   'surface_type': 'ocean'},
+    'tropical':      {'lon_range': (0, 360),   'lat_range': (-23.5, 23.5), 'surface_type': 'all'},
+    'west_russia':   {'lon_range': (33, 52),   'lat_range': (51, 60),   'surface_type': 'land'},
+    'boreal_na_west': {'lon_range': (242, 258), 'lat_range': (52, 63),   'surface_type': 'land'},
 }
 
 _UNSET = object()
@@ -1375,8 +1387,9 @@ def create_region_mask(
         Reference field (only lat/lon coordinates are used). Use any loaded
         AeroCom variable, e.g. model_data['AOD550'].isel(time=0).
     region : str, optional
-        One of 'global', 'africa', 'amazon', 'outflow_af', or 'tropical'.
-        When passed as the second positional argument it is auto-detected.
+        One of 'global', 'africa', 'amazon', 'outflow_af', 'tropical',
+        'west_russia', or 'boreal_na_west'. When passed as the second
+        positional argument it is auto-detected.
     surface_type : {'all', 'land', 'ocean'}, optional
         'land' / 'ocean' apply a land-sea mask. Region defaults:
         global='all', africa='land', amazon='land', outflow_af='ocean'.
