@@ -110,13 +110,18 @@ def fake_uba_map(
             zmin, zmax = -m, m
         norm = mcolors.TwoSlopeNorm(vmin=zmin, vcenter=0.0, vmax=zmax)
 
+    elif isinstance(mycolor, str):
+        # Plain matplotlib colormap name
+        cmap = plt.get_cmap(mycolor, num_levels) if num_levels is not None else plt.get_cmap(mycolor)
+        norm = plt.Normalize(vmin=zmin, vmax=zmax, clip=True)
+
     else:
         # Custom discrete color list
         if num_levels is None:
             num_levels = len(mycolor) if hasattr(mycolor, '__len__') else 12
-        cmap = plt.get_cmap(mycolor)
-        boundaries = np.linspace(zmin, zmax, num_levels + 1)  # Create boundaries for the color levels
-        norm = plt.Normalize(vmin=zmin, vmax=zmax, clip=True)
+        cmap = mcolors.LinearSegmentedColormap.from_list("custom_cmap", list(mycolor), N=num_levels)
+        boundaries = np.linspace(zmin, zmax, num_levels + 1)
+        norm = mcolors.BoundaryNorm(boundaries, ncolors=num_levels, clip=True)
 
     # Draw the field
     # NOTE: 'extend' is NOT a valid kwarg for pcolormesh; it's set on colorbar.
@@ -130,9 +135,17 @@ def fake_uba_map(
     # Region boxes & labels
     if region_boxes:
         for name, (lonmin, lonmax, latmin, latmax) in region_boxes.items():
+            if lonmin > lonmax:
+                lonmin_plot = lonmin - 360
+                rect_x = lonmin_plot
+                rect_width = lonmax - lonmin_plot
+            else:
+                rect_x = lonmin
+                rect_width = lonmax - lonmin
+
             rect = Rectangle(
-                (lonmin, latmin),
-                lonmax - lonmin,
+                (rect_x, latmin),
+                rect_width,
                 latmax - latmin,
                 fill=False,
                 edgecolor=region_edgecolor,
@@ -145,7 +158,7 @@ def fake_uba_map(
 
             if show_region_labels:
                 ax.text(
-                    (lonmin + lonmax) / 2.0, latmax + 0.5, name,
+                    rect_x + rect_width / 2.0, latmax + 0.5, name,
                     transform=ccrs.PlateCarree(),
                     ha='center', va='bottom', fontsize=10, color=region_edgecolor,
                     zorder=6,
