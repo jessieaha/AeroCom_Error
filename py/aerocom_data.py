@@ -35,11 +35,12 @@ _ZLIB_COMPLEVEL = 4
 #     "od870aer", "od865aer", "od550bc", "od550dust", "od550oa", "od550so4", "od550ss"
 # )
 
-# Define regional models that use 870nm instead of 440nm for Angstrom Exponent
-AE_870_MODELS = {
-    'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 
-    'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010'
-}
+# # Define regional models that use 870nm instead of 440nm for Angstrom Exponent
+# AE_870_MODELS = {
+#     'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 
+#     'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010'
+# }
+# do auto search on 870 first otherwise 865 then 440 
 # ==============================================================================
 # LONGITUDE NORMALIZATION
 # ==============================================================================
@@ -156,11 +157,33 @@ def normalize_dataset_time(ds, var_hint=None, year=None):
     if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
         try:
             raw = da.time.values
+            # Drop any fill values (e.g. OsloCTM3 emiss has a trailing 9.96921e36).
+            if raw.dtype.kind in 'iuf':
+                valid_mask = raw < 1e30
+                if not np.all(valid_mask):
+                    da = da.isel(time=np.where(valid_mask)[0])
+                    raw = da.time.values
+
+            calendar = da.time.attrs.get('calendar', 'standard')
+            is_nonstd_calendar = calendar in ('365_day', '360_day', 'noleap', 'all_leap', '366_day')
+            values_are_months = (
+                raw.dtype.kind in 'iuf' and
+                np.all(raw >= 1) and np.all(raw <= 12)
+            )
+
             if raw.dtype.kind in 'iuf' and np.all(raw > 100000) and np.all(raw < 999999):
                 pass
+            elif is_nonstd_calendar and values_are_months and year is not None:
+                # OsloCTM3-style files store 1..12 (months of the target year) but
+                # give a bogus reference date / units string. Ignore the reference and
+                # map directly to first-of-month of the year from the filename.
+                new_times = np.array([
+                    np.datetime64(f'{year:04d}-{int(round(m)):02d}-01', 'ns')
+                    for m in raw
+                ])
+                da = da.assign_coords(time=new_times)
             elif 'units' in da.time.attrs:
                 units = da.time.attrs.get('units', '')
-                calendar = da.time.attrs.get('calendar', 'standard')
                 try:
                     new_times = decode_cf_datetime(raw, units, calendar)
                 except Exception:
@@ -175,7 +198,7 @@ def normalize_dataset_time(ds, var_hint=None, year=None):
             elif hasattr(da.indexes.get('time', None), 'to_datetimeindex'):
                 try:
                     new_times = da.indexes['time'].to_datetimeindex().values
-                except OverflowError:
+                except Exception:
                     # Fall back: manually build datetime64 from cftime year/month
                     new_times = np.array([
                         np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
@@ -663,23 +686,23 @@ def calculate_derived_var(model_data, model_name, derived_var):
             # AE = - log(AOD_550 / AOD_other) / log(550 / other)
             od550 = _get_dataarray(model_data.get('od550aer'), 'od550aer')
 
-            if model_name in AE_870_MODELS:
-                od870 = _get_dataarray(model_data.get('od870aer'), 'od870aer')
-                od865 = _get_dataarray(model_data.get('od865aer'), 'od865aer')
-                if od870 is not None:
-                    od_other = od870
-                    other_wavelength = 870
-                elif od865 is not None:
-                    od_other = od865
-                    other_wavelength = 865
-                else:
-                    od_other = None
+            od870 = _get_dataarray(model_data.get('od870aer'), 'od870aer')
+            od865 = _get_dataarray(model_data.get('od865aer'), 'od865aer')
+            od_other = None 
+            if od870 is not None:
+                od_other = od870
+                other_wavelength = 870
+            elif od865 is not None:
+                od_other = od865
+                other_wavelength = 865
             else:
                 od_other = _get_dataarray(model_data.get('od440aer'), 'od440aer')
                 other_wavelength = 440
 
-            if od550 is None or od_other is None:
-                raise ValueError(f"Missing spectral bands to compute Angstrom Exponent for {model_name}.")
+            if od550 is None:
+                raise ValueError(f"Missing 550nm AOD for {model_name}.")
+            elif od_other is None:
+                raise ValueError(f"Missing other spectral bands to compute Angstrom Exponent for {model_name}.")
 
             divisor = np.log(550.0 / other_wavelength)
 
