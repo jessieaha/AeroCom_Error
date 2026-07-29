@@ -648,14 +648,16 @@ def calculate_derived_var(model_data, model_name, derived_var):
         if derived_var == 'MEC':
             # MEC = AOD_550 / (total_load * 1e3)
             od = _get_dataarray(model_data.get('od550aer'), 'od550aer')
+            load_keys = ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss']
             # Sum up loaded variables dynamically (ignoring missing species cleanly if needed)
             loads = [
                 _get_dataarray(model_data.get(k), k)
-                for k in ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss']
+                for k in load_keys
                 if model_data.get(k) is not None
             ]
+            missing = [k for k in ['od550aer'] + load_keys if model_data.get(k) is None]
             if od is None or not loads:
-                raise ValueError("Missing 'od550aer' or loading fields.")
+                raise ValueError(f"Missing {', '.join(missing)} for {model_name}/MEC.")
             total_load = sum(loads)
 
             mec = od / (total_load * 1e3)
@@ -663,21 +665,26 @@ def calculate_derived_var(model_data, model_name, derived_var):
 
         elif derived_var == 'MAC':
             # MAC = AAOD_550 / (load_BC_OA * 1e3)
-            abs550 = _get_dataarray(model_data.get('abs550aer'), 'abs550aer')
-            bc = _get_dataarray(model_data.get('loadbc'), 'loadbc')
-            oa = _get_dataarray(model_data.get('loadoa'), 'loadoa')
+            mac_keys = ['abs550aer', 'loadbc', 'loadoa']
+            abs550, bc, oa = (
+                _get_dataarray(model_data.get(k), k) for k in mac_keys
+            )
+            missing = [k for k in mac_keys if model_data.get(k) is None]
             if abs550 is None or bc is None or oa is None:
-                raise ValueError("Missing absorption 'abs550aer' or loads (loadbc/loadoa).")
+                raise ValueError(f"Missing {', '.join(missing)} for {model_name}/MAC.")
 
             mac = abs550 / ((bc + oa) * 1e3)
             return mac.to_dataset(name='MAC')
 
         elif derived_var == 'SSA':
             # SSA = 1 - (AAOD_550 / AOD_550)
-            abs550 = _get_dataarray(model_data.get('abs550aer'), 'abs550aer')
-            od550 = _get_dataarray(model_data.get('od550aer'), 'od550aer')
+            ssa_keys = ['abs550aer', 'od550aer']
+            abs550, od550 = (
+                _get_dataarray(model_data.get(k), k) for k in ssa_keys
+            )
+            missing = [k for k in ssa_keys if model_data.get(k) is None]
             if abs550 is None or od550 is None:
-                raise ValueError("Missing 'abs550aer' or 'od550aer'.")
+                raise ValueError(f"Missing {', '.join(missing)} for {model_name}/SSA.")
 
             ssa = 1.0 - (abs550 / od550)
             return ssa.to_dataset(name='SSA')
