@@ -72,7 +72,7 @@ def normalize_longitude(ds, lon_name='lon'):
 
     return ds
 
-def normalize_dataset_time(ds, var_hint=None):
+def normalize_dataset_time(ds, var_hint=None, year=None):
     """Normalize time coordinate of a dataset to first-of-month."""
     # Lazy import: functions pulls optional viz deps (cartopy) at module level
     _script_dir = Path(__file__).resolve().parent
@@ -103,20 +103,55 @@ def normalize_dataset_time(ds, var_hint=None):
                 for t in values
             ])
 
+    def _decode_months_since(raw, units, year=None):
+        """Decode 'months since YYYY-MM-DD' units for non-standard calendars without cftime.
+
+        If a target year is supplied and the raw values are 1..12 while the parsed
+        reference year is far from the target year (e.g. OsloCTM3 files that store
+        1..12 but claim 'Monthssince 1850-01-01'), treat the values as 1-based
+        months of the target year instead.
+        """
+        import re
+        m = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', units)
+        if not m:
+            return None
+        # Accept strings like 'Monthssince 1850-01-01', 'months since 1850-01-01', etc.
+        if 'month' not in units.lower().replace(' ', ''):
+            return None
+        months = np.asarray(raw, dtype=np.int64)
+        ref_year, ref_month, ref_day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        total_months = (ref_year * 12 + ref_month - 1) + months
+        years = total_months // 12
+        months_of_year = (total_months % 12) + 1
+        dates = np.array([
+            np.datetime64(f'{int(y):04d}-{int(m):02d}-01', 'ns')
+            for y, m in zip(years, months_of_year)
+        ])
+        # Fallback for files with a bogus reference year but 1-based month-of-year values.
+        if (year is not None and
+                np.all(months >= 1) and np.all(months <= 12) and
+                np.all(np.abs(years - year) > 100)):
+            dates = np.array([
+                np.datetime64(f'{year:04d}-{int(m):02d}-01', 'ns')
+                for m in months
+            ])
+        return dates
+
     if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
         try:
             raw = da.time.values
             if raw.dtype.kind in 'iuf' and np.all(raw > 100000) and np.all(raw < 999999):
                 pass
             elif 'units' in da.time.attrs:
+                units = da.time.attrs.get('units', '')
+                calendar = da.time.attrs.get('calendar', 'standard')
                 try:
-                    new_times = decode_cf_datetime(
-                        da.time.values,
-                        da.time.attrs.get('units'),
-                        da.time.attrs.get('calendar', 'standard'),
-                    )
+                    new_times = decode_cf_datetime(raw, units, calendar)
                 except Exception:
-                    new_times = pd.to_datetime([str(t) for t in da.time.values]).values
+                    # Fallback for non-standard calendars (e.g. 365_day) without cftime.
+                    new_times = _decode_months_since(raw, units, year=year)
+                    if new_times is None:
+                        new_times = pd.to_datetime([str(t) for t in raw]).values
                 da = da.assign_coords(time=new_times)
             elif hasattr(da.indexes.get('time', None), 'to_datetimeindex'):
                 try:
@@ -130,7 +165,7 @@ def normalize_dataset_time(ds, var_hint=None):
                 da = da.assign_coords(time=new_times)
             else:
                 da = da.assign_coords(
-                    time=pd.to_datetime([str(t) for t in da.time.values]).values
+                    time=pd.to_datetime([str(t) for t in raw]).values
                 )
         except Exception as e:
             print(f'  Warning: cftime conversion failed for {var_hint}: {e}')
@@ -251,7 +286,7 @@ def standardize_dataset(ds, var_name):
     return ds
 
 
-def preprocess_for_save(ds, var_name, model_hint=None, temporal='monthly'):
+def preprocess_for_save(ds, var_name, model_hint=None, temporal='monthly', year=None):
     """Full analysis-ready preprocess: coords, lon 0-360, monthly time, precip units.
 
     Pipeline (matches AAOD_error_attribution.ipynb cell-5 expectations):
@@ -262,7 +297,7 @@ def preprocess_for_save(ds, var_name, model_hint=None, temporal='monthly'):
     ds = standardize_dataset(ds, var_name)
     hint = model_hint if model_hint is not None else var_name
     if temporal == 'monthly':
-        ds = normalize_dataset_time(ds, var_hint=hint)
+        ds = normalize_dataset_time(ds, var_hint=hint, year=year)
         if ds is None:
             return None
     if var_name in ('precip', 'pr'):
@@ -320,6 +355,13 @@ def _log_failed_files(failed_files, output_base_dir):
         print(f"    -> {err}")
     print(f"\nFull failure log written to: {log_file}")
     print("=============================================\n")
+
+
+def _extract_year_from_path(filepath):
+    """Extract a four-digit year from the filename (e.g. 2010)."""
+    import re
+    m = re.search(r'(20\d{2}|19\d{2})', os.path.basename(filepath))
+    return int(m.group(1)) if m else None
 
 
 # ==============================================================================
@@ -459,6 +501,8 @@ def process_and_save_model_data(
                     summary['missing'] += 1
                     continue
 
+                year = None
+
                 if not renew and os.path.exists(out_file):
                     try:
                         if os.path.getmtime(out_file) >= os.path.getmtime(filepath):
@@ -472,11 +516,20 @@ def process_and_save_model_data(
                 ds_raw = None
                 ds = None
                 try:
+                    # Decode time ourselves so malformed/missing-space units (e.g.
+                    # OsloCTM3's 'Monthssince 1850-01-01' with calendar '365_day')
+                    # do not make xarray throw before preprocess_for_save can fix them.
                     ds_raw = xr.open_dataset(
-                        filepath, chunks='auto', engine='netcdf4'
+                        filepath, chunks='auto', engine='netcdf4', decode_times=False
                     )
+                    # Only pass the target year for non-standard calendars that need
+                    # the reference-year override (e.g. OsloCTM3 365_day files).
+                    calendar = ds_raw.time.attrs.get('calendar', 'standard') if 'time' in ds_raw.coords else 'standard'
+                    if calendar in ('365_day', '360_day', 'noleap', 'all_leap', '366_day'):
+                        year = _extract_year_from_path(filepath)
                     ds = preprocess_for_save(
-                        ds_raw, var, model_hint=f'{model}/{var}', temporal=temporal
+                        ds_raw, var, model_hint=f'{model}/{var}', temporal=temporal,
+                        year=year,
                     )
                     if ds is None:
                         summary['missing'] += 1
