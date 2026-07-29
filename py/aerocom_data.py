@@ -137,6 +137,22 @@ def normalize_dataset_time(ds, var_hint=None, year=None):
             ])
         return dates
 
+    def _cftime_to_datetime64(values):
+        """Convert cftime objects (e.g. DatetimeJulian, DatetimeNoLeap) to datetime64.
+
+        Monthly data is normalised to first-of-month afterwards, so mapping to
+        year-month-01 is sufficient and avoids invalid days in non-standard calendars.
+        """
+        if len(values) == 0:
+            return values
+        first = values[0]
+        if hasattr(first, 'year') and hasattr(first, 'month'):
+            return np.array([
+                np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
+                for t in values
+            ])
+        return values
+
     if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
         try:
             raw = da.time.values
@@ -152,6 +168,9 @@ def normalize_dataset_time(ds, var_hint=None, year=None):
                     new_times = _decode_months_since(raw, units, year=year)
                     if new_times is None:
                         new_times = pd.to_datetime([str(t) for t in raw]).values
+                # decode_cf_datetime may return cftime objects (Julian/NoLeap/365_day).
+                # Convert them to datetime64 so pandas/xarray can handle them later.
+                new_times = _cftime_to_datetime64(new_times)
                 da = da.assign_coords(time=new_times)
             elif hasattr(da.indexes.get('time', None), 'to_datetimeindex'):
                 try:
