@@ -8,14 +8,23 @@ lazy xarray Datasets. Missing variables are gracefully marked as None.
 """
 
 import os
+import sys
+import gc
 import glob
 import logging
-import xarray as xr
+from datetime import datetime
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
+import xarray as xr
+from xarray.coding.times import decode_cf_datetime
 
 # Configure standard logging to report missing files cleanly
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+# Default zlib encoding complevel for processed NetCDF writes
+_ZLIB_COMPLEVEL = 4
 # ==============================================================================
 # GLOBAL CONFIGURATIONS
 # ==============================================================================
@@ -31,49 +40,6 @@ AE_870_MODELS = {
     'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 
     'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010'
 }
-# 440
-# ECHAM6-SALSA_CTRL2016-PD/aerocom3_ECHAM6-SALSA_CTRL2016-PD_od440aer_Column_2010_3hourly.nc
-# ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD/aerocom3_ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD_od440aer_Column_2010_3hourly.nc
-# ECMWF-IFS-CY45R1-CAMS-CTRL-met2010_AP3-CTRL/aerocom3_ECMWF-IFS-CY45R1-CAMS-CTRL-met2010_AP3-CTRL_od440aer_Column_2010_3hourly.nc
-# ECMWF-IFS-CY46R1-CAMS-CTRL-met2010_AP3-CTRL/aerocom3_ECMWF-IFS-CY46R1-CAMS-CTRL-met2010_AP3-CTRL_od440aer_Column_2010_3hourly.nc
-# GEOS-Chem-v11-01_AP3-CTRL2016-PD/aerocom3_GEOS-Chem-v11-01_AP3-CTRL2016-PD_od440aer_Column_2010_3hourly.nc
-# HadGEM3-GA7.1_AP3-CTRL2016-PD/aerocom3_HadGEM3-GA7.1_AP3-CTRL2016-PD_od440aer_Column_2010_3hourly.nc
-# IMPACT_CTRL2016/aerocom3_IMPACT_CTRL2016_od440aer_Column_2010_3hourly.nc
-# MIROC-SPRINTARS_AP3-CTRL/aerocom3_MIROC-SPRINTARS_AP3-CTRL_od440aer_Column_2010_3hourly.nc
-# SPRINTARS-T213_AP3-CTRL2016-PD/aerocom3_SPRINTARS-T213_AP3-CTRL2016-PD_od440aer_Column_2010_3hourly.nc
-# TM5_AP3-CTRL2016/aerocom3_TM5_AP3-CTRL2016_od440aer_Column_2010_3hourly.nc
-# 870 
-# GEOS-Chem-v11-01_AP3-CTRL2016-PD/aerocom3_GEOS-Chem-v11-01_AP3-CTRL2016-PD_od870aer_Column_2010_3hourly.nc
-# HadGEM3-GA7.1_AP3-CTRL2016-PD/aerocom3_HadGEM3-GA7.1_AP3-CTRL2016-PD_od870aer_Column_2010_3hourly.nc
-# MIROC-SPRINTARS_AP3-CTRL/aerocom3_MIROC-SPRINTARS_AP3-CTRL_od870aer_Column_2010_3hourly.nc
-# SPRINTARS-T213_AP3-CTRL2016-PD/aerocom3_SPRINTARS-T213_AP3-CTRL2016-PD_od870aer_Column_2010_3hourly.nc
-# TM5_AP3-CTRL2016/aerocom3_TM5_AP3-CTRL2016_od870aer_Column_2010_3hourly.nc
-
-#3 hourly models Data/AP3_2026 :
-# AP3_2026/ECHAM6-SALSA_CTRL2016-PD/aerocom3_ECHAM6-SALSA_CTRL2016-PD_od550aer3d_ModelLevel_2010_3hourly.nc
-# AP3_2026/ECHAM6-SALSA_CTRL2016-PD/aerocom3_ECHAM6-SALSA_CTRL2016-PD_od550aer_Column_2010_3hourly.nc
-# AP3_2026/ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD/aerocom3_ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD_od550aer_Column_2010_3hourly.nc
-# AP3_2026/ECMWF-IFS-CY45R1-CAMS-CTRL-met2010_AP3-CTRL/aerocom3_ECMWF-IFS-CY45R1-CAMS-CTRL-met2010_AP3-CTRL_od550aer_Column_2010_3hourly.nc
-# AP3_2026/ECMWF-IFS-CY46R1-CAMS-CTRL-met2010_AP3-CTRL/aerocom3_ECMWF-IFS-CY46R1-CAMS-CTRL-met2010_AP3-CTRL_od550aer_Column_2010_3hourly.nc
-# AP3_2026/GEOS-Chem-v11-01_AP3-CTRL2016-PD/aerocom3_GEOS-Chem-v11-01_AP3-CTRL2016-PD_od550aer_Column_2010_3hourly.nc
-# AP3_2026/HadGEM3-GA7.1_AP3-CTRL2016-PD/aerocom3_HadGEM3-GA7.1_AP3-CTRL2016-PD_od550aer_Column_2010_3hourly.nc
-# AP3_2026/IMPACT_CTRL2016/aerocom3_IMPACT_CTRL2016_od550aer3d_ModelLevel_2010_3hourly.nc
-# AP3_2026/IMPACT_CTRL2016/aerocom3_IMPACT_CTRL2016_od550aer_Column_2010_3hourly.nc
-# AP3_2026/MIROC-SPRINTARS_AP3-CTRL/aerocom3_MIROC-SPRINTARS_AP3-CTRL_od550aer_Column_2010_3hourly.nc
-# AP3_2026/SPRINTARS-T213_AP3-CTRL2016-PD/aerocom3_SPRINTARS-T213_AP3-CTRL2016-PD_od550aer_Column_2010_3hourly.nc
-# AP3_2026/TM5_AP3-CTRL2016/aerocom3_TM5_AP3-CTRL2016_od550aer3d_ModelLevel_2010_3hourly.nc
-# AP3_2026/TM5_AP3-CTRL2016/aerocom3_TM5_AP3-CTRL2016_od550aer_Column_2010_3hourly.nc
-
-# 3 hourly model Data/AEROCOME_III :
-# AEROCOM_III/CAM5.3-Oslo_AP3-CTRL2016-PD/aerocom3_CAM5.3-Oslo_AP3-CTRL2016-PD_od550aer_Column_2010_3hourly.nc
-# AEROCOM_III/CAM5_CTRL2016/aerocom3_CAM5_CTRL2016_od550aer_Column_2010_3hourly.nc
-# AEROCOM_III/ECHAM6-HAM2_AP3-CTRL2016-PD/aerocom3_ECHAM6-HAM2_AP3-CTRL2016-PD_od550aer_Column_2010_3hourly.nc
-# AEROCOM_III/ECHAM6-SALSA_CTRL2016-PD/aerocom3_ECHAM6-SALSA_CTRL2016-PD_od550aer_Column_2010_3hourly.nc
-# AEROCOM_III/ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD/aerocom3_ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD_od550aer_Column_2010_3hourly.nc
-# AEROCOM_III/GEOS-i33p2-met2010_AP3-CTRL/aerocom3_GEOS-i33p2-met2010_AP3-CTRL_od550aer_Column_2010_3hourly.nc
-# AEROCOM_III/HadGEM3-GA7.1_AP3-CTRL2016-PD/aerocom3_HadGEM3-GA7.1_AP3-CTRL2016-PD_od550aer_Column_2010_3hourly.nc
-# AEROCOM_III/MIROC-SPRINTARS_AP3-CTRL/aerocom3_MIROC-SPRINTARS_AP3-CTRL_od550aer_Column_2010_3hourly.nc
-# AEROCOM_III/TM5_AP3-CTRL2016/aerocom3_TM5_AP3-CTRL2016_od550aer_Column_2010_3hourly.nc
 # ==============================================================================
 # LONGITUDE NORMALIZATION
 # ==============================================================================
@@ -105,6 +71,115 @@ def normalize_longitude(ds, lon_name='lon'):
         ds = ds.isel({lon_name: unique_idx})
 
     return ds
+
+def normalize_dataset_time(ds, var_hint=None):
+    """Normalize time coordinate of a dataset to first-of-month."""
+    # Lazy import: functions pulls optional viz deps (cartopy) at module level
+    _script_dir = Path(__file__).resolve().parent
+    if str(_script_dir) not in sys.path:
+        sys.path.insert(0, str(_script_dir))
+    import functions
+
+    if ds is None or not list(ds.data_vars):
+        return None
+    var_name = list(ds.data_vars)[0]
+    da = ds[var_name]
+    if 'time' not in da.dims or len(da.time) == 0:
+        return ds
+
+    if var_hint and 'GEOS' in str(var_hint).upper():
+        try:
+            ds = xr.decode_cf(ds)
+            da = ds[var_name]
+        except Exception as e:
+            print(f'  Warning: GEOS decode_cf failed for {var_hint}: {e}')
+
+    def _to_month_start(values):
+        try:
+            return pd.to_datetime(values).to_period('M').to_timestamp().values
+        except Exception:
+            return np.array([
+                np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
+                for t in values
+            ])
+
+    if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
+        try:
+            raw = da.time.values
+            if raw.dtype.kind in 'iuf' and np.all(raw > 100000) and np.all(raw < 999999):
+                pass
+            elif 'units' in da.time.attrs:
+                try:
+                    new_times = decode_cf_datetime(
+                        da.time.values,
+                        da.time.attrs.get('units'),
+                        da.time.attrs.get('calendar', 'standard'),
+                    )
+                except Exception:
+                    new_times = pd.to_datetime([str(t) for t in da.time.values]).values
+                da = da.assign_coords(time=new_times)
+            elif hasattr(da.indexes.get('time', None), 'to_datetimeindex'):
+                try:
+                    new_times = da.indexes['time'].to_datetimeindex().values
+                except OverflowError:
+                    # Fall back: manually build datetime64 from cftime year/month
+                    new_times = np.array([
+                        np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
+                        for t in da.indexes['time']
+                    ])
+                da = da.assign_coords(time=new_times)
+            else:
+                da = da.assign_coords(
+                    time=pd.to_datetime([str(t) for t in da.time.values]).values
+                )
+        except Exception as e:
+            print(f'  Warning: cftime conversion failed for {var_hint}: {e}')
+            return ds
+
+    da = functions.normalize_monthly_time(da)
+    da = da.assign_coords(time=_to_month_start(da.time.values))
+    return da.to_dataset(name=var_name)
+
+
+
+def normalize_precipitation_units(precip_ds):
+    """Convert model precipitation to mm day^-1.
+
+    Handles kg/m2/s, g/m2/s, and the typo 'km m-2 s-1' seen in ECHAM6.3-HAM2.3.
+    Also applies a sanity check: if the global mean is > 100 mm/day after the
+    stated-unit conversion, the file is likely in g/m2/s despite the label.
+    """
+    if precip_ds is None:
+        return None
+    var_name = list(precip_ds.data_vars)[0]
+    da = precip_ds[var_name]
+    units = da.attrs.get('units', 'kg m-2 s-1').lower().replace(' ', '')
+    # Common variants
+    if units in ('kgm-2s-1', 'kgm^-2s^-1', 'kg/m2/s', 'kgm-2s-1'):
+        factor = 86400.0  # kg m^-2 s^-1 -> mm day^-1
+    elif units in ('gm-2s-1', 'gm^-2s^-1', 'g/m2/s', 'gm-2s-1'):
+        factor = 86.4  # g m^-2 s^-1 -> mm day^-1
+    elif units in ('mmday-1', 'mm/day', 'mmday^-1', 'mmd-1'):
+        factor = 1.0
+    elif units in ('ms-1', 'm/s', 'm s-1'):
+        factor = 86400.0 * 1000.0  # m s^-1 -> mm day^-1 (water density ~1000 kg/m3)
+    else:
+        # 'km m-2 s-1' is treated as a typo for kg m^-2 s^-1
+        factor = 86400.0
+    da = da * factor
+    # Sanity check: global mean should be ~2-3 mm/day. If > 100 mm/day, divide by 1000
+    # because the file was probably in g m^-2 s^-1 despite the label.
+    # Compute once per file (streaming path); use skipna for robustness.
+    try:
+        mean_da = da.mean(skipna=True)
+        # Force compute for dask-backed arrays; .values also works for numpy.
+        global_mean = float(np.asarray(mean_da.values))
+    except Exception:
+        global_mean = np.nan
+    if not np.isnan(global_mean) and global_mean > 100.0:
+        da = da / 1000.0
+    da.attrs['units'] = 'mm day-1'
+    return da.to_dataset(name=var_name)
 
 
 # ==============================================================================
@@ -176,14 +251,123 @@ def standardize_dataset(ds, var_name):
     return ds
 
 
+def preprocess_for_save(ds, var_name, model_hint=None, temporal='monthly'):
+    """Full analysis-ready preprocess: coords, lon 0-360, monthly time, precip units.
+
+    Pipeline (matches AAOD_error_attribution.ipynb cell-5 expectations):
+      1. standardize_dataset (rename / squeeze / normalize_longitude)
+      2. normalize_dataset_time (first-of-month) — monthly only
+      3. normalize_precipitation_units when var_name is precip/pr
+    """
+    ds = standardize_dataset(ds, var_name)
+    hint = model_hint if model_hint is not None else var_name
+    if temporal == 'monthly':
+        ds = normalize_dataset_time(ds, var_hint=hint)
+        if ds is None:
+            return None
+    if var_name in ('precip', 'pr'):
+        ds = normalize_precipitation_units(ds)
+    return ds
+
+
+def _netcdf_encoding(ds):
+    """zlib compression encoding for all data variables."""
+    return {
+        name: {'zlib': True, 'complevel': _ZLIB_COMPLEVEL}
+        for name in ds.data_vars
+    }
+
+
+# ==============================================================================
+# SAFE FILE HANDLE HELPERS
+# ==============================================================================
+def _close_dataset_safely(ds):
+    """Close an xarray Dataset, swallowing any errors from a corrupted backend."""
+    try:
+        if ds is not None:
+            ds.close()
+    except Exception:
+        pass
+
+
+def _log_failed_files(failed_files, output_base_dir):
+    """Write a timestamped log of failed source NetCDF files and print a summary."""
+    if not failed_files:
+        return
+
+    os.makedirs(output_base_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(output_base_dir, f"failed_netcdf_files_{timestamp}.log")
+
+    try:
+        with open(log_file, 'w') as f:
+            f.write(f"# Failed NetCDF source files - {timestamp}\n")
+            f.write(f"# Total failures: {len(failed_files)}\n\n")
+            for filepath, model_var, err in failed_files:
+                f.write(f"{model_var}\n")
+                f.write(f"  file: {filepath}\n")
+                f.write(f"  error: {err}\n\n")
+    except Exception as e:
+        logging.warning(f"Could not write failed-files log {log_file}: {e}")
+        return
+
+    print("\n=============================================")
+    print(f"FAILED NETCDF FILES: {len(failed_files)}")
+    print("=============================================")
+    for filepath, model_var, err in failed_files:
+        print(f"  {model_var}")
+        print(f"    {filepath}")
+        print(f"    -> {err}")
+    print(f"\nFull failure log written to: {log_file}")
+    print("=============================================\n")
+
+
+# ==============================================================================
+# FILE DISCOVERY
+# ==============================================================================
+def find_variable_file(base_dir, model, var, temporal):
+    """Locate the first matching AeroCom NetCDF for model/variable/temporal.
+
+    Returns
+    -------
+    str or None
+        Absolute path to the first matching file, or None if not found.
+    """
+    model_dir = os.path.join(base_dir, model)
+    var_names = [var]
+    if var == 'precip':
+        var_names.append('pr')
+    elif var == 'pr':
+        var_names.append('precip')
+
+    patterns = []
+    for vn in var_names:
+        patterns.extend([
+            os.path.join(model_dir, f"*{vn}_*Column*2010*{temporal}*.nc"),
+            os.path.join(model_dir, f"*{vn}_*Surface*2010*{temporal}*.nc"),
+            os.path.join(model_dir, f"*{vn}_*ModelLevel*2010*{temporal}*.nc"),
+            os.path.join(model_dir, f"*{vn}_*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*{vn}_*Column*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*{vn}_*Surface*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*{vn}_*ModelLevel*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*{vn}_*2010*{temporal}*.nc"),
+        ])
+
+    for pattern in patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    return None
+
+
 # ==============================================================================
 # BULK DYNAMIC DATA LOADER (GLOB PATTERNS)
 # ==============================================================================
 def load_all_model_data(base_dir, models, variables, temporal, standardize=True):
     """
-    Automatically search files, open them lazily via Xarray, and return 
+    Automatically search files, open them lazily via Xarray, and return
     a structured dictionary map: data[model][variable] = xr.Dataset (or None)
-    
+
     :param base_dir: Path to directory containing model subfolders.
     :param models: List of model directory names to scan.
     :param variables: Iterable containing variables to look up.
@@ -192,59 +376,146 @@ def load_all_model_data(base_dir, models, variables, temporal, standardize=True)
     :return: dict structured as {model: {variable: xr.Dataset_or_None}}
     """
     data_dict = {}
-    
+
     for model in models:
         data_dict[model] = {}
-        model_dir = os.path.join(base_dir, model)
-        
         logging.info(f"Scanning directory for model: {model} ...")
-        
+
         for var in variables:
-            # Allow precipitation files to be named either 'precip' or 'pr'
-            var_names = [var]
-            if var == 'precip':
-                var_names.append('pr')
-            elif var == 'pr':
-                var_names.append('precip')
-
-            patterns = []
-            for vn in var_names:
-                patterns.extend([
-                    os.path.join(model_dir, f"*{vn}_*Column*2010*{temporal}*.nc"),       # Column variables (e.g., loads, optical)
-                    os.path.join(model_dir, f"*{vn}_*Surface*2010*{temporal}*.nc"),      # Surface variables (e.g., emissions, deposition)
-                    os.path.join(model_dir, f"*{vn}_*ModelLevel*2010*{temporal}*.nc"),  # Model-level variables (e.g., some precipitation)
-                    os.path.join(model_dir, f"*{vn}_*2010*{temporal}*.nc"),             # Generic fallback
-                    os.path.join(base_dir, f"*{model}*{vn}_*Column*2010*{temporal}*.nc"),  # Flat directory fallback
-                    os.path.join(base_dir, f"*{model}*{vn}_*Surface*2010*{temporal}*.nc"), # Flat directory fallback (Surface)
-                    os.path.join(base_dir, f"*{model}*{vn}_*ModelLevel*2010*{temporal}*.nc"), # Flat directory fallback (ModelLevel)
-                    os.path.join(base_dir, f"*{model}*{vn}_*2010*{temporal}*.nc"),         # Flat directory generic fallback
-                ])
-
-            filepath = None
-            for pattern in patterns:
-                matches = glob.glob(pattern)
-                if matches:
-                    filepath = matches[0]  # Pick first match
-                    break
+            filepath = find_variable_file(base_dir, model, var, temporal)
 
             if filepath and os.path.exists(filepath):
                 try:
-                    # Open dataset lazily without loading actual array bytes into RAM
-                    ds = xr.open_dataset(filepath, chunks='auto')
+                    ds = xr.open_dataset(filepath, chunks='auto', engine='netcdf4')
 
                     if standardize:
                         ds = standardize_dataset(ds, var)
 
                     data_dict[model][var] = ds
-                    logging.debug(f"  ✓ Found & opened: {var} -> {os.path.basename(filepath)}")
+                    logging.debug(f"  Found & opened: {var} -> {os.path.basename(filepath)}")
                 except Exception as e:
-                    logging.warning(f"  ❌ Error reading '{filepath}' for variable '{var}': {e}")
+                    logging.warning(f"  Error reading '{filepath}' for variable '{var}': {e}")
                     data_dict[model][var] = None
             else:
-                # Variable does not exist on disk, mark as NA
                 data_dict[model][var] = None
-                
+
     return data_dict
+
+
+# ==============================================================================
+# STREAMING PROCESS + SAVE
+# ==============================================================================
+def process_and_save_model_data(
+    base_dirs,
+    variables,
+    temporal,
+    output_base_dir,
+    renew=False,
+):
+    """Open, normalize, and save one model x variable at a time.
+
+    Never builds a master dictionary of Datasets. Each file is opened,
+    preprocessed (lon / time / precip), written, and closed before the next.
+
+    Parameters
+    ----------
+    base_dirs : list of (base_dir, models)
+        Ordered source groups, e.g. [(dir_primary, primary_models), ...].
+        A model present in an earlier group is not reprocessed from a later one.
+    variables : iterable of str
+        Variable names to process.
+    temporal : str
+        Frequency filter ('monthly', '3hourly', ...).
+    output_base_dir : str
+        Root for processed NetCDFs: {base}/{var}/{model}_{var}_processed.nc
+    renew : bool, default False
+        If False, skip when the output already exists and is at least as new
+        as the source (mtime). If True, overwrite all outputs.
+
+    Returns
+    -------
+    dict
+        Summary counts: saved, skipped, missing, errors, plus a 'failed_files'
+        list of (filepath, model/var, error_message) tuples.
+    """
+    print(f"\nStreaming process -> {output_base_dir} (RENEW={renew})")
+    summary = {'saved': 0, 'skipped': 0, 'missing': 0, 'errors': 0}
+    failed_files = []
+    seen_models = set()
+
+    for base_dir, models in base_dirs:
+        for model in models:
+            if model in seen_models:
+                continue
+            seen_models.add(model)
+            logging.info(f"Processing model: {model} ...")
+
+            for var in variables:
+                out_dir = os.path.join(output_base_dir, var)
+                out_file = os.path.join(out_dir, f"{model}_{var}_processed.nc")
+                filepath = find_variable_file(base_dir, model, var, temporal)
+
+                if filepath is None or not os.path.exists(filepath):
+                    summary['missing'] += 1
+                    continue
+
+                if not renew and os.path.exists(out_file):
+                    try:
+                        if os.path.getmtime(out_file) >= os.path.getmtime(filepath):
+                            summary['skipped'] += 1
+                            continue
+                    except OSError:
+                        pass  # fall through and rewrite
+
+                os.makedirs(out_dir, exist_ok=True)
+
+                ds_raw = None
+                ds = None
+                try:
+                    ds_raw = xr.open_dataset(
+                        filepath, chunks='auto', engine='netcdf4'
+                    )
+                    ds = preprocess_for_save(
+                        ds_raw, var, model_hint=f'{model}/{var}', temporal=temporal
+                    )
+                    if ds is None:
+                        summary['missing'] += 1
+                        continue
+
+                    # Load into memory so the source handle can be closed immediately.
+                    ds = ds.load()
+                    ds.to_netcdf(
+                        out_file,
+                        engine='netcdf4',
+                        encoding=_netcdf_encoding(ds),
+                    )
+                    ds.close()
+                    summary['saved'] += 1
+                    logging.info(f"  Saved {model}/{var}")
+
+                except Exception as e:
+                    summary['errors'] += 1
+                    failed_files.append((filepath, f"{model}/{var}", str(e)))
+                    logging.warning(f"  Error processing {model}/{var}: {e}")
+                    # Force cleanup of any leaked HDF5 objects after a backend error.
+                    gc.collect()
+
+                finally:
+                    _close_dataset_safely(ds)
+                    _close_dataset_safely(ds_raw)
+                    ds = None
+                    ds_raw = None
+
+    print("=============================================")
+    print(
+        f"Done: {summary['saved']} saved, {summary['skipped']} skipped, "
+        f"{summary['missing']} missing, {summary['errors']} errors."
+    )
+    print("=============================================\n")
+
+    _log_failed_files(failed_files, output_base_dir)
+    summary['failed_files'] = failed_files
+    return summary
 
 
 # ==============================================================================
@@ -270,9 +541,9 @@ def _get_dataarray(value, var_name):
 
 def calculate_derived_var(model_data, model_name, derived_var):
     """
-    Calculates complex aerosol diagnostics (MEC, MAC, SSA, AE) directly on the 
+    Calculates complex aerosol diagnostics (MEC, MAC, SSA, AE) directly on the
     lazily loaded xarray Datasets using highly performant, vectorized array math.
-    
+
     :param model_data: Dictionary for a specific model (i.e. data_dict[model_name])
     :param model_name: Name of the model currently processed (used for AE sensor wavelengths)
     :param derived_var: Metric to calculate ('MEC', 'MAC', 'SSA', 'AE')
@@ -291,10 +562,10 @@ def calculate_derived_var(model_data, model_name, derived_var):
             if od is None or not loads:
                 raise ValueError("Missing 'od550aer' or loading fields.")
             total_load = sum(loads)
-            
+
             mec = od / (total_load * 1e3)
             return mec.to_dataset(name='MEC')
-            
+
         elif derived_var == 'MAC':
             # MAC = AAOD_550 / (load_BC_OA * 1e3)
             abs550 = _get_dataarray(model_data.get('abs550aer'), 'abs550aer')
@@ -302,24 +573,24 @@ def calculate_derived_var(model_data, model_name, derived_var):
             oa = _get_dataarray(model_data.get('loadoa'), 'loadoa')
             if abs550 is None or bc is None or oa is None:
                 raise ValueError("Missing absorption 'abs550aer' or loads (loadbc/loadoa).")
-                
+
             mac = abs550 / ((bc + oa) * 1e3)
             return mac.to_dataset(name='MAC')
-            
+
         elif derived_var == 'SSA':
             # SSA = 1 - (AAOD_550 / AOD_550)
             abs550 = _get_dataarray(model_data.get('abs550aer'), 'abs550aer')
             od550 = _get_dataarray(model_data.get('od550aer'), 'od550aer')
             if abs550 is None or od550 is None:
                 raise ValueError("Missing 'abs550aer' or 'od550aer'.")
-                
+
             ssa = 1.0 - (abs550 / od550)
             return ssa.to_dataset(name='SSA')
-            
+
         elif derived_var == 'AE':
             # AE = - log(AOD_550 / AOD_other) / log(550 / other)
             od550 = _get_dataarray(model_data.get('od550aer'), 'od550aer')
-            
+
             if model_name in AE_870_MODELS:
                 od870 = _get_dataarray(model_data.get('od870aer'), 'od870aer')
                 od865 = _get_dataarray(model_data.get('od865aer'), 'od865aer')
@@ -334,52 +605,52 @@ def calculate_derived_var(model_data, model_name, derived_var):
             else:
                 od_other = _get_dataarray(model_data.get('od440aer'), 'od440aer')
                 other_wavelength = 440
-                
+
             if od550 is None or od_other is None:
                 raise ValueError(f"Missing spectral bands to compute Angstrom Exponent for {model_name}.")
-            
-            var_other = (
-                'od870aer' if other_wavelength == 870
-                else ('od865aer' if other_wavelength == 865 else 'od440aer')
-            )
+
             divisor = np.log(550.0 / other_wavelength)
-            
+
             ae = - np.log(od550 / od_other) / divisor
             return ae.to_dataset(name='AE')
-            
+
     except Exception as e:
         logging.warning(f"Could not calculate {derived_var} for {model_name}: {e}")
         return None
+
 
 def save_model_data_to_netcdf(data_dict, output_base_dir="./Data/AEROCOM_Processed/"):
     """
     Saves the extracted xarray Datasets into a structured directory of NetCDF files,
     organized into folders by variable name.
-    
+
+    Prefer process_and_save_model_data() for memory-efficient streaming writes.
+
     :param data_dict: The master dictionary {model: {variable: xr.Dataset}}
     :param output_base_dir: The root folder where processed data will be saved
     """
-    print(f"\n💾 Saving processed data to {output_base_dir} ...")
-    
+    print(f"\nSaving processed data to {output_base_dir} ...")
+
     saved_count = 0
     missing_count = 0
 
     for model, variables in data_dict.items():
         for var_name, ds in variables.items():
             if ds is not None:
-                # Create a specific output folder for this variable
                 var_out_dir = os.path.join(output_base_dir, var_name)
                 os.makedirs(var_out_dir, exist_ok=True)
-                
-                # Define the output file name (e.g., ./Data/AEROCOM_Processed/od550aer/GEOS-Chem_od550aer_processed.nc)
+
                 out_file = os.path.join(var_out_dir, f"{model}_{var_name}_processed.nc")
-                
+
                 try:
-                    # Save the dataset to NetCDF using standard compression and HPC compatibility
-                    ds.to_netcdf(out_file, engine='netcdf4')
+                    ds.to_netcdf(
+                        out_file,
+                        engine='netcdf4',
+                        encoding=_netcdf_encoding(ds),
+                    )
                     saved_count += 1
                 except Exception as e:
-                    print(f"  ❌ Error saving {out_file}: {e}")
+                    print(f"  Error saving {out_file}: {e}")
             else:
                 missing_count += 1
 
@@ -457,7 +728,7 @@ def load_monthly_data_from_netcdf(
 
             fpath = os.path.join(var_dir, fname)
             try:
-                ds = xr.open_dataset(fpath)
+                ds = xr.open_dataset(fpath, chunks='auto', engine='netcdf4')
                 if standardize:
                     ds = standardize_dataset(ds, var)
                 data_dict.setdefault(model, {})[var] = ds

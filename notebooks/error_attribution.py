@@ -77,7 +77,7 @@ if any(v in DERIVED_VAR_AFTER_AGG for v in ('lifetime', 'lifetime_BC_OA')):
 POST_AGG_LIFETIME_MAX_DAYS = None
 POST_AGG_LIFETIME_MIN_DAYS = None
 
-SAVE_FIGURE = False
+SAVE_FIGURE = True
 USE_PICKLE = False
 
 # MAC–SSA regression:
@@ -1174,10 +1174,10 @@ ax.set_title('(c) Mean error attribution', fontweight='bold')
 ax.legend()
 ax.grid(True, alpha=0.3, axis='y')
 
-# (d) Per-model stacked percentages
+# (d) Per-model stacked percentages (models in alphabetical order)
 ax = axes[1, 1]
 for idx, region in enumerate(plot_regions):
-    sub = decomp_df[decomp_df['region'] == region].sort_values('dAAOD_total', key=abs, ascending=False)
+    sub = decomp_df[decomp_df['region'] == region].sort_values('model', ascending=True)
     if sub.empty:
         continue
     n = len(sub)
@@ -1189,7 +1189,7 @@ for idx, region in enumerate(plot_regions):
     ax.bar(xpos, sub['pct_cross'], bottom=sub['pct_E'] + sub['pct_tau'] + sub['pct_MAC'],
            label='cross' if idx == 0 else '', color='#d62728')
 ax.set_ylabel('Contribution to |AAOD error| (%)', fontweight='bold')
-ax.set_xlabel('Model', fontweight='bold')
+ax.set_xlabel('Model (alphabetical)', fontweight='bold')
 ax.set_title('(d) AAOD error decomposition', fontweight='bold')
 ax.set_xticks([])
 ax.legend(loc='upper right')
@@ -1204,19 +1204,18 @@ if SAVE_FIGURE:
 plt.close(fig)
 
 
-# Per-region signed error bars (Fig. 3 detail)
+# Per-region signed error bars (Fig. 3 detail); shared alphabetical model list
 plot_regions = SOURCE_REGIONS
 fig, axes = plt.subplots(1, len(plot_regions) + 1, figsize=(7 * (len(plot_regions) + 1), 7))
-common_model_list = None
+common_model_list = sorted(decomp_df['model'].unique().tolist())
 for idx, region in enumerate(plot_regions):
     ax = axes[idx]
     sub = decomp_df[decomp_df['region'] == region].copy()
-    sub = sub.sort_values('dAAOD_total', key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
     if sub.empty:
         ax.set_visible(False)
         continue
-    if common_model_list is None:
-        common_model_list = sub['model'].tolist()
+    # Align all regions to the same alphabetical model order
+    sub = sub.set_index('model').reindex(common_model_list).reset_index()
 
     model_aod = aggregate_region(data_derived, 'abs550aer', region, return_time_series=False)
     obs_aod_mean = float(aaod_obs_by_region.get(region, np.nan))
@@ -1226,10 +1225,10 @@ for idx, region in enumerate(plot_regions):
     x = np.arange(len(sub))
     pos_bottom = np.zeros(len(sub))
     neg_bottom = np.zeros(len(sub))
-    pct_E_mean = sub['pct_E'].mean()
-    pct_tau_mean = sub['pct_tau'].mean()
-    pct_MAC_mean = sub['pct_MAC'].mean()
-    pct_cross_mean = sub['pct_cross'].mean()
+    pct_E_mean = sub['pct_E'].mean(skipna=True)
+    pct_tau_mean = sub['pct_tau'].mean(skipna=True)
+    pct_MAC_mean = sub['pct_MAC'].mean(skipna=True)
+    pct_cross_mean = sub['pct_cross'].mean(skipna=True)
     components = [
         ('dAAOD_E', f'E ({pct_E_mean:.1f}%)', '#90da4b'),
         ('dAAOD_tau', f'tau ({pct_tau_mean:.1f}%)', '#f1abed'),
@@ -1238,6 +1237,7 @@ for idx, region in enumerate(plot_regions):
     ]
     for col, label, color in components:
         vals = sub[col].to_numpy(dtype=float)
+        vals = np.nan_to_num(vals, nan=0.0)
         bottoms = np.where(vals >= 0, pos_bottom, neg_bottom)
         ax.bar(x, vals, bottom=bottoms, color=color, width=0.8)
         pos_bottom = np.where(vals >= 0, pos_bottom + vals, pos_bottom)
@@ -1247,7 +1247,7 @@ for idx, region in enumerate(plot_regions):
     ax.set_xticks(x)
     ax.set_xticklabels(np.arange(1, len(sub) + 1), fontsize=13)
     ax.set_ylabel('AAOD error contribution', fontsize=14, fontweight='bold')
-    ax.set_xlabel('Model number', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Model number (alphabetical)', fontsize=14, fontweight='bold')
     ax.text(0.02, 0.98, region.upper(), transform=ax.transAxes, va='top', ha='left',
             fontsize=18, fontweight='bold')
     ax.legend(handles=[
@@ -1260,7 +1260,7 @@ for idx, region in enumerate(plot_regions):
 
 ax_legend = axes[-1]
 ax_legend.axis('off')
-legend_lines = ['SHARED MODEL LIST:']
+legend_lines = ['SHARED MODEL LIST (alphabetical):']
 for i, model in enumerate(common_model_list or [], start=1):
     legend_lines.append(f'  {i:>2d}. {model}')
 ax_legend.text(0.02, 0.98, '\n'.join(legend_lines), transform=ax_legend.transAxes,
@@ -1299,7 +1299,7 @@ else:
     ax.legend()
 
     ax = axes[1]
-    sub = outflow_pred_df.sort_values('AAOD_model', ascending=False).reset_index(drop=True)
+    sub = outflow_pred_df.sort_values('model', ascending=True).reset_index(drop=True)
     x = np.arange(len(sub))
     ax.scatter(x, sub['AAOD_model'], label='Model', s=40)
     ax.scatter(x, sub['AAOD_meta_fit'], label='Meta-fit', s=40, marker='s')
@@ -1309,7 +1309,7 @@ else:
                linewidth=2, label='POLDER')
     ax.set_xticks(x)
     ax.set_xticklabels(np.arange(1, len(sub) + 1))
-    ax.set_xlabel('Model number', fontweight='bold')
+    ax.set_xlabel('Model number (alphabetical)', fontweight='bold')
     ax.set_ylabel('Outflow AAOD', fontweight='bold')
     ax.set_title('(b) Outflow AAOD: model / meta / constrained / POLDER', fontweight='bold')
     ax.legend(fontsize=9)
