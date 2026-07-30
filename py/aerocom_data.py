@@ -73,6 +73,152 @@ def normalize_longitude(ds, lon_name='lon'):
 
     return ds
 
+def _to_month_start(values):
+    """Convert any datetime-like values to first-of-month datetime64."""
+    try:
+        return pd.to_datetime(values).to_period('M').to_timestamp().values
+    except Exception:
+        return np.array([
+            np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
+            for t in values
+        ])
+
+
+def _decode_months_since(raw, units, year=None):
+    """Decode 'months since YYYY-MM-DD' units for non-standard calendars without cftime.
+
+    If a target year is supplied and the raw values are 1..12 while the parsed
+    reference year is far from the target year (e.g. OsloCTM3 files that store
+    1..12 but claim 'Monthssince 1850-01-01'), treat the values as 1-based
+    months of the target year instead.
+    """
+    import re
+    m = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', units)
+    if not m:
+        return None
+    # Accept strings like 'Monthssince 1850-01-01', 'months since 1850-01-01', etc.
+    if 'month' not in units.lower().replace(' ', ''):
+        return None
+    months = np.asarray(raw, dtype=np.int64)
+    ref_year, ref_month, ref_day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    total_months = (ref_year * 12 + ref_month - 1) + months
+    years = total_months // 12
+    months_of_year = (total_months % 12) + 1
+    dates = np.array([
+        np.datetime64(f'{int(y):04d}-{int(m):02d}-01', 'ns')
+        for y, m in zip(years, months_of_year)
+    ])
+    # Fallback for files with a bogus reference year but 1-based month-of-year values.
+    if (year is not None and
+            np.all(months >= 1) and np.all(months <= 12) and
+            np.all(np.abs(years - year) > 100)):
+        dates = np.array([
+            np.datetime64(f'{year:04d}-{int(m):02d}-01', 'ns')
+            for m in months
+        ])
+    return dates
+
+
+def _cftime_to_datetime64(values):
+    """Convert cftime objects (e.g. DatetimeJulian, DatetimeNoLeap) to datetime64.
+
+    Monthly data is normalised to first-of-month afterwards, so mapping to
+    year-month-01 is sufficient and avoids invalid days in non-standard calendars.
+    """
+    if len(values) == 0:
+        return values
+    first = values[0]
+    if hasattr(first, 'year') and hasattr(first, 'month'):
+        return np.array([
+            np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
+            for t in values
+        ])
+    return values
+
+
+def _decode_time_index(da, var_hint=None, year=None):
+    """Decode an xarray time index to datetime64[ns], handling cftime & non-standard calendars.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        DataArray with a 'time' coordinate.
+    var_hint : str, optional
+        Used in warning messages.
+    year : int, optional
+        Target year for non-standard calendar overrides.
+
+    Returns
+    -------
+    xr.DataArray
+        DataArray with decoded time coordinate.
+    """
+    if da is None or 'time' not in da.dims or len(da.time) == 0:
+        return da
+
+    if isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
+        return da
+
+    try:
+        raw = da.time.values
+        # Drop any fill values (e.g. OsloCTM3 emiss has a trailing 9.96921e36).
+        if raw.dtype.kind in 'iuf':
+            valid_mask = raw < 1e30
+            if not np.all(valid_mask):
+                da = da.isel(time=np.where(valid_mask)[0])
+                raw = da.time.values
+
+        calendar = da.time.attrs.get('calendar', 'standard')
+        is_nonstd_calendar = calendar in ('365_day', '360_day', 'noleap', 'all_leap', '366_day')
+        values_are_months = (
+            raw.dtype.kind in 'iuf' and
+            np.all(raw >= 1) and np.all(raw <= 12)
+        )
+
+        if raw.dtype.kind in 'iuf' and np.all(raw > 100000) and np.all(raw < 999999):
+            pass
+        elif is_nonstd_calendar and values_are_months and year is not None:
+            # OsloCTM3-style files store 1..12 (months of the target year) but
+            # give a bogus reference date / units string. Ignore the reference and
+            # map directly to first-of-month of the year from the filename.
+            new_times = np.array([
+                np.datetime64(f'{year:04d}-{int(round(m)):02d}-01', 'ns')
+                for m in raw
+            ])
+            da = da.assign_coords(time=new_times)
+        elif 'units' in da.time.attrs:
+            units = da.time.attrs.get('units', '')
+            try:
+                new_times = decode_cf_datetime(raw, units, calendar)
+            except Exception:
+                # Fallback for non-standard calendars (e.g. 365_day) without cftime.
+                new_times = _decode_months_since(raw, units, year=year)
+                if new_times is None:
+                    new_times = pd.to_datetime([str(t) for t in raw]).values
+            # decode_cf_datetime may return cftime objects (Julian/NoLeap/365_day).
+            # Convert them to datetime64 so pandas/xarray can handle them later.
+            new_times = _cftime_to_datetime64(new_times)
+            da = da.assign_coords(time=new_times)
+        elif hasattr(da.indexes.get('time', None), 'to_datetimeindex'):
+            try:
+                new_times = da.indexes['time'].to_datetimeindex().values
+            except Exception:
+                # Fall back: manually build datetime64 from cftime year/month
+                new_times = np.array([
+                    np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
+                    for t in da.indexes['time']
+                ])
+            da = da.assign_coords(time=new_times)
+        else:
+            da = da.assign_coords(
+                time=pd.to_datetime([str(t) for t in raw]).values
+            )
+    except Exception as e:
+        print(f'  Warning: cftime conversion failed for {var_hint}: {e}')
+
+    return da
+
+
 def normalize_dataset_time(ds, var_hint=None, year=None):
     """Normalize time coordinate of a dataset to first-of-month."""
     # Lazy import: functions pulls optional viz deps (cartopy) at module level
@@ -95,127 +241,44 @@ def normalize_dataset_time(ds, var_hint=None, year=None):
         except Exception as e:
             print(f'  Warning: GEOS decode_cf failed for {var_hint}: {e}')
 
-    def _to_month_start(values):
-        try:
-            return pd.to_datetime(values).to_period('M').to_timestamp().values
-        except Exception:
-            return np.array([
-                np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
-                for t in values
-            ])
-
-    def _decode_months_since(raw, units, year=None):
-        """Decode 'months since YYYY-MM-DD' units for non-standard calendars without cftime.
-
-        If a target year is supplied and the raw values are 1..12 while the parsed
-        reference year is far from the target year (e.g. OsloCTM3 files that store
-        1..12 but claim 'Monthssince 1850-01-01'), treat the values as 1-based
-        months of the target year instead.
-        """
-        import re
-        m = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', units)
-        if not m:
-            return None
-        # Accept strings like 'Monthssince 1850-01-01', 'months since 1850-01-01', etc.
-        if 'month' not in units.lower().replace(' ', ''):
-            return None
-        months = np.asarray(raw, dtype=np.int64)
-        ref_year, ref_month, ref_day = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        total_months = (ref_year * 12 + ref_month - 1) + months
-        years = total_months // 12
-        months_of_year = (total_months % 12) + 1
-        dates = np.array([
-            np.datetime64(f'{int(y):04d}-{int(m):02d}-01', 'ns')
-            for y, m in zip(years, months_of_year)
-        ])
-        # Fallback for files with a bogus reference year but 1-based month-of-year values.
-        if (year is not None and
-                np.all(months >= 1) and np.all(months <= 12) and
-                np.all(np.abs(years - year) > 100)):
-            dates = np.array([
-                np.datetime64(f'{year:04d}-{int(m):02d}-01', 'ns')
-                for m in months
-            ])
-        return dates
-
-    def _cftime_to_datetime64(values):
-        """Convert cftime objects (e.g. DatetimeJulian, DatetimeNoLeap) to datetime64.
-
-        Monthly data is normalised to first-of-month afterwards, so mapping to
-        year-month-01 is sufficient and avoids invalid days in non-standard calendars.
-        """
-        if len(values) == 0:
-            return values
-        first = values[0]
-        if hasattr(first, 'year') and hasattr(first, 'month'):
-            return np.array([
-                np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
-                for t in values
-            ])
-        return values
-
-    if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
-        try:
-            raw = da.time.values
-            # Drop any fill values (e.g. OsloCTM3 emiss has a trailing 9.96921e36).
-            if raw.dtype.kind in 'iuf':
-                valid_mask = raw < 1e30
-                if not np.all(valid_mask):
-                    da = da.isel(time=np.where(valid_mask)[0])
-                    raw = da.time.values
-
-            calendar = da.time.attrs.get('calendar', 'standard')
-            is_nonstd_calendar = calendar in ('365_day', '360_day', 'noleap', 'all_leap', '366_day')
-            values_are_months = (
-                raw.dtype.kind in 'iuf' and
-                np.all(raw >= 1) and np.all(raw <= 12)
-            )
-
-            if raw.dtype.kind in 'iuf' and np.all(raw > 100000) and np.all(raw < 999999):
-                pass
-            elif is_nonstd_calendar and values_are_months and year is not None:
-                # OsloCTM3-style files store 1..12 (months of the target year) but
-                # give a bogus reference date / units string. Ignore the reference and
-                # map directly to first-of-month of the year from the filename.
-                new_times = np.array([
-                    np.datetime64(f'{year:04d}-{int(round(m)):02d}-01', 'ns')
-                    for m in raw
-                ])
-                da = da.assign_coords(time=new_times)
-            elif 'units' in da.time.attrs:
-                units = da.time.attrs.get('units', '')
-                try:
-                    new_times = decode_cf_datetime(raw, units, calendar)
-                except Exception:
-                    # Fallback for non-standard calendars (e.g. 365_day) without cftime.
-                    new_times = _decode_months_since(raw, units, year=year)
-                    if new_times is None:
-                        new_times = pd.to_datetime([str(t) for t in raw]).values
-                # decode_cf_datetime may return cftime objects (Julian/NoLeap/365_day).
-                # Convert them to datetime64 so pandas/xarray can handle them later.
-                new_times = _cftime_to_datetime64(new_times)
-                da = da.assign_coords(time=new_times)
-            elif hasattr(da.indexes.get('time', None), 'to_datetimeindex'):
-                try:
-                    new_times = da.indexes['time'].to_datetimeindex().values
-                except Exception:
-                    # Fall back: manually build datetime64 from cftime year/month
-                    new_times = np.array([
-                        np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
-                        for t in da.indexes['time']
-                    ])
-                da = da.assign_coords(time=new_times)
-            else:
-                da = da.assign_coords(
-                    time=pd.to_datetime([str(t) for t in raw]).values
-                )
-        except Exception as e:
-            print(f'  Warning: cftime conversion failed for {var_hint}: {e}')
-            return ds
-
+    da = _decode_time_index(da, var_hint=var_hint, year=year)
     da = functions.normalize_monthly_time(da)
     da = da.assign_coords(time=_to_month_start(da.time.values))
     return da.to_dataset(name=var_name)
+
+
+def _resample_3hourly_to_monthly(ds, var_hint=None, year=None):
+    """Convert a 3-hourly (or any sub-monthly) dataset to monthly means.
+
+    Decodes the time coordinate using the same robust logic as
+    normalize_dataset_time, then resamples to monthly means and normalizes
+    the resulting monthly timestamps to first-of-month.
+    """
+    # Lazy import: functions pulls optional viz deps (cartopy) at module level
+    _script_dir = Path(__file__).resolve().parent
+    if str(_script_dir) not in sys.path:
+        sys.path.insert(0, str(_script_dir))
+    import functions
+
+    if ds is None or not list(ds.data_vars):
+        return None
+    var_name = list(ds.data_vars)[0]
+    da = ds[var_name]
+    if 'time' not in da.dims or len(da.time) == 0:
+        return ds
+
+    da = _decode_time_index(da, var_hint=var_hint, year=year)
+    if da is None:
+        return ds
+
+    # Resample to monthly mean
+    monthly_da = da.resample(time='1MS').mean()
+
+    # Normalize monthly time to first-of-month
+    monthly_da = functions.normalize_monthly_time(monthly_da)
+    monthly_da = monthly_da.assign_coords(time=_to_month_start(monthly_da.time.values))
+
+    return monthly_da.to_dataset(name=var_name)
 
 
 
@@ -495,6 +558,7 @@ def process_and_save_model_data(
     temporal,
     output_base_dir,
     renew=False,
+    fallback_3hourly=False,
 ):
     """Open, normalize, and save one model x variable at a time.
 
@@ -515,6 +579,10 @@ def process_and_save_model_data(
     renew : bool, default False
         If False, skip when the output already exists and is at least as new
         as the source (mtime). If True, overwrite all outputs.
+    fallback_3hourly : bool, default False
+        If True and temporal='monthly', when a monthly source file is missing
+        try to find a 3-hourly source file for the same model/variable and
+        resample it to monthly means before saving.
 
     Returns
     -------
@@ -538,6 +606,14 @@ def process_and_save_model_data(
                 out_dir = os.path.join(output_base_dir, var)
                 out_file = os.path.join(out_dir, f"{model}_{var}_processed.nc")
                 filepath = find_variable_file(base_dir, model, var, temporal)
+                used_3hourly = False
+
+                # 3h2month fallback: missing monthly source -> try 3-hourly source
+                if (filepath is None or not os.path.exists(filepath)) and fallback_3hourly and temporal == 'monthly':
+                    filepath = find_variable_file(base_dir, model, var, '3hourly')
+                    used_3hourly = filepath is not None and os.path.exists(filepath)
+                    if used_3hourly:
+                        logging.info(f"  3h2month fallback for {model}/{var}: {filepath}")
 
                 if filepath is None or not os.path.exists(filepath):
                     summary['missing'] += 1
@@ -565,17 +641,28 @@ def process_and_save_model_data(
                         filepath, chunks='auto', engine='netcdf4', decode_times=False
                     )
                     # Only pass the target year for non-standard calendars that need
-                    # the reference-year override (e.g. OsloCTM3 365_day files).
+                    # the reference-year override (e.g. OsloCTM3 365_day files), or
+                    # when converting 3-hourly data to monthly means.
                     calendar = ds_raw.time.attrs.get('calendar', 'standard') if 'time' in ds_raw.coords else 'standard'
-                    if calendar in ('365_day', '360_day', 'noleap', 'all_leap', '366_day'):
+                    if calendar in ('365_day', '360_day', 'noleap', 'all_leap', '366_day') or used_3hourly:
                         year = _extract_year_from_path(filepath)
                     ds = preprocess_for_save(
-                        ds_raw, var, model_hint=f'{model}/{var}', temporal=temporal,
+                        ds_raw, var, model_hint=f'{model}/{var}',
+                        temporal='3hourly' if used_3hourly else temporal,
                         year=year,
                     )
                     if ds is None:
                         summary['missing'] += 1
                         continue
+
+                    # Convert 3-hourly data to monthly means before writing
+                    if used_3hourly:
+                        ds = _resample_3hourly_to_monthly(
+                            ds, var_hint=f'{model}/{var}', year=year
+                        )
+                        if ds is None:
+                            summary['missing'] += 1
+                            continue
 
                     # Load into memory so the source handle can be closed immediately.
                     ds = ds.load()
@@ -634,10 +721,102 @@ def _get_dataarray(value, var_name):
     raise TypeError(f"Unsupported type for {var_name}: {type(value)}")
 
 
+def _coords_compatible(da, ref, atol=1e-4):
+    """True if lon/lat sizes match and values agree within atol (degrees)."""
+    for coord in ('lon', 'lat'):
+        if coord not in da.coords or coord not in ref.coords:
+            return False
+        a = np.asarray(da[coord].values, dtype=float)
+        b = np.asarray(ref[coord].values, dtype=float)
+        if a.shape != b.shape:
+            return False
+        if not np.allclose(a, b, atol=atol, rtol=0.0, equal_nan=True):
+            return False
+    return True
+
+
+def _align_da_to_ref(da, ref, model_hint=None):
+    """Align *da* onto *ref* lon/lat (interp_like), fixing micro-mismatches / res diffs.
+
+    Handles:
+    - SPRINTARS-style float lon offsets (~1e-5 deg) between 3h-derived and monthly files
+    - CAM5-style different grids (e.g. od440aer 192x288 vs od550aer 96x144)
+    """
+    if da is None or ref is None:
+        return da
+    if _coords_compatible(da, ref):
+        # Snap labels exactly so xarray arithmetic aligns without dropping cells.
+        assign = {}
+        if 'lon' in ref.coords:
+            assign['lon'] = ref['lon']
+        if 'lat' in ref.coords:
+            assign['lat'] = ref['lat']
+        return da.assign_coords(assign) if assign else da
+
+    try:
+        # Prefer linear interp on lon/lat; leave time alone (aligns by label).
+        kwargs = {}
+        if 'lon' in ref.coords and 'lon' in da.coords:
+            kwargs['lon'] = ref['lon']
+        if 'lat' in ref.coords and 'lat' in da.coords:
+            kwargs['lat'] = ref['lat']
+        if not kwargs:
+            return da
+        aligned = da.interp(**kwargs, method='linear', kwargs={'fill_value': np.nan})
+        if model_hint:
+            logging.info(
+                f"  Grid-aligned {getattr(da, 'name', 'var')} -> "
+                f"{getattr(ref, 'name', 'ref')} for {model_hint}"
+            )
+        return aligned
+    except Exception as e:
+        logging.warning(f"  Grid align failed for {model_hint}: {e}")
+        return da
+
+
+def align_model_grids(model_data, ref_var='od550aer', model_hint=None):
+    """Regrid sibling variables in *model_data* onto *ref_var* lon/lat.
+
+    Mutates and returns model_data. Prefer calling before calculate_derived_var
+    so MAC/SSA/AE do not lose regions to exact-coord alignment.
+    """
+    ref_raw = model_data.get(ref_var)
+    ref = _get_dataarray(ref_raw, ref_var)
+    if ref is None:
+        return model_data
+
+    for key, val in list(model_data.items()):
+        if key == ref_var or val is None:
+            continue
+        try:
+            da = _get_dataarray(val, key)
+        except Exception:
+            continue
+        if not isinstance(da, xr.DataArray):
+            continue
+        if 'lon' not in da.coords or 'lat' not in da.coords:
+            continue
+        if _coords_compatible(da, ref):
+            # Still snap labels for exact xarray align.
+            aligned = _align_da_to_ref(da, ref, model_hint=None)
+        else:
+            aligned = _align_da_to_ref(da, ref, model_hint=f'{model_hint}/{key}')
+        if aligned is da:
+            continue
+        if isinstance(val, xr.Dataset):
+            model_data[key] = aligned.to_dataset(name=key)
+        else:
+            model_data[key] = aligned
+    return model_data
+
+
 def calculate_derived_var(model_data, model_name, derived_var):
     """
     Calculates complex aerosol diagnostics (MEC, MAC, SSA, AE) directly on the
     lazily loaded xarray Datasets using highly performant, vectorized array math.
+
+    Sibling variables are grid-aligned onto od550aer (when present) before
+    arithmetic to avoid lon micro-mismatches and resolution mismatches.
 
     :param model_data: Dictionary for a specific model (i.e. data_dict[model_name])
     :param model_name: Name of the model currently processed (used for AE sensor wavelengths)
@@ -645,16 +824,20 @@ def calculate_derived_var(model_data, model_name, derived_var):
     :return: Standardized, derived xr.Dataset or None if required dependencies are missing.
     """
     try:
+        # Align inputs onto od550aer grid when available (SPRINTARS lon snap, CAM5 AE).
+        ref = _get_dataarray(model_data.get('od550aer'), 'od550aer')
+
         if derived_var == 'MEC':
             # MEC = AOD_550 / (total_load * 1e3)
-            od = _get_dataarray(model_data.get('od550aer'), 'od550aer')
+            od = ref
             load_keys = ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss']
-            # Sum up loaded variables dynamically (ignoring missing species cleanly if needed)
-            loads = [
-                _get_dataarray(model_data.get(k), k)
-                for k in load_keys
-                if model_data.get(k) is not None
-            ]
+            loads = []
+            for k in load_keys:
+                if model_data.get(k) is None:
+                    continue
+                loads.append(_align_da_to_ref(
+                    _get_dataarray(model_data.get(k), k), od, model_hint=f'{model_name}/{k}'
+                ))
             missing = [k for k in ['od550aer'] + load_keys if model_data.get(k) is None]
             if od is None or not loads:
                 raise ValueError(f"Missing {', '.join(missing)} for {model_name}/MEC.")
@@ -672,6 +855,11 @@ def calculate_derived_var(model_data, model_name, derived_var):
             missing = [k for k in mac_keys if model_data.get(k) is None]
             if abs550 is None or bc is None or oa is None:
                 raise ValueError(f"Missing {', '.join(missing)} for {model_name}/MAC.")
+            # Prefer od550 as spatial reference; else loadbc.
+            spatial_ref = ref if ref is not None else bc
+            abs550 = _align_da_to_ref(abs550, spatial_ref, model_hint=f'{model_name}/abs550aer')
+            bc = _align_da_to_ref(bc, spatial_ref, model_hint=f'{model_name}/loadbc')
+            oa = _align_da_to_ref(oa, spatial_ref, model_hint=f'{model_name}/loadoa')
 
             mac = abs550 / ((bc + oa) * 1e3)
             return mac.to_dataset(name='MAC')
@@ -685,17 +873,18 @@ def calculate_derived_var(model_data, model_name, derived_var):
             missing = [k for k in ssa_keys if model_data.get(k) is None]
             if abs550 is None or od550 is None:
                 raise ValueError(f"Missing {', '.join(missing)} for {model_name}/SSA.")
+            abs550 = _align_da_to_ref(abs550, od550, model_hint=f'{model_name}/abs550aer')
 
             ssa = 1.0 - (abs550 / od550)
             return ssa.to_dataset(name='SSA')
 
         elif derived_var == 'AE':
             # AE = - log(AOD_550 / AOD_other) / log(550 / other)
-            od550 = _get_dataarray(model_data.get('od550aer'), 'od550aer')
+            od550 = ref if ref is not None else _get_dataarray(model_data.get('od550aer'), 'od550aer')
 
             od870 = _get_dataarray(model_data.get('od870aer'), 'od870aer')
             od865 = _get_dataarray(model_data.get('od865aer'), 'od865aer')
-            od_other = None 
+            od_other = None
             if od870 is not None:
                 od_other = od870
                 other_wavelength = 870
@@ -711,6 +900,7 @@ def calculate_derived_var(model_data, model_name, derived_var):
             elif od_other is None:
                 raise ValueError(f"Missing other spectral bands to compute Angstrom Exponent for {model_name}.")
 
+            od_other = _align_da_to_ref(od_other, od550, model_hint=f'{model_name}/od_other')
             divisor = np.log(550.0 / other_wavelength)
 
             ae = - np.log(od550 / od_other) / divisor

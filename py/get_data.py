@@ -46,7 +46,7 @@ temporal = 'monthly' #3hourly monthly
 # --- Output options ---
 # RENEW=False: skip processed NetCDFs that already exist and are at least as new
 #              as the source file (mtime). RENEW=True: overwrite all outputs.
-RENEW = True
+RENEW = False
 # SAVE_PICKLE controls whether the master monthly dictionary is written to
 # Data/var_files/original/monthly/monthly_aerocom_data.pickle.
 # It is kept for backward compatibility; the default is now False because
@@ -61,6 +61,13 @@ SAVE_NETCDF = True
 #               and load every model that has at least one monthly variable.
 MODEL_SELECTION = 'auto'  # or 'auto' 'explicit
 
+# --- 3-hourly to monthly fallback (3h2month) ---
+# If a variable is missing from the monthly source files (e.g. abs550aer for
+# ECHAM), try to find the 3-hourly version of the same model/variable and
+# compute monthly means before writing it to the monthly processed directory.
+ENABLE_3H_TO_MONTHLY_FALLBACK = True
+
+project_root = Path('/scistor/guest/gbb083/AeroCom')
 if temporal == 'monthly':
     print('Getting monthly data')
 
@@ -94,8 +101,8 @@ if temporal == 'monthly':
     # -------------------------------------------------------------------------
     # 2. Directories and variables
     # -------------------------------------------------------------------------
-    dir_primary = "./Data/AP3_2026"
-    dir_secondary = "./Data/AEROCOM_III"
+    dir_primary = f"{project_root}/Data/AP3_2026"
+    dir_secondary = f"{project_root}/Data/AEROCOM_III"
 
     VARIABLES = (
         "abs550aer", "depbc", "depdust", "depoa", "depso2", "depso4", "depss",
@@ -157,6 +164,7 @@ if temporal == 'monthly':
             temporal='monthly',
             output_base_dir=output_netcdf_dir,
             renew=RENEW,
+            fallback_3hourly=ENABLE_3H_TO_MONTHLY_FALLBACK,
         )
 
     # Optional memory-heavy pickle path (loads full catalogue)
