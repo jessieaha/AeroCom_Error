@@ -1,37 +1,23 @@
 """AOD error attribution for AeroCom biomass-burning aerosols (Zhong et al. 2022).
 
-This script reproduces the framework of the paper
+Dual-ensemble gap analysis comparing the full AeroCom ensemble and the 17-model
+paper subset (Fig. 4/5 legend order). Reproduces the framework of
 ``s41467-022-33680-4`` (Nature Communications):
 
     AOD = E × τ × MEC                                    (1)
 
-where E is the total aerosol emission, τ is the lifetime (burden / emission),
-and MEC is the mass extinction coefficient (AOD / burden).  The notebook
-produces:
+Outputs (per ensemble: ``full`` and ``paper``):
+* Figure 2 / SI – MEC vs AE and precipitation vs 1/τ regressions + LOO validation
+* Table 1 comparison vs published constrained estimates
+* Gap diagnostics when |gap_pct| > GAP_THRESHOLD_PCT
+* Figure 4 – stacked-bar AOD error decomposition + mean pct comparison
+* Figure 5 – African outflow Default / EC / MFC meta-model
+* Regional map, robustness CSV, gap summary markdown
 
-* **Figure 2 style** – multi-region coloured scatter of MEC vs AE and
-  precipitation vs 1/τ, plus validation panels (predicted vs modelled).
-* **Figure 4 style** – stacked-bar decomposition of model AOD errors into
-  emission, lifetime, MEC, and cross-term contributions (models alphabetical).
-* **Figure 5/6 style** – African outflow Default / EC / MFC meta-model
-  prediction and AOD error maps (model − POLDER).
-
-## Configuration
-
-* `EXCLUDE_MODELS` – list of model names to drop before processing.
-* `INTERCEPT_0` – if True, force MEC–AE through origin; default False (OLS with intercept).
-* `POLDER_HOMOGENIZE` – if True (default), apply Zhong-style regional AOD homogenization.
-* `INCLUDE_AMAZON_SOA` – if True, inflate Amazon OA emissions (Sci. Adv. sensitivity);
-  default False for Nat. Commun. 2022 baseline.
-* `DERIVED_VAR_AFTER_AGG` – compute lifetime/MEC from regional means after aggregation (paper Methods).
-* `LIFETIME_MIN_DAYS` / `LIFETIME_MAX_DAYS` – grid-cell lifetime filter (disabled when lifetime is post-agg).
-* `SAVE_FIGURE` / `SAVE_CSV` – output control.
-
-## Notes and caveats
-
-* Loads directly from `Data/AP3_processed_monthly/` (no pickle).
-* African outflow is treated as a meta-model prediction target (not load/emission lifetime).
-* POLDER-GRASP and GPCP provide observational constraints.
+Out of scope (handled elsewhere):
+* Fig. 3 emission inventories
+* Fig. 6 ECHAM-HAM longitude transect rerun
+* AERONET cross-check
 """
 
 import sys
@@ -42,7 +28,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+
+# Agg backend only when not running inside IPython/Jupyter.
+try:
+    get_ipython()  # noqa: F821
+    _IN_IPYTHON = True
+except NameError:
+    _IN_IPYTHON = False
+
 import matplotlib.pyplot as plt
+if not _IN_IPYTHON:
+    import matplotlib
+    matplotlib.use('Agg')
+
 import cartopy.crs as ccrs
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -54,7 +52,10 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 # -------------------------------------------------------------------------------
 # 1. Configuration and data loading
 # -------------------------------------------------------------------------------
-project_root = Path('/scistor/guest/gbb083/AeroCom')
+try:
+    project_root = Path(__file__).resolve().parent.parent
+except NameError:
+    project_root = Path('/scistor/guest/gbb083/AeroCom')
 py_dir = project_root / 'py'
 if str(py_dir) not in sys.path:
     sys.path.insert(0, str(py_dir))
@@ -63,49 +64,87 @@ import functions
 import cameo_toolbox as ct
 import aerocom_data
 
-print(f'Project root: {project_root}')
-print(f'Python dir:   {py_dir}')
+print(f'Project root: {project_root}', flush=True)
+print(f'Python dir:   {py_dir}', flush=True)
 
-# Model exclusion list (must match NetCDF model names exactly).
-EXCLUDE_MODELS = []
+EXCLUDE_MODELS = [
+    'GISS-ModelE2p1p1-OMA_AP3-CTRL',
+    'GISS-ModelE2p1p1-MATRIX_AP3-CTRL',
+    'NorESM2-met2010_AP3-CTRL-v3',
+    'GEOS-i33p2-met2010_AP3-CTRL-2010',
+]
 
-# Lifetime outlier filtering.  Grid-cell lifetime values outside this range,
-# plus NaN/inf, are masked before aggregation and regressions.
+PAPER_MODELS = [
+    'CAM5.3-Oslo_AP3-CTRL2016-PD', 'ECHAM6-HAM2_AP3-CTRL2016-PD',
+    'ECHAM6-SALSA_CTRL2016-PD', 'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD',
+    'TM5_AP3-CTRL2016', 'CAM5-ATRAS_AP3-CTRL', 'EC-Earth3-AerChem-met2010_AP3-CTRL2019',
+    'ECHAM6.3-HAM2.3-met2010_AP3-CTRL', 'ECHAM6.3-SALSA2.0-met2010_AP3-CTRL',
+    'GEOS-i33p2-met2010_AP3-CTRL', 'GFDL-AM4-met2010_AP3-CTRL',
+    'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010',
+    'INCA_AP3-CTRL', 'NorESM2-met2010_AP3-CTRL',
+    'SPRINTARS-T213_AP3-CTRL2016-PD',  # paper #16 (prefer T213 over MIROC-SPRINTARS)
+    'TM5-met2010_AP3-CTRL2019',
+]
+
 LIFETIME_MIN_DAYS = 1e-3
 LIFETIME_MAX_DAYS = 365
-
-# Paper Methods: τ and MEC from regional/seasonal means of burden, emission, AOD.
-# Post-agg lifetime (and MEC) matches Zhong et al. 2022; grid-cell mean τ is too long.
 DERIVED_VAR_AFTER_AGG = ['lifetime', 'MEC']
 if 'lifetime' in DERIVED_VAR_AFTER_AGG:
     LIFETIME_MIN_DAYS = None
     LIFETIME_MAX_DAYS = None
 
-# MEC vs AE regression: False -> OLS with intercept (default); True -> through origin.
 INTERCEPT_0 = False
-
-# Zhong-style regional AOD/AE homogenization for constrained E (default True).
 POLDER_HOMOGENIZE = True
-# Exclude monthly-only output models from the homogenization regression (paper SM Method 1).
 MONTHLY_OUTPUT_MODELS = []
-
-# Amazon SOA inflation is a 2023 Sci. Adv. sensitivity — off for Nat. Commun. 2022 baseline.
 INCLUDE_AMAZON_SOA = False
 AMAZON_SOA_FRACTION = 0.52
-
-# Save figures to disk instead of rendering them inline.
-SAVE_FIGURE = False
-
-# Save CSV output tables.
+SAVE_FIGURE = True
 SAVE_CSV = True
+GAP_THRESHOLD_PCT = 20.0
 
-print(f'  INTERCEPT_0          = {INTERCEPT_0}  '
-      f"({'through origin' if INTERCEPT_0 else 'OLS with intercept'})")
-print(f'  POLDER_HOMOGENIZE    = {POLDER_HOMOGENIZE}')
-print(f'  INCLUDE_AMAZON_SOA   = {INCLUDE_AMAZON_SOA}  (fraction={AMAZON_SOA_FRACTION})')
-print(f'  DERIVED_VAR_AFTER_AGG= {DERIVED_VAR_AFTER_AGG}')
-print(f'  EXCLUDE_MODELS      = {EXCLUDE_MODELS}')
-print(f'  MONTHLY_OUTPUT_MODELS= {MONTHLY_OUTPUT_MODELS}')
+SOURCE_REGIONS = ['africa', 'amazon', 'se_asia', 'boreal_na', 'eastern_siberia']
+OUTFLOW_REGION = 'outflow_af'
+OUTFLOW_SOURCE = 'africa'
+
+PAPER_TABLE1 = {
+    'amazon': {'precip': 1.9, 'AE': 1.4, 'AOD': 0.4, 'E': 18.2, 'tau': 4.3, 'MEC': 5.9},
+    'africa': {'precip': 1.1, 'AE': 1.4, 'AOD': 0.56, 'E': 27.9, 'tau': 4.0, 'MEC': 5.9},
+    'se_asia': {'precip': 0.8, 'AE': 1.2, 'AOD': 0.88, 'E': 47.6, 'tau': 3.9, 'MEC': 5.6},
+    'boreal_na': {'precip': 1.8, 'AE': 1.3, 'AOD': 0.16, 'E': 10.3, 'tau': 3.0, 'MEC': 6.0},
+    'eastern_siberia': {'precip': 0.6, 'AE': 1.1, 'AOD': 0.21, 'E': 8.3, 'tau': 4.4, 'MEC': 6.8},
+}
+
+PAPER_DECOMP_PCT = {'pct_E': 38, 'pct_tau': 22, 'pct_MEC': 27, 'pct_cross': 13}
+
+REGION_COLORS = {
+    'africa': '#ff7f0e',
+    'amazon': '#2ca02c',
+    'se_asia': '#d62728',
+    'boreal_na': '#1f77b4',
+    'eastern_siberia': '#8c564b',
+    'outflow_af': '#9467bd',
+}
+
+# Zhong Fig. 2c/d reports Pearson correlation R (not R²).
+PAPER_LOO_R = {'MEC': 0.72, 'inv_lifetime': 0.78}
+
+
+def short_model_name(model):
+    """Compact tick label: strip common AeroCom CTRL suffixes."""
+    name = str(model)
+    for suffix in (
+        '_AP3-CTRL2016-PD', '_AP3-CTRL2016', '_AP3-CTRL-2010',
+        '_AP3-CTRL2019', '_AP3-CTRL', '-met2010',
+    ):
+        name = name.replace(suffix, '')
+    return name
+
+
+print(f'  INTERCEPT_0          = {INTERCEPT_0}', flush=True)
+print(f'  POLDER_HOMOGENIZE    = {POLDER_HOMOGENIZE}', flush=True)
+print(f'  INCLUDE_AMAZON_SOA   = {INCLUDE_AMAZON_SOA}', flush=True)
+print(f'  DERIVED_VAR_AFTER_AGG= {DERIVED_VAR_AFTER_AGG}', flush=True)
+print(f'  GAP_THRESHOLD_PCT    = {GAP_THRESHOLD_PCT}', flush=True)
 
 VARIABLES = [
     'abs550aer', 'depbc', 'depdust', 'depoa', 'depso2', 'depso4', 'depss',
@@ -113,10 +152,10 @@ VARIABLES = [
     'loadbc', 'loaddust', 'loadoa', 'loadso2', 'loadso4', 'loadss',
     'od440aer', 'od550aer', 'od870aer', 'od865aer',
     'od550bc', 'od550dust', 'od550oa', 'od550so4', 'od550ss',
-    'precip'
+    'precip',
 ]
 
-print('Loading monthly data from processed NetCDF files...')
+print('Loading monthly data from processed NetCDF files...', flush=True)
 raw_data = aerocom_data.load_monthly_data_from_netcdf(
     output_base_dir=str(project_root / 'Data' / 'AP3_processed_monthly'),
     variables=VARIABLES,
@@ -124,217 +163,31 @@ raw_data = aerocom_data.load_monthly_data_from_netcdf(
 
 missing_excluded = [m for m in EXCLUDE_MODELS if m not in raw_data]
 if missing_excluded:
-    print(f'Warning: excluded models not found in data: {missing_excluded}')
-models = sorted([m for m in raw_data.keys() if m not in EXCLUDE_MODELS])
+    print(f'Warning: excluded models not found in data: {missing_excluded}', flush=True)
+models = sorted([m for m in raw_data if m not in EXCLUDE_MODELS])
 actually_excluded = [m for m in EXCLUDE_MODELS if m in raw_data]
-print(f'Number of models: {len(models)} (excluded {len(actually_excluded)}: {actually_excluded})')
+print(f'Number of models: {len(models)} (excluded {len(actually_excluded)})', flush=True)
 
-# -------------------------------------------------------------------------------
-# 2. Normalise time, build summed variables, and normalise precipitation units
-# -------------------------------------------------------------------------------
-def normalize_dataset_time(ds, var_hint=None):
-    """Normalise the time coordinate of a dataset to first-of-month."""
-    if ds is None:
-        return None
-    if not list(ds.data_vars):
-        return None
-    var_name = list(ds.data_vars)[0]
-    da = ds[var_name]
-    if 'time' not in da.dims or len(da.time) == 0:
-        return ds
-    if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
-        try:
-            if hasattr(da.indexes['time'], 'to_datetimeindex'):
-                try:
-                    new_times = da.indexes['time'].to_datetimeindex().values
-                except OverflowError:
-                    new_times = np.array([
-                        np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
-                        for t in da.indexes['time']
-                    ])
-            else:
-                new_times = pd.to_datetime([str(t) for t in da.time.values]).values
-            da = da.assign_coords(time=new_times)
-        except Exception as e:
-            print(f'  Warning: cftime conversion failed for {var_hint}: {e}')
-            return ds
-    da = functions.normalize_monthly_time(da)
-    return da.to_dataset(name=var_name)
+print('\n--- PAPER_MODELS mapping ---', flush=True)
+for i, m in enumerate(PAPER_MODELS, 1):
+    status = 'OK' if m in models else 'MISSING'
+    print(f'  {i:2d}. [{status}] {m}', flush=True)
+paper_models = [m for m in PAPER_MODELS if m in models]
+ENSEMBLES = {'full': models, 'paper': paper_models}
+print(f'Ensembles: full={len(models)}, paper={len(paper_models)}', flush=True)
 
-
-def sum_datasets(model_data, keys, out_name):
-    """Sum a list of variables (Datasets) into a new Dataset, skipping missing ones."""
-    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
-    if not dsets:
-        return None
-    arrays = [d[list(d.data_vars)[0]] for d in dsets]
-    total = arrays[0].copy()
-    for a in arrays[1:]:
-        total = total + a
-    return total.to_dataset(name=out_name)
-
-
-def normalize_precipitation_units(precip_ds):
-    """Convert model precipitation to mm day⁻¹.
-
-    Handles kg/m²/s, g/m²/s, and the mis-typed 'km m-2 s-1' seen in some files.
-    """
-    if precip_ds is None:
-        return None
-    var_name = list(precip_ds.data_vars)[0]
-    da = precip_ds[var_name]
-    units = da.attrs.get('units', 'kg m-2 s-1').lower().replace(' ', '')
-    if units in ('kgm-2s-1', 'kgm^-2s^-1', 'kg/m2/s', 'kgm-2s-1'):
-        factor = 86400.0
-    elif units in ('gm-2s-1', 'gm^-2s^-1', 'g/m2/s', 'gm-2s-1'):
-        factor = 86.4
-    elif units in ('mmday-1', 'mm/day', 'mmday^-1', 'mmd-1'):
-        factor = 1.0
-    elif units in ('ms-1', 'm/s', 'm s-1'):
-        factor = 86400.0 * 1000.0
-    else:
-        # 'km m-2 s-1' is treated as a typo for kg m⁻² s⁻¹
-        factor = 86400.0
-    da = da * factor
-    try:
-        global_mean = float(da.mean().values)
-    except Exception:
-        global_mean = np.nan
-    if not np.isnan(global_mean) and global_mean > 100.0:
-        da = da / 1000.0
-    da.attrs['units'] = 'mm day-1'
-    return da.to_dataset(name=var_name)
-
-
-# Align with MEC species set in aerocom_data (no gaseous loadso2).
 LOAD_VARS = ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss']
 EMI_VARS = ['emibc', 'emidust', 'emioa', 'emiso2', 'emiss']
-
-# Load variables relevant for the BC+OA optical properties (computed for completeness).
 BCOA_LOAD_VARS = ['loadbc', 'loadoa']
 BCOA_EMI_VARS = ['emibc', 'emioa']
+LIFETIME_VARS = {'lifetime', 'lifetime_BC_OA'}
 
-data = {}
-for m in models:
-    normalized = {}
-    for var in VARIABLES:
-        if raw_data[m].get(var) is None:
-            continue
-        try:
-            normalized[var] = normalize_dataset_time(raw_data[m][var], var_hint=f'{m}/{var}')
-        except Exception as e:
-            print(f'  Failed to normalise {m}/{var}: {e}')
-            normalized[var] = None
-    normalized['load_total'] = sum_datasets(normalized, LOAD_VARS, 'load_total')
-    normalized['emi_total'] = sum_datasets(normalized, EMI_VARS, 'emi_total')
-    normalized['load_BC_OA'] = sum_datasets(normalized, BCOA_LOAD_VARS, 'load_BC_OA')
-    normalized['emi_BC_OA'] = sum_datasets(normalized, BCOA_EMI_VARS, 'emi_BC_OA')
-    if normalized.get('precip') is not None:
-        normalized['precip'] = normalize_precipitation_units(normalized['precip'])
-    data[m] = normalized
-
-# -------------------------------------------------------------------------------
-# 3. Calculate derived variables (MEC, lifetime, AE, MAC, SSA)
-# -------------------------------------------------------------------------------
-def filter_lifetime(da, model_name, var_name, max_days=None, min_days=None):
-    """Mask unrealistic lifetime values and return statistics."""
-    if da is None:
-        return None, {'n_total': 0, 'n_excluded': 0}
-    if max_days is None and min_days is None:
-        return da, {'n_total': int(da.size), 'n_excluded': 0}
-    bad = np.isnan(da) | np.isinf(da)
-    if max_days is not None:
-        bad = bad | (da > max_days)
-    if min_days is not None:
-        bad = bad | (da < min_days)
-    n_excluded = int(bad.sum())
-    if n_excluded:
-        print(f'  Lifetime filter: {model_name} {var_name} excluded {n_excluded:,} / {da.size:,} values '
-              f'({n_excluded / da.size * 100:.2f}%) outside [{min_days}, {max_days}] days')
-    return da.where(~bad), {'n_total': int(da.size), 'n_excluded': n_excluded}
-
-
-derived = {m: {} for m in models}
-lifetime_filter_stats = []
-
-for m in models:
-    # MEC from the built-in calculator is in m² g⁻¹; convert to m² kg⁻¹ for AOD budgets.
-    mec_ds = aerocom_data.calculate_derived_var(data[m], m, 'MEC')
-    if mec_ds is not None:
-        var_name = list(mec_ds.data_vars)[0]
-        derived[m]['MEC'] = mec_ds[var_name] * 1000.0
-    else:
-        derived[m]['MEC'] = None
-
-    # MAC and SSA are retained for completeness / comparison with AAOD work.
-    for dv in ['MAC', 'SSA']:
-        ds = aerocom_data.calculate_derived_var(data[m], m, dv)
-        derived[m][dv] = None if ds is None else ds[list(ds.data_vars)[0]]
-
-    # AE uses the 440/870 nm logic already encoded in aerocom_data.
-    ae_ds = aerocom_data.calculate_derived_var(data[m], m, 'AE')
-    derived[m]['AE'] = None if ae_ds is None else ae_ds[list(ae_ds.data_vars)[0]]
-
-    # Total-aerosol lifetime at the grid-cell level.
-    if data[m].get('load_total') is not None and data[m].get('emi_total') is not None:
-        load_da = data[m]['load_total']['load_total']
-        emi_da = data[m]['emi_total']['emi_total']
-        lt = load_da / (emi_da * 3600 * 24)  # days
-        lt, stats = filter_lifetime(lt, m, 'lifetime', LIFETIME_MAX_DAYS, LIFETIME_MIN_DAYS)
-        derived[m]['lifetime'] = lt
-        lifetime_filter_stats.append({'model': m, 'var': 'lifetime', **stats})
-    else:
-        derived[m]['lifetime'] = None
-
-    # BC+OA lifetime (for comparison with the AAOD notebook).
-    if data[m].get('load_BC_OA') is not None and data[m].get('emi_BC_OA') is not None:
-        load_da = data[m]['load_BC_OA']['load_BC_OA']
-        emi_da = data[m]['emi_BC_OA']['emi_BC_OA']
-        lt = load_da / (emi_da * 3600 * 24)
-        lt, stats = filter_lifetime(lt, m, 'lifetime_BC_OA', LIFETIME_MAX_DAYS, LIFETIME_MIN_DAYS)
-        derived[m]['lifetime_BC_OA'] = lt
-        lifetime_filter_stats.append({'model': m, 'var': 'lifetime_BC_OA', **stats})
-    else:
-        derived[m]['lifetime_BC_OA'] = None
-
-if lifetime_filter_stats:
-    total_excluded = sum(s['n_excluded'] for s in lifetime_filter_stats)
-    total_cells = sum(s['n_total'] for s in lifetime_filter_stats)
-    print(f'\nLifetime filter summary: excluded {total_excluded:,} / {total_cells:,} '
-          f'grid-cell values ({total_excluded / total_cells * 100:.2f}%)')
-
-# Flatten base variables and derived variables to DataArrays for aggregation.
-data_derived = {}
-for m in models:
-    data_derived[m] = {}
-    for k, v in data[m].items():
-        if v is not None:
-            data_derived[m][k] = v[list(v.data_vars)[0]]
-    for k, v in derived[m].items():
-        if v is not None:
-            data_derived[m][k] = v
-
-print('\nDerived-variable availability (pre-aggregation):')
-for dv in ['MEC', 'AE', 'lifetime', 'lifetime_BC_OA', 'MAC', 'SSA']:
-    n = sum(1 for m in derived if derived[m].get(dv) is not None)
-    print(f'  {dv:15s}: {n:2d} / {len(models)} models')
-
-# Variables available for aggregation.
 variables_to_aggregate = [
     'MEC', 'AE', 'lifetime', 'lifetime_BC_OA', 'MAC', 'SSA',
     'load_total', 'emi_total', 'load_BC_OA', 'emi_BC_OA',
     'emibc', 'emioa', 'precip', 'od550aer',
 ]
-LIFETIME_VARS = {'lifetime', 'lifetime_BC_OA'}
 
-# Source regions for main Fig. 4 decomposition; outflow is a meta-model target.
-SOURCE_REGIONS = ['africa', 'amazon', 'se_asia', 'boreal_na', 'eastern_siberia']
-OUTFLOW_REGION = 'outflow_af'
-OUTFLOW_SOURCE = 'africa'
-
-# -------------------------------------------------------------------------------
-# 4. Regional masks and monthly/seasonal aggregation
-# -------------------------------------------------------------------------------
 REGIONS = {
     'global': {
         'surface_type': 'all', 'lon_range': (0, 360), 'lat_range': (-90, 90),
@@ -374,9 +227,203 @@ REGIONS = {
     },
 }
 
+
+def normalize_dataset_time(ds, var_hint=None):
+    """Normalise the time coordinate of a dataset to first-of-month."""
+    if ds is None:
+        return None
+    if not list(ds.data_vars):
+        return None
+    var_name = list(ds.data_vars)[0]
+    da = ds[var_name]
+    if 'time' not in da.dims or len(da.time) == 0:
+        return ds
+    if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
+        try:
+            if hasattr(da.indexes['time'], 'to_datetimeindex'):
+                try:
+                    new_times = da.indexes['time'].to_datetimeindex().values
+                except OverflowError:
+                    new_times = np.array([
+                        np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
+                        for t in da.indexes['time']
+                    ])
+            else:
+                new_times = pd.to_datetime([str(t) for t in da.time.values]).values
+            da = da.assign_coords(time=new_times)
+        except Exception as e:
+            print(f'  Warning: cftime conversion failed for {var_hint}: {e}', flush=True)
+            return ds
+    da = functions.normalize_monthly_time(da)
+    return da.to_dataset(name=var_name)
+
+
+def sum_datasets(model_data, keys, out_name):
+    """Sum a list of variables (Datasets) into a new Dataset, skipping missing ones."""
+    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
+    if not dsets:
+        return None
+    arrays = [d[list(d.data_vars)[0]] for d in dsets]
+    total = arrays[0].copy()
+    for a in arrays[1:]:
+        total = total + a
+    return total.to_dataset(name=out_name)
+
+
+def normalize_precipitation_units(precip_ds):
+    """Convert model precipitation to mm day-1."""
+    if precip_ds is None:
+        return None
+    var_name = list(precip_ds.data_vars)[0]
+    da = precip_ds[var_name]
+    units = da.attrs.get('units', 'kg m-2 s-1').lower().replace(' ', '')
+    if units in ('kgm-2s-1', 'kgm^-2s^-1', 'kg/m2/s', 'kgm-2s-1'):
+        factor = 86400.0
+    elif units in ('gm-2s-1', 'gm^-2s^-1', 'g/m2/s', 'gm-2s-1'):
+        factor = 86.4
+    elif units in ('mmday-1', 'mm/day', 'mmday^-1', 'mmd-1'):
+        factor = 1.0
+    elif units in ('ms-1', 'm/s', 'm s-1'):
+        factor = 86400.0 * 1000.0
+    else:
+        factor = 86400.0
+    da = da * factor
+    try:
+        global_mean = float(da.mean().values)
+    except Exception:
+        global_mean = np.nan
+    if not np.isnan(global_mean) and global_mean > 100.0:
+        da = da / 1000.0
+    da.attrs['units'] = 'mm day-1'
+    return da.to_dataset(name=var_name)
+
+
+def filter_lifetime(da, model_name, var_name, max_days=None, min_days=None):
+    """Mask unrealistic lifetime values and return statistics."""
+    if da is None:
+        return None, {'n_total': 0, 'n_excluded': 0}
+    if max_days is None and min_days is None:
+        return da, {'n_total': int(da.size), 'n_excluded': 0}
+    bad = np.isnan(da) | np.isinf(da)
+    if max_days is not None:
+        bad = bad | (da > max_days)
+    if min_days is not None:
+        bad = bad | (da < min_days)
+    n_excluded = int(bad.sum())
+    if n_excluded:
+        print(f'  Lifetime filter: {model_name} {var_name} excluded {n_excluded:,} / {da.size:,} values',
+              flush=True)
+    return da.where(~bad), {'n_total': int(da.size), 'n_excluded': n_excluded}
+
+
+def recompute_ae_440(model_data):
+    """Recompute AE from od440/od550 when od440aer is present."""
+    od550_raw = model_data.get('od550aer')
+    od440_raw = model_data.get('od440aer')
+    if od550_raw is None or od440_raw is None:
+        return None
+    od550 = od550_raw[list(od550_raw.data_vars)[0]]
+    od440 = od440_raw[list(od440_raw.data_vars)[0]]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ae = -np.log(od550 / od440) / np.log(550.0 / 440.0)
+    ae = ae.where((od550 > 0) & (od440 > 0))
+    return ae
+
+
+# -------------------------------------------------------------------------------
+# 2. Normalise time, build summed variables, and normalise precipitation units
+# -------------------------------------------------------------------------------
+print('Normalising model data...', flush=True)
+data = {}
+for m in models:
+    normalized = {}
+    for var in VARIABLES:
+        if raw_data[m].get(var) is None:
+            continue
+        try:
+            normalized[var] = normalize_dataset_time(raw_data[m][var], var_hint=f'{m}/{var}')
+        except Exception as e:
+            print(f'  Failed to normalise {m}/{var}: {e}', flush=True)
+            normalized[var] = None
+    normalized['load_total'] = sum_datasets(normalized, LOAD_VARS, 'load_total')
+    normalized['emi_total'] = sum_datasets(normalized, EMI_VARS, 'emi_total')
+    normalized['load_BC_OA'] = sum_datasets(normalized, BCOA_LOAD_VARS, 'load_BC_OA')
+    normalized['emi_BC_OA'] = sum_datasets(normalized, BCOA_EMI_VARS, 'emi_BC_OA')
+    if normalized.get('precip') is not None:
+        normalized['precip'] = normalize_precipitation_units(normalized['precip'])
+    data[m] = normalized
+
+# -------------------------------------------------------------------------------
+# 3. Calculate derived variables (MEC, lifetime, AE, MAC, SSA)
+# -------------------------------------------------------------------------------
+print('Computing derived variables...', flush=True)
+derived = {m: {} for m in models}
+lifetime_filter_stats = []
+
+for m in models:
+    aerocom_data.align_model_grids(data[m], ref_var='od550aer', model_hint=m)
+
+    mec_ds = aerocom_data.calculate_derived_var(data[m], m, 'MEC')
+    if mec_ds is not None:
+        var_name = list(mec_ds.data_vars)[0]
+        derived[m]['MEC'] = mec_ds[var_name] * 1000.0
+    else:
+        derived[m]['MEC'] = None
+
+    for dv in ['MAC', 'SSA']:
+        ds = aerocom_data.calculate_derived_var(data[m], m, dv)
+        derived[m][dv] = None if ds is None else ds[list(ds.data_vars)[0]]
+
+    ae_440 = recompute_ae_440(data[m])
+    if ae_440 is not None:
+        derived[m]['AE'] = ae_440
+    else:
+        ae_ds = aerocom_data.calculate_derived_var(data[m], m, 'AE')
+        derived[m]['AE'] = None if ae_ds is None else ae_ds[list(ae_ds.data_vars)[0]]
+
+    if data[m].get('load_total') is not None and data[m].get('emi_total') is not None:
+        load_da = data[m]['load_total']['load_total']
+        emi_da = data[m]['emi_total']['emi_total']
+        lt = load_da / (emi_da * 3600 * 24)
+        lt, lt_stats = filter_lifetime(lt, m, 'lifetime', LIFETIME_MAX_DAYS, LIFETIME_MIN_DAYS)
+        derived[m]['lifetime'] = lt
+        lifetime_filter_stats.append({'model': m, 'var': 'lifetime', **lt_stats})
+    else:
+        derived[m]['lifetime'] = None
+
+    if data[m].get('load_BC_OA') is not None and data[m].get('emi_BC_OA') is not None:
+        load_da = data[m]['load_BC_OA']['load_BC_OA']
+        emi_da = data[m]['emi_BC_OA']['emi_BC_OA']
+        lt = load_da / (emi_da * 3600 * 24)
+        lt, lt_stats = filter_lifetime(lt, m, 'lifetime_BC_OA', LIFETIME_MAX_DAYS, LIFETIME_MIN_DAYS)
+        derived[m]['lifetime_BC_OA'] = lt
+        lifetime_filter_stats.append({'model': m, 'var': 'lifetime_BC_OA', **lt_stats})
+    else:
+        derived[m]['lifetime_BC_OA'] = None
+
+data_derived = {}
+for m in models:
+    data_derived[m] = {}
+    for k, v in data[m].items():
+        if v is not None:
+            data_derived[m][k] = v[list(v.data_vars)[0]]
+    for k, v in derived[m].items():
+        if v is not None:
+            data_derived[m][k] = v
+
+print('\nDerived-variable availability (pre-aggregation):', flush=True)
+for dv in ['MEC', 'AE', 'lifetime', 'lifetime_BC_OA', 'MAC', 'SSA']:
+    n = sum(1 for m in derived if derived[m].get(dv) is not None)
+    print(f'  {dv:15s}: {n:2d} / {len(models)} models', flush=True)
+
+
+
+# -------------------------------------------------------------------------------
+# 4. Regional masks and monthly/seasonal aggregation
+# -------------------------------------------------------------------------------
 sample_model = next((m for m in models if data[m].get('od550aer') is not None), None)
 template = data[sample_model]['od550aer'].isel(time=0)
-print(f'Template grid from {sample_model}: {template.dims}')
+print(f'Template grid from {sample_model}: {template.dims}', flush=True)
 
 SURFACE_TYPE = None
 masks = {}
@@ -387,11 +434,11 @@ for name, cfg in REGIONS.items():
         surface_type=SURFACE_TYPE if SURFACE_TYPE is not None else cfg.get('surface_type', 'all'),
         mask_registry=masks,
     )
-print('Regions created:', list(masks.keys()))
+print('Regions created:', list(masks.keys()), flush=True)
 
 
 def aggregate_region(model_dict, var_name, region_name, return_time_series=False, skipna=False):
-    """Spatially aggregate `var_name` for every model."""
+    """Spatially aggregate var_name for every model."""
     cfg = REGIONS[region_name]
     result = {}
     for model, model_data in model_dict.items():
@@ -407,23 +454,31 @@ def aggregate_region(model_dict, var_name, region_name, return_time_series=False
             )
             result[model] = val
         except Exception as e:
-            print(f'  Aggregation failed for {var_name} {model} {region_name}: {e}')
+            print(f'  Aggregation failed for {var_name} {model} {region_name}: {e}', flush=True)
     return result
 
 
-model_monthly = {region: {var: aggregate_region(data_derived, var, region, return_time_series=True,
-                                                  skipna=(var in LIFETIME_VARS))
-                          for var in variables_to_aggregate}
-                 for region in REGIONS}
+model_monthly = {
+    region: {
+        var: aggregate_region(data_derived, var, region, return_time_series=True,
+                              skipna=(var in LIFETIME_VARS))
+        for var in variables_to_aggregate
+    }
+    for region in REGIONS
+}
 
-model_seasonal = {region: {var: aggregate_region(data_derived, var, region, return_time_series=False,
-                                                   skipna=(var in LIFETIME_VARS))
-                           for var in variables_to_aggregate}
-                  for region in REGIONS}
+model_seasonal = {
+    region: {
+        var: aggregate_region(data_derived, var, region, return_time_series=False,
+                              skipna=(var in LIFETIME_VARS))
+        for var in variables_to_aggregate
+    }
+    for region in REGIONS
+}
 
 
 def compute_derived_after_aggregation(monthly_dict, seasonal_dict):
-    """Paper Methods: τ = ⟨load⟩/⟨E⟩ and MEC = ⟨AOD⟩/⟨load⟩ after regional aggregation."""
+    """Paper Methods: tau = load/E and MEC = AOD/load after regional aggregation."""
     def _safe_div(num, den, scale=1.0):
         try:
             return num / (den * scale)
@@ -462,24 +517,19 @@ def compute_derived_after_aggregation(monthly_dict, seasonal_dict):
                         out[model] = val
                 if out:
                     agg[region]['MEC'] = out
-    print(f'\nPost-aggregation derived vars applied: {DERIVED_VAR_AFTER_AGG}')
+    print(f'\nPost-aggregation derived vars applied: {DERIVED_VAR_AFTER_AGG}', flush=True)
 
 
 compute_derived_after_aggregation(model_monthly, model_seasonal)
 
 
 def apply_amazon_soa_aod(monthly_dict, seasonal_dict):
-    """Inflate Amazon OA emissions so SOA is AMAZON_SOA_FRACTION of total OA.
-
-    Approximates Zhong et al. (2022/2023): model ``emioa`` is treated as POA.
-    Updates ``emi_total`` and ``emi_BC_OA`` and recomputes Amazon lifetimes.
-    """
+    """Inflate Amazon OA emissions so SOA is AMAZON_SOA_FRACTION of total OA."""
     if not INCLUDE_AMAZON_SOA:
-        print('\nAmazon SOA: SKIPPED')
+        print('\nAmazon SOA: SKIPPED', flush=True)
         return
     f = AMAZON_SOA_FRACTION
-    print('\n--- Amazon SOA adjustment ---')
-    print(f'  emi_OA_total = emioa / (1 - {f:.2f}); added to emi_total / emi_BC_OA')
+    print('\n--- Amazon SOA adjustment ---', flush=True)
     for agg in (monthly_dict, seasonal_dict):
         region = 'amazon'
         emibc = agg[region].get('emibc', {})
@@ -492,17 +542,15 @@ def apply_amazon_soa_aod(monthly_dict, seasonal_dict):
                 bc = emibc[model]
                 oa = emioa[model]
                 oa_total = oa / (1.0 - f)
-                # Replace primary OA contribution with total OA (POA+SOA)
                 if model in emi_total:
                     emi_total[model] = emi_total[model] - oa + oa_total
                 if model in emi_bcoa:
                     emi_bcoa[model] = bc + oa_total
                 n += 1
             except Exception as e:
-                print(f'  SOA adjust failed for {model}: {e}')
+                print(f'  SOA adjust failed for {model}: {e}', flush=True)
         agg[region]['emi_total'] = emi_total
         agg[region]['emi_BC_OA'] = emi_bcoa
-        # Recompute lifetimes with adjusted emissions
         for lt_name, load_name, emi_name in [
             ('lifetime', 'load_total', 'emi_total'),
             ('lifetime_BC_OA', 'load_BC_OA', 'emi_BC_OA'),
@@ -517,26 +565,22 @@ def apply_amazon_soa_aod(monthly_dict, seasonal_dict):
                     continue
             if lt:
                 agg[region][lt_name] = {**agg[region].get(lt_name, {}), **lt}
-        print(f'  Adjusted Amazon emissions for {n} models')
+        print(f'  Adjusted Amazon emissions for {n} models', flush=True)
 
 
 apply_amazon_soa_aod(model_monthly, model_seasonal)
 
-print('\nModel seasonal availability:')
-for region in REGIONS:
-    for var in ['MEC', 'AE', 'lifetime', 'precip', 'od550aer']:
-        n = len(model_seasonal[region].get(var, {}))
-        print(f'  {region:15s} {var}: {n} models')
+plot_regions = [r for r in REGIONS if r != 'global']
 
 # -------------------------------------------------------------------------------
 # 5. Load POLDER observations and compute monthly regional means
 # -------------------------------------------------------------------------------
 polder_path = project_root / 'Data' / 'AP3_POLDER_Collocated' / 'POLDER_GRASP_coloc_3h_AP3_2010_lon0_10.0_lat0_10.0.parquet'
-print(f'\nLoading POLDER observations: {polder_path}')
+print(f'\nLoading POLDER observations: {polder_path}', flush=True)
 
 polder_cols = ['time', 'longitude', 'latitude', 'AOD_550', 'AAOD_550', 'AOD_440', 'AOD_870']
 polder_df = pd.read_parquet(polder_path, columns=polder_cols)
-print(f'POLDER rows: {len(polder_df)}')
+print(f'POLDER rows: {len(polder_df)}', flush=True)
 
 polder_df['time'] = pd.to_datetime(polder_df['time'])
 polder_df['month'] = polder_df['time'].dt.to_period('M')
@@ -548,7 +592,7 @@ with np.errstate(divide='ignore', invalid='ignore'):
 polder_df = polder_df.replace([np.inf, -np.inf], np.nan).dropna(
     subset=['AOD_550', 'AE', 'SSA', 'AAOD_550']
 )
-print(f'POLDER rows after filtering: {len(polder_df)}')
+print(f'POLDER rows after filtering: {len(polder_df)}', flush=True)
 
 
 def polder_region_mask(df, lon_range, lat_range):
@@ -591,139 +635,90 @@ def polder_monthly_means(df, region_name):
 
 
 polder_monthly = {region: polder_monthly_means(polder_df, region) for region in REGIONS}
-print('\nPOLDER monthly means per region:')
-for region, df in polder_monthly.items():
-    print(f'  {region:15s}: {len(df)} months')
 
 
-def sample_model_aod_at_polder(model_name, region_name):
-    """Seasonal-mean model AOD sampled at POLDER observation locations."""
+def _polder_subsample(region_name, max_pts=8000):
+    """Return POLDER subsample for a region/time window."""
     cfg = REGIONS[region_name]
-    if data[model_name].get('od550aer') is None:
-        return np.nan
-    da = data[model_name]['od550aer']['od550aer']
-    da = da.sel(time=slice(*cfg['time_slice']))
     mask = polder_region_mask(polder_df, cfg['lon_range'], cfg['lat_range'])
     sub = polder_df[mask].copy()
     t0, t1 = cfg['time_slice']
     sub = sub[(sub['time'] >= t0) & (sub['time'] <= t1)]
-    if sub.empty or 'time' not in da.dims:
+    if sub.empty:
+        return sub
+    if len(sub) > max_pts:
+        sub = sub.sample(n=max_pts, random_state=0)
+    return sub
+
+
+def sample_model_field_at_polder(model_da, polder_sub, min_pts=3):
+    """Vectorized sampling of model field at POLDER locations/times; weighted mean."""
+    if model_da is None or polder_sub.empty or 'time' not in model_da.dims:
         return np.nan
-    try:
-        # Nearest neighbour in space for each observation, then mean over time-matched samples
-        pts = []
-        for _, row in sub.sample(n=min(len(sub), 5000), random_state=0).iterrows():
-            try:
-                val = float(da.sel(lon=row['longitude'], lat=row['latitude'],
-                                   time=row['time'], method='nearest').values)
-                if np.isfinite(val):
-                    pts.append(val)
-            except Exception:
-                continue
-        return float(np.mean(pts)) if pts else np.nan
-    except Exception as e:
-        print(f'  POLDER sample failed {model_name}/{region_name}: {e}')
+    lat_vals = model_da.lat.values
+    lon_vals = model_da.lon.values
+    lat_idx = np.abs(lat_vals[:, None] - polder_sub['latitude'].values[None, :]).argmin(axis=0)
+    lon_idx = np.abs(lon_vals[:, None] - polder_sub['longitude'].values[None, :]).argmin(axis=0)
+    times = pd.to_datetime(model_da.time.values)
+    polder_times = pd.to_datetime(polder_sub['time'].values)
+    month_idx = np.array([
+        np.argmin(np.abs(times - pd.Timestamp(t).to_period('M').to_timestamp()))
+        for t in polder_times
+    ])
+    vals = model_da.values[month_idx, lat_idx, lon_idx]
+    weights = np.cos(np.deg2rad(polder_sub['latitude'].values))
+    finite = np.isfinite(vals)
+    if finite.sum() < min_pts:
         return np.nan
+    return float(np.average(vals[finite], weights=weights[finite]))
 
 
-def homogenize_polder_aod(model_seasonal_dict, regions, var='AOD_550'):
-    """Zhong-style homogenization: regional_obs = (sampled_obs - b) / a.
-
-    Applies to AOD (and optionally AE via var='AE'). Excludes MONTHLY_OUTPUT_MODELS
-    from the sampled↔regional regression. Only intended for SOURCE_REGIONS.
-    """
-    print(f'\n--- POLDER {var} homogenization ---')
-    homogenized = {}
-    for region in regions:
-        if polder_monthly[region].empty:
-            homogenized[region] = np.nan
-            continue
-        obs_col = 'AOD_550' if var == 'AOD_550' else var
-        if obs_col not in polder_monthly[region].columns:
-            homogenized[region] = np.nan
-            continue
-        obs_sampled = float(polder_monthly[region][obs_col].mean())
-        regional_key = 'od550aer' if var == 'AOD_550' else 'AE'
-        regional = model_seasonal_dict[region].get(regional_key, {})
-        sampled = {}
-        for model in regional:
-            if model in MONTHLY_OUTPUT_MODELS:
-                continue
-            if var == 'AOD_550':
-                s = sample_model_aod_at_polder(model, region)
-            else:
-                # Use regional AE (homogenization of AE uses model regional AE vs obs AE)
-                s = float(regional[model]) if regional[model] is not None else np.nan
-            if np.isfinite(s):
-                sampled[model] = s
-        if var == 'AE':
-            # For AE: x = model regional AE, y = same (identity); use obs directly when
-            # we lack collocated model AE sampling. Fall back to raw sampled AE.
-            homogenized[region] = obs_sampled
-            print(f'  {region}: AE homogenization uses sampled obs AE={obs_sampled:.3f} '
-                  f'(collocated AE sampling not available; raw AE retained)')
-            continue
-        common = [m for m in regional if m in sampled and np.isfinite(float(regional[m]))]
-        if len(common) < 3:
-            print(f'  {region}: homogenization skipped (n={len(common)}); using raw sampled mean')
-            homogenized[region] = obs_sampled
-            continue
-        x = np.array([float(regional[m]) for m in common])
-        y = np.array([sampled[m] for m in common])
-        X = np.column_stack([x, np.ones(len(x))])
-        coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-        a, b = float(coeffs[0]), float(coeffs[1])
-        y_pred = a * x + b
-        denom = np.sum((y - y.mean()) ** 2)
-        r2 = 1 - np.sum((y - y_pred) ** 2) / denom if denom > 0 else np.nan
-        homogenized_regional = (obs_sampled - b) / a if a != 0 else np.nan
-        homogenized[region] = homogenized_regional
-        print(f'  {region}: sampled = {a:.4f}*regional + {b:.4f} (R²={r2:.3f}, n={len(common)})')
-        print(f'    raw sampled {var}={obs_sampled:.4f} -> homogenized={homogenized_regional:.4f}')
-    return homogenized
+_SAMPLE_CACHE = {}
 
 
-# Homogenize source regions only (paper SM Method 1); outflow keeps sampled mean.
-_homo_regions = [r for r in SOURCE_REGIONS if r in REGIONS]
-if POLDER_HOMOGENIZE:
-    aod_obs_by_region = homogenize_polder_aod(model_seasonal, _homo_regions, var='AOD_550')
-    ae_obs_by_region = homogenize_polder_aod(model_seasonal, _homo_regions, var='AE')
-else:
-    print('\n--- POLDER homogenization DISABLED ---')
-    aod_obs_by_region = {
-        region: float(polder_monthly[region]['AOD_550'].mean())
-        if not polder_monthly[region].empty else np.nan
-        for region in _homo_regions
-    }
-    ae_obs_by_region = {
-        region: float(polder_monthly[region]['AE'].mean())
-        if not polder_monthly[region].empty else np.nan
-        for region in _homo_regions
-    }
-    for region, val in aod_obs_by_region.items():
-        print(f'  {region}: AOD_obs={val:.4f}')
+def sample_model_aod_at_polder(model_name, region_name):
+    """Seasonal-mean model AOD sampled at POLDER observation locations (vectorized)."""
+    key = ('AOD', model_name, region_name)
+    if key in _SAMPLE_CACHE:
+        return _SAMPLE_CACHE[key]
+    if data[model_name].get('od550aer') is None:
+        _SAMPLE_CACHE[key] = np.nan
+        return np.nan
+    cfg = REGIONS[region_name]
+    da = data[model_name]['od550aer']['od550aer'].sel(time=slice(*cfg['time_slice']))
+    sub = _polder_subsample(region_name)
+    val = sample_model_field_at_polder(da, sub)
+    _SAMPLE_CACHE[key] = val
+    return val
 
-# Outflow: always use raw sampled POLDER mean (not homogenized).
-if OUTFLOW_REGION in REGIONS and not polder_monthly[OUTFLOW_REGION].empty:
-    aod_obs_by_region[OUTFLOW_REGION] = float(polder_monthly[OUTFLOW_REGION]['AOD_550'].mean())
-    ae_obs_by_region[OUTFLOW_REGION] = float(polder_monthly[OUTFLOW_REGION]['AE'].mean())
+
+def sample_model_ae_at_polder(model_name, region_name):
+    """Seasonal-mean model AE sampled at POLDER observation locations (vectorized)."""
+    key = ('AE', model_name, region_name)
+    if key in _SAMPLE_CACHE:
+        return _SAMPLE_CACHE[key]
+    if model_name not in data_derived or data_derived[model_name].get('AE') is None:
+        _SAMPLE_CACHE[key] = np.nan
+        return np.nan
+    cfg = REGIONS[region_name]
+    da = data_derived[model_name]['AE'].sel(time=slice(*cfg['time_slice']))
+    sub = _polder_subsample(region_name)
+    val = sample_model_field_at_polder(da, sub)
+    _SAMPLE_CACHE[key] = val
+    return val
+
 
 # -------------------------------------------------------------------------------
 # 6. Load GPCP precipitation and compute monthly regional means
 # -------------------------------------------------------------------------------
 gpcp_path = project_root / 'Data' / 'Prec' / 'GPCP_2010_0-360.nc'
-print(f'\nLoading GPCP precipitation: {gpcp_path}')
+print(f'\nLoading GPCP precipitation: {gpcp_path}', flush=True)
 gpcp = xr.open_dataset(gpcp_path)
 gpcp_precip = gpcp['sat_gauge_precip']
-print(f'GPCP dims: {gpcp_precip.dims}, shape: {gpcp_precip.shape}')
 
 
 def gpcp_region_mean(precip_da, region_name, apply_surface_mask=True):
-    """Area-weighted regional mean of GPCP precipitation (mm day⁻¹).
-
-    For land/ocean BB regions, apply the same surface mask as the models so
-    maritime grid cells do not inflate SE Asia / Siberia precip.
-    """
+    """Area-weighted regional mean of GPCP precipitation (mm day-1)."""
     cfg = REGIONS[region_name]
     lon_min, lon_max = cfg['lon_range']
     lat_min, lat_max = cfg['lat_range']
@@ -744,7 +739,7 @@ def gpcp_region_mean(precip_da, region_name, apply_surface_mask=True):
             mask_on = masks[region_name].interp(lat=sub.lat, lon=sub.lon, method='nearest')
             sub = sub.where(mask_on > 0)
         except Exception as e:
-            print(f'  GPCP surface mask skip {region_name}: {e}')
+            print(f'  GPCP surface mask skip {region_name}: {e}', flush=True)
     coslat = np.cos(np.deg2rad(sub.lat))
     weights = coslat * xr.ones_like(sub.isel(time=0))
     weights = weights.where(np.isfinite(sub.isel(time=0)))
@@ -756,266 +751,283 @@ def gpcp_region_mean(precip_da, region_name, apply_surface_mask=True):
 
 
 gpcp_region = {region: gpcp_region_mean(gpcp_precip, region) for region in REGIONS}
-print('\nGPCP regional mean precipitation (mm/day):')
-for region, da in gpcp_region.items():
-    mean_val = float(da.mean().values) if da.size else np.nan
-    print(f'  {region:15s}: {mean_val:.3f}')
+
+
 
 # -------------------------------------------------------------------------------
-# 7. Model regressions (MEC vs AE; 1/τ vs precipitation + AE)
+# 7. Dual-ensemble API functions
 # -------------------------------------------------------------------------------
-print('\n--- Model regressions ---')
-
-regression_rows = []
-regression_excluded = []
-for region in REGIONS:
-    if region == 'global':
-        continue
-    for model in models:
-        mec = model_seasonal[region]['MEC'].get(model)
-        ae = model_seasonal[region]['AE'].get(model)
-        lt = model_seasonal[region]['lifetime'].get(model)
-        precip = model_seasonal[region]['precip'].get(model)
-        aod = model_seasonal[region]['od550aer'].get(model)
-        if not all(v is not None for v in [mec, ae, lt, precip, aod]):
+def homogenize_polder_aod(model_seasonal_dict, ens_models, regions, var='AOD_550'):
+    """Zhong-style homogenization: regional_obs = (sampled_obs - b) / a."""
+    print(f'\n--- POLDER {var} homogenization (n_models={len(ens_models)}) ---', flush=True)
+    homogenized = {}
+    for region in regions:
+        if polder_monthly[region].empty:
+            homogenized[region] = np.nan
             continue
-        if not np.isfinite(float(lt)):
-            regression_excluded.append({'region': region, 'model': model, 'reason': 'non-finite lifetime'})
+        obs_col = 'AOD_550' if var == 'AOD_550' else 'AE'
+        obs_sampled = float(polder_monthly[region][obs_col].mean())
+        regional_key = 'od550aer' if var == 'AOD_550' else 'AE'
+        regional = model_seasonal_dict[region].get(regional_key, {})
+        sampled = {}
+        for model in ens_models:
+            if model not in regional:
+                continue
+            if model in MONTHLY_OUTPUT_MODELS:
+                continue
+            if var == 'AOD_550':
+                s = sample_model_aod_at_polder(model, region)
+            else:
+                s = sample_model_ae_at_polder(model, region)
+            if np.isfinite(s):
+                sampled[model] = s
+        common = [m for m in ens_models if m in regional and m in sampled and np.isfinite(float(regional[m]))]
+        if len(common) < 3:
+            print(f'  {region}: homogenization skipped (n={len(common)}); raw={obs_sampled:.4f}', flush=True)
+            homogenized[region] = obs_sampled
             continue
-        regression_rows.append({
-            'region': region, 'model': model,
-            'MEC': float(mec), 'AE': float(ae),
-            'lifetime': float(lt), 'inv_lifetime': 1.0 / float(lt),
-            'precip': float(precip), 'AOD': float(aod),
-        })
-if regression_excluded:
-    print(f'  Excluded {len(regression_excluded)} points due to non-finite lifetime')
-reg_df = pd.DataFrame(regression_rows)
-print(f'Regression data rows (seasonal means): {len(reg_df)}')
+        x = np.array([float(regional[m]) for m in common])
+        y = np.array([sampled[m] for m in common])
+        X = np.column_stack([x, np.ones(len(x))])
+        coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+        a, b = float(coeffs[0]), float(coeffs[1])
+        y_pred = a * x + b
+        denom = np.sum((y - y.mean()) ** 2)
+        r2 = 1 - np.sum((y - y_pred) ** 2) / denom if denom > 0 else np.nan
+        homogenized_regional = (obs_sampled - b) / a if a != 0 else np.nan
+        homogenized[region] = homogenized_regional
+        print(f'  {region}: sampled={a:.4f}*reg+{b:.4f} R2={r2:.3f} raw={obs_sampled:.4f} -> {homogenized_regional:.4f}',
+              flush=True)
+    return homogenized
 
-# MEC vs AE: linear regression (intercept controlled by INTERCEPT_0).
-mec_ae_results = {}
-for region in REGIONS:
-    if region == 'global':
-        continue
-    sub = reg_df[(reg_df['region'] == region)].dropna(subset=['MEC', 'AE'])
-    if len(sub) < 3:
-        print(f'{region}: skipped MEC vs AE regression (only {len(sub)} points)')
-        continue
-    x = sub['AE'].values
-    y = sub['MEC'].values
-    if INTERCEPT_0:
-        slope = np.nansum(x * y) / np.nansum(x ** 2)
-        inter = 0.0
-        residuals = y - slope * x
-        r2 = 1 - np.nansum(residuals ** 2) / np.nansum(y ** 2)
-        x_sampled = np.linspace(np.nanmin(x), np.nanmax(x), 100)
-        # Approximate CI using residual std
-        se = np.nanstd(residuals)
-        ci_lower = slope * x_sampled - 1.96 * se
-        ci_upper = slope * x_sampled + 1.96 * se
-        fit = {'slope': slope, 'inter': inter, 'r2': r2, 'x_sampled': x_sampled,
-               'ci_lower': ci_lower, 'ci_upper': ci_upper}
-        print(f"{region}: MEC = {slope:.4f}*AE  (through origin; R²={r2:.3f}, n={len(sub)})")
+
+def get_obs_constraints(model_seasonal_dict, ens_models):
+    """Return aod_obs_by_region and ae_obs_by_region for an ensemble."""
+    _homo_regions = [r for r in SOURCE_REGIONS if r in REGIONS]
+    if POLDER_HOMOGENIZE:
+        aod_obs = homogenize_polder_aod(model_seasonal, ens_models, _homo_regions, var='AOD_550')
+        ae_obs = homogenize_polder_aod(model_seasonal, ens_models, _homo_regions, var='AE')
     else:
-        fit = functions.fit_data(x, y)
-        print(f"{region}: MEC = {fit['slope']:.4f}*AE + {fit['inter']:.4f} "
-              f"(R²={fit['r2']:.3f}, n={len(sub)})")
-    mec_ae_results[region] = fit
+        print('\n--- POLDER homogenization DISABLED ---', flush=True)
+        aod_obs = {
+            region: float(polder_monthly[region]['AOD_550'].mean())
+            if not polder_monthly[region].empty else np.nan
+            for region in _homo_regions
+        }
+        ae_obs = {
+            region: float(polder_monthly[region]['AE'].mean())
+            if not polder_monthly[region].empty else np.nan
+            for region in _homo_regions
+        }
+    if OUTFLOW_REGION in REGIONS and not polder_monthly[OUTFLOW_REGION].empty:
+        aod_obs[OUTFLOW_REGION] = float(polder_monthly[OUTFLOW_REGION]['AOD_550'].mean())
+        ae_obs[OUTFLOW_REGION] = float(polder_monthly[OUTFLOW_REGION]['AE'].mean())
+    return aod_obs, ae_obs
 
-# 1/lifetime vs precipitation + AE: multiple linear regression.
-inv_lt_results = {}
-for region in REGIONS:
-    if region == 'global':
-        continue
-    sub = reg_df[(reg_df['region'] == region)].dropna(subset=['inv_lifetime', 'precip', 'AE'])
-    if len(sub) < 4:
-        print(f'{region}: skipped 1/tau regression (only {len(sub)} points)')
-        continue
-    X = np.column_stack([sub['precip'].values, sub['AE'].values])
-    y = sub['inv_lifetime'].values
-    X_ols = np.column_stack([np.ones(len(X)), X])
-    coeffs, _, _, _ = np.linalg.lstsq(X_ols, y, rcond=None)
-    y_pred = X_ols @ coeffs
-    ss_res = np.sum((y - y_pred) ** 2)
-    ss_tot = np.sum((y - y.mean()) ** 2)
-    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-    inv_lt_results[region] = {
-        'intercept': coeffs[0], 'alpha_pr': coeffs[1], 'beta_ae': coeffs[2],
-        'r2': r2, 'n': len(sub)
-    }
-    print(f"{region}: 1/τ = {coeffs[0]:.4f} + {coeffs[1]:.4f}*Pr + {coeffs[2]:.4f}*AE "
-          f"(R²={r2:.3f}, n={len(sub)})")
 
-# Simple 1/tau vs precipitation regression for plotting (Figure 2b).
-inv_lt_simple = {}
-for region in REGIONS:
-    if region == 'global':
-        continue
-    sub = reg_df[(reg_df['region'] == region)].dropna(subset=['inv_lifetime', 'precip'])
-    if len(sub) < 3:
-        continue
-    fit = functions.fit_data(sub['precip'].values, sub['inv_lifetime'].values)
-    inv_lt_simple[region] = fit
-
-# -------------------------------------------------------------------------------
-# 8. Constrained estimates from observations
-# -------------------------------------------------------------------------------
-print('\n--- Constrained estimates from observations ---')
-
-constrained = []
-for region in REGIONS:
-    if region == 'global' or region == OUTFLOW_REGION:
-        continue
-    polder_df_region = polder_monthly[region]
-    if polder_df_region.empty:
-        print(f'  {region}: skipped (no POLDER data)')
-        continue
-    if region not in mec_ae_results or region not in inv_lt_results:
-        print(f'  {region}: skipped (no model regression)')
-        continue
-
-    ae_obs_mean = float(ae_obs_by_region.get(
-        region,
-        polder_df_region['AE'].mean() if not polder_df_region.empty else np.nan
-    ))
-    aod_obs_mean = float(aod_obs_by_region.get(
-        region, polder_df_region['AOD_550'].mean()
-    ))
-    precip_obs_mean = float(gpcp_region[region].mean().values) if gpcp_region[region].size else np.nan
-
-    mec_params = mec_ae_results[region]
-    mec_c = mec_params['slope'] * ae_obs_mean + mec_params['inter']
-
-    lt_params = inv_lt_results[region]
-    inv_lt_c = lt_params['intercept'] + lt_params['alpha_pr'] * precip_obs_mean + lt_params['beta_ae'] * ae_obs_mean
-    tau_c_days = 1.0 / inv_lt_c if inv_lt_c > 0 else np.nan
-
-    # E_c in kg m⁻² s⁻¹
-    e_c = aod_obs_mean / (tau_c_days * 86400.0 * mec_c) if (tau_c_days > 0 and mec_c > 0) else np.nan
-
-    constrained.append({
-        'region': region,
-        'AE_obs': ae_obs_mean,
-        'AOD_obs': aod_obs_mean, 'precip_obs': precip_obs_mean,
-        'MEC_c': mec_c, 'tau_c_days': tau_c_days, 'E_c': e_c,
-        'AOD_homogenized': bool(POLDER_HOMOGENIZE),
-        'MEC_intercept_used': not INTERCEPT_0,
-    })
-    print(f'  {region}: MEC_c={mec_c:.3f}, tau_c={tau_c_days:.2f} d, '
-          f'E_c={e_c:.3e}, AOD_obs={aod_obs_mean:.4f} (homogenized={POLDER_HOMOGENIZE})')
-
-constrained_df = pd.DataFrame(constrained)
-print(f'Constrained rows: {len(constrained_df)}')
-print(constrained_df.set_index('region')[['MEC_c', 'tau_c_days', 'E_c']])
-
-# -------------------------------------------------------------------------------
-# 9. Error decomposition
-# -------------------------------------------------------------------------------
-print('\n--- AOD error decomposition (source regions; outflow handled separately) ---')
-
-decomp_rows = []
-for region in SOURCE_REGIONS:
-    if region not in REGIONS:
-        continue
-    csub = constrained_df[constrained_df['region'] == region]
-    if csub.empty:
-        print(f'  {region}: skipped (no constrained estimate)')
-        continue
-    mec_c = csub['MEC_c'].mean()
-    tau_c_days = csub['tau_c_days'].mean()
-    aod_c = csub['AOD_obs'].mean()
-    e_c = csub['E_c'].mean()
-
-    for model in models:
-        mec_model = model_seasonal[region]['MEC'].get(model)
-        lt_model = model_seasonal[region]['lifetime'].get(model)
-        emi_model = model_seasonal[region]['emi_total'].get(model)
-        aod_model = model_seasonal[region]['od550aer'].get(model)
-
-        if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in [mec_model, lt_model, emi_model, aod_model]):
+def build_reg_df(model_list):
+    """Build regression dataframe for a model subset."""
+    rows = []
+    for region in REGIONS:
+        if region == 'global':
             continue
-        if any(np.isnan(v) for v in [mec_c, tau_c_days, aod_c, e_c]):
+        for model in model_list:
+            mec = model_seasonal[region]['MEC'].get(model)
+            ae = model_seasonal[region]['AE'].get(model)
+            lt = model_seasonal[region]['lifetime'].get(model)
+            precip = model_seasonal[region]['precip'].get(model)
+            aod = model_seasonal[region]['od550aer'].get(model)
+            if not all(v is not None for v in [mec, ae, lt, precip, aod]):
+                continue
+            if not np.isfinite(float(lt)):
+                continue
+            rows.append({
+                'region': region, 'model': model,
+                'MEC': float(mec), 'AE': float(ae),
+                'lifetime': float(lt), 'inv_lifetime': 1.0 / float(lt),
+                'precip': float(precip), 'AOD': float(aod),
+            })
+    return pd.DataFrame(rows)
+
+
+def fit_mec_ae(reg_df):
+    """Fit MEC vs AE per region; returns dict per region."""
+    results = {}
+    for region in REGIONS:
+        if region == 'global':
             continue
-
-        mec_model = float(mec_model)
-        lt_model = float(lt_model)
-        emi_model = float(emi_model)
-        aod_model = float(aod_model)
-
-        dAOD_total = aod_model - aod_c
-        dAOD_E = (emi_model - e_c) * (tau_c_days * 86400.0) * mec_c
-        dAOD_tau = e_c * ((lt_model - tau_c_days) * 86400.0) * mec_c
-        dAOD_MEC = e_c * (tau_c_days * 86400.0) * (mec_model - mec_c)
-        cross = dAOD_total - (dAOD_E + dAOD_tau + dAOD_MEC)
-
-        denom = abs(dAOD_E) + abs(dAOD_tau) + abs(dAOD_MEC) + abs(cross)
-        if denom > 0:
-            pct_E = abs(dAOD_E) / denom * 100
-            pct_tau = abs(dAOD_tau) / denom * 100
-            pct_MEC = abs(dAOD_MEC) / denom * 100
-            pct_cross = abs(cross) / denom * 100
+        sub = reg_df[reg_df['region'] == region].dropna(subset=['MEC', 'AE'])
+        if len(sub) < 3:
+            continue
+        x = sub['AE'].values
+        y = sub['MEC'].values
+        if INTERCEPT_0:
+            slope = np.nansum(x * y) / np.nansum(x ** 2)
+            inter = 0.0
+            residuals = y - slope * x
+            r2 = 1 - np.nansum(residuals ** 2) / np.nansum(y ** 2)
+            x_sampled = np.linspace(np.nanmin(x), np.nanmax(x), 100)
+            se = np.nanstd(residuals)
+            fit = {
+                'slope': slope, 'inter': inter, 'r2': r2, 'x_sampled': x_sampled,
+                'ci_lower': slope * x_sampled - 1.96 * se,
+                'ci_upper': slope * x_sampled + 1.96 * se, 'n': len(sub),
+            }
         else:
-            pct_E = pct_tau = pct_MEC = pct_cross = np.nan
+            fit = functions.fit_data(x, y)
+            fit['n'] = len(sub)
+        results[region] = fit
+    return results
 
-        decomp_rows.append({
-            'region': region, 'model': model,
-            'MEC_model': mec_model, 'MEC_c': mec_c,
-            'tau_model': lt_model, 'tau_c_days': tau_c_days,
-            'E_model': emi_model, 'E_c': e_c,
-            'AOD_model': aod_model, 'AOD_c': aod_c,
-            'dAOD_E': dAOD_E, 'dAOD_tau': dAOD_tau,
-            'dAOD_MEC': dAOD_MEC, 'dAOD_cross': cross,
-            'dAOD_total': dAOD_total,
-            'pct_E': pct_E, 'pct_tau': pct_tau,
-            'pct_MEC': pct_MEC, 'pct_cross': pct_cross,
+
+def fit_inv_lt(reg_df):
+    """Fit 1/tau vs precipitation + AE per region."""
+    results = {}
+    for region in REGIONS:
+        if region == 'global':
+            continue
+        sub = reg_df[reg_df['region'] == region].dropna(subset=['inv_lifetime', 'precip', 'AE'])
+        if len(sub) < 4:
+            continue
+        X = np.column_stack([sub['precip'].values, sub['AE'].values])
+        y = sub['inv_lifetime'].values
+        X_ols = np.column_stack([np.ones(len(X)), X])
+        coeffs, _, _, _ = np.linalg.lstsq(X_ols, y, rcond=None)
+        y_pred = X_ols @ coeffs
+        ss_res = np.sum((y - y_pred) ** 2)
+        ss_tot = np.sum((y - y.mean()) ** 2)
+        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+        results[region] = {
+            'intercept': coeffs[0], 'alpha_pr': coeffs[1], 'beta_ae': coeffs[2],
+            'r2': r2, 'n': len(sub),
+        }
+    return results
+
+
+def fit_inv_lt_simple(reg_df):
+    """Simple 1/tau vs precipitation regression for plotting."""
+    results = {}
+    for region in REGIONS:
+        if region == 'global':
+            continue
+        sub = reg_df[reg_df['region'] == region].dropna(subset=['inv_lifetime', 'precip'])
+        if len(sub) < 3:
+            continue
+        fit = functions.fit_data(sub['precip'].values, sub['inv_lifetime'].values)
+        fit['n'] = len(sub)
+        results[region] = fit
+    return results
+
+
+def compute_constrained(fits, model_list, aod_obs, ae_obs):
+    """Compute constrained estimates from observations."""
+    mec_ae = fits['mec_ae']
+    inv_lt = fits['inv_lt']
+    rows = []
+    for region in SOURCE_REGIONS:
+        if region not in mec_ae or region not in inv_lt:
+            continue
+        ae_obs_mean = float(ae_obs.get(region, np.nan))
+        aod_obs_mean = float(aod_obs.get(region, np.nan))
+        precip_obs_mean = float(gpcp_region[region].mean().values) if gpcp_region[region].size else np.nan
+        mec_params = mec_ae[region]
+        mec_c = mec_params['slope'] * ae_obs_mean + mec_params['inter']
+        lt_params = inv_lt[region]
+        inv_lt_c = lt_params['intercept'] + lt_params['alpha_pr'] * precip_obs_mean + lt_params['beta_ae'] * ae_obs_mean
+        tau_c_days = 1.0 / inv_lt_c if inv_lt_c > 0 else np.nan
+        e_c = aod_obs_mean / (tau_c_days * 86400.0 * mec_c) if (tau_c_days > 0 and mec_c > 0) else np.nan
+        rows.append({
+            'region': region,
+            'AE_obs': ae_obs_mean,
+            'AOD_obs': aod_obs_mean,
+            'precip_obs': precip_obs_mean,
+            'MEC_c': mec_c,
+            'tau_c_days': tau_c_days,
+            'E_c': e_c,
+            'AOD_homogenized': bool(POLDER_HOMOGENIZE),
+            'MEC_intercept_used': not INTERCEPT_0,
         })
-
-decomp_df = pd.DataFrame(decomp_rows)
-print(f'Decomposition rows: {len(decomp_df)}')
-if not decomp_df.empty:
-    print(decomp_df.groupby('region')[['pct_E', 'pct_tau', 'pct_MEC', 'pct_cross']].mean())
+    return pd.DataFrame(rows)
 
 
-# -------------------------------------------------------------------------------
-# 9b. African outflow meta-model (Fig. 5 / Fig. 6 style)
-# -------------------------------------------------------------------------------
-print('\n--- African outflow meta-model (prediction target) ---')
-print('  Form: AOD_out = a*(E*τ*MEC) + b*(E*τ) + c*MEC + d  (source = africa)')
+def compute_decomp(constrained_df, reg_df, model_list):
+    """AOD error decomposition per model and source region."""
+    rows = []
+    for region in SOURCE_REGIONS:
+        csub = constrained_df[constrained_df['region'] == region]
+        if csub.empty:
+            continue
+        mec_c = csub['MEC_c'].mean()
+        tau_c_days = csub['tau_c_days'].mean()
+        aod_c = csub['AOD_obs'].mean()
+        e_c = csub['E_c'].mean()
+        for model in model_list:
+            mec_model = model_seasonal[region]['MEC'].get(model)
+            lt_model = model_seasonal[region]['lifetime'].get(model)
+            emi_model = model_seasonal[region]['emi_total'].get(model)
+            aod_model = model_seasonal[region]['od550aer'].get(model)
+            if any(v is None for v in [mec_model, lt_model, emi_model, aod_model]):
+                continue
+            if any(np.isnan(v) for v in [mec_c, tau_c_days, aod_c, e_c]):
+                continue
+            mec_model = float(mec_model)
+            lt_model = float(lt_model)
+            emi_model = float(emi_model)
+            aod_model = float(aod_model)
+            dAOD_total = aod_model - aod_c
+            dAOD_E = (emi_model - e_c) * (tau_c_days * 86400.0) * mec_c
+            dAOD_tau = e_c * ((lt_model - tau_c_days) * 86400.0) * mec_c
+            dAOD_MEC = e_c * (tau_c_days * 86400.0) * (mec_model - mec_c)
+            cross = dAOD_total - (dAOD_E + dAOD_tau + dAOD_MEC)
+            denom = abs(dAOD_E) + abs(dAOD_tau) + abs(dAOD_MEC) + abs(cross)
+            if denom > 0:
+                pct_E = abs(dAOD_E) / denom * 100
+                pct_tau = abs(dAOD_tau) / denom * 100
+                pct_MEC = abs(dAOD_MEC) / denom * 100
+                pct_cross = abs(cross) / denom * 100
+            else:
+                pct_E = pct_tau = pct_MEC = pct_cross = np.nan
+            rows.append({
+                'region': region, 'model': model,
+                'MEC_model': mec_model, 'MEC_c': mec_c,
+                'tau_model': lt_model, 'tau_c_days': tau_c_days,
+                'E_model': emi_model, 'E_c': e_c,
+                'AOD_model': aod_model, 'AOD_c': aod_c,
+                'dAOD_E': dAOD_E, 'dAOD_tau': dAOD_tau,
+                'dAOD_MEC': dAOD_MEC, 'dAOD_cross': cross,
+                'dAOD_total': dAOD_total,
+                'pct_E': pct_E, 'pct_tau': pct_tau,
+                'pct_MEC': pct_MEC, 'pct_cross': pct_cross,
+            })
+    return pd.DataFrame(rows)
 
-meta_rows = []
-for model in models:
-    aod_out = model_seasonal[OUTFLOW_REGION].get('od550aer', {}).get(model)
-    e_src = model_seasonal[OUTFLOW_SOURCE].get('emi_total', {}).get(model)
-    tau_src = model_seasonal[OUTFLOW_SOURCE].get('lifetime', {}).get(model)
-    mec_src = model_seasonal[OUTFLOW_SOURCE].get('MEC', {}).get(model)
-    if not all(v is not None and np.isfinite(float(v)) for v in [aod_out, e_src, tau_src, mec_src]):
-        continue
-    e_src, tau_src, mec_src = float(e_src), float(tau_src), float(mec_src)
-    # Convert E*τ to burden units consistent with MEC (kg m^-2 * m^2 kg^-1)
-    burden_term = e_src * (tau_src * 86400.0)  # kg m^-2
-    etm = burden_term * mec_src
-    meta_rows.append({
-        'model': model,
-        'AOD_out': float(aod_out),
-        'E_tau_MEC': etm,
-        'E_tau': burden_term,
-        'MEC': mec_src,
-        'E': e_src,
-        'tau': tau_src,
-    })
-meta_df = pd.DataFrame(meta_rows)
-outflow_meta_params = None
-outflow_pred_df = pd.DataFrame()
 
-if len(meta_df) < 5:
-    print(f'  Insufficient models for outflow meta-model (n={len(meta_df)})')
-else:
+def compute_outflow(constrained_df, model_list, aod_obs):
+    """African outflow meta-model (Eq. 6): Default / EC / MFC."""
+    meta_rows = []
+    for model in model_list:
+        aod_out = model_seasonal[OUTFLOW_REGION].get('od550aer', {}).get(model)
+        e_src = model_seasonal[OUTFLOW_SOURCE].get('emi_total', {}).get(model)
+        tau_src = model_seasonal[OUTFLOW_SOURCE].get('lifetime', {}).get(model)
+        mec_src = model_seasonal[OUTFLOW_SOURCE].get('MEC', {}).get(model)
+        if not all(v is not None and np.isfinite(float(v)) for v in [aod_out, e_src, tau_src, mec_src]):
+            continue
+        e_src, tau_src, mec_src = float(e_src), float(tau_src), float(mec_src)
+        burden_term = e_src * (tau_src * 86400.0)
+        etm = burden_term * mec_src
+        meta_rows.append({
+            'model': model, 'AOD_out': float(aod_out),
+            'E_tau_MEC': etm, 'E_tau': burden_term, 'MEC': mec_src,
+            'E': e_src, 'tau': tau_src,
+        })
+    meta_df = pd.DataFrame(meta_rows)
+    params = None
+    pred_df = pd.DataFrame()
+    if len(meta_df) < 5:
+        return params, pred_df
     X = np.column_stack([
-        meta_df['E_tau_MEC'].values,
-        meta_df['E_tau'].values,
-        meta_df['MEC'].values,
-        np.ones(len(meta_df)),
+        meta_df['E_tau_MEC'].values, meta_df['E_tau'].values,
+        meta_df['MEC'].values, np.ones(len(meta_df)),
     ])
     y = meta_df['AOD_out'].values
     coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
@@ -1025,43 +1037,29 @@ else:
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
     nmb = 100.0 * np.mean(y_pred - y) / np.mean(y) if np.mean(y) != 0 else np.nan
     rmse = float(np.sqrt(np.mean((y_pred - y) ** 2)))
-    outflow_meta_params = {
+    params = {
         'a': float(coeffs[0]), 'b': float(coeffs[1]),
         'c': float(coeffs[2]), 'd': float(coeffs[3]),
         'r2': r2, 'nmb': nmb, 'rmse': rmse, 'n': len(meta_df),
     }
-    print(f"  Fit: a={coeffs[0]:.4g}, b={coeffs[1]:.4g}, c={coeffs[2]:.4g}, d={coeffs[3]:.4g}")
-    print(f"  R²={r2:.3f}, NMB={nmb:.1f}%, RMSE={rmse:.4f}, n={len(meta_df)}")
-
     c_src = constrained_df[constrained_df['region'] == OUTFLOW_SOURCE]
-    aod_out_obs = float(aod_obs_by_region.get(
-        OUTFLOW_REGION,
-        polder_monthly[OUTFLOW_REGION]['AOD_550'].mean()
-        if not polder_monthly[OUTFLOW_REGION].empty else np.nan
-    ))
+    aod_out_obs = float(aod_obs.get(OUTFLOW_REGION, np.nan))
     pred_rows = []
     if not c_src.empty:
         e_c = float(c_src['E_c'].mean())
         tau_c = float(c_src['tau_c_days'].mean())
         mec_c = float(c_src['MEC_c'].mean())
         burden_c = e_c * tau_c * 86400.0
-        aod_mfc = (coeffs[0] * burden_c * mec_c
-                   + coeffs[1] * burden_c
-                   + coeffs[2] * mec_c
-                   + coeffs[3])
+        aod_mfc = coeffs[0] * burden_c * mec_c + coeffs[1] * burden_c + coeffs[2] * mec_c + coeffs[3]
         for _, row in meta_df.iterrows():
-            # EC: scale emission so source AOD matches observation
             aod_src_model = model_seasonal[OUTFLOW_SOURCE]['od550aer'].get(row['model'])
-            aod_src_obs = float(aod_obs_by_region.get(OUTFLOW_SOURCE, np.nan))
+            aod_src_obs = float(aod_obs.get(OUTFLOW_SOURCE, np.nan))
             if aod_src_model is None or not np.isfinite(aod_src_obs) or float(aod_src_model) == 0:
                 e_ec = row['E']
             else:
                 e_ec = row['E'] * (aod_src_obs / float(aod_src_model))
             burden_ec = e_ec * row['tau'] * 86400.0
-            aod_ec = (coeffs[0] * burden_ec * row['MEC']
-                      + coeffs[1] * burden_ec
-                      + coeffs[2] * row['MEC']
-                      + coeffs[3])
+            aod_ec = coeffs[0] * burden_ec * row['MEC'] + coeffs[1] * burden_ec + coeffs[2] * row['MEC'] + coeffs[3]
             pred_rows.append({
                 'model': row['model'],
                 'AOD_default': row['AOD_out'],
@@ -1073,271 +1071,727 @@ else:
                 'AOD_MFC': float(aod_mfc),
                 'AOD_obs': aod_out_obs,
             })
-        outflow_pred_df = pd.DataFrame(pred_rows).sort_values('model').reset_index(drop=True)
-        print('\n  Outflow prediction summary (Default / EC / MFC / POLDER):')
-        print(outflow_pred_df[['AOD_default', 'AOD_EC', 'AOD_MFC', 'AOD_obs']].describe())
+        pred_df = pd.DataFrame(pred_rows).sort_values('model').reset_index(drop=True)
+    return params, pred_df
+
+
+def loo_validation(reg_df):
+    """Per-region leave-one-out validation; pool pairs across SOURCE_REGIONS.
+
+    Matches Zhong et al. 2022 Fig. 2c/d: regressions are fit within each BB
+    region, then predicted vs modelled points from all regions are pooled for
+    R / NMB / RMSE.
+    """
+    rows = []
+    src = reg_df[reg_df['region'].isin(SOURCE_REGIONS)].copy()
+    for region, sub_mec in src.dropna(subset=['MEC', 'AE']).groupby('region'):
+        if len(sub_mec) < 4:
+            continue
+        for i, left_out in sub_mec.iterrows():
+            train = sub_mec.drop(index=i)
+            if INTERCEPT_0:
+                x = train['AE'].values
+                y = train['MEC'].values
+                slope = np.nansum(x * y) / np.nansum(x ** 2)
+                inter = 0.0
+            else:
+                fit = functions.fit_data(train['AE'].values, train['MEC'].values)
+                slope, inter = fit['slope'], fit['inter']
+            pred = slope * left_out['AE'] + inter
+            rows.append({
+                'variable': 'MEC', 'region': region, 'model': left_out['model'],
+                'modelled': float(left_out['MEC']), 'predicted': float(pred),
+                'left_out': f"{region}/{left_out['model']}",
+            })
+    for region, sub_lt in src.dropna(subset=['inv_lifetime', 'precip', 'AE']).groupby('region'):
+        if len(sub_lt) < 5:
+            continue
+        for i, left_out in sub_lt.iterrows():
+            train = sub_lt.drop(index=i)
+            X = np.column_stack([train['precip'].values, train['AE'].values])
+            y = train['inv_lifetime'].values
+            X_ols = np.column_stack([np.ones(len(X)), X])
+            coeffs, _, _, _ = np.linalg.lstsq(X_ols, y, rcond=None)
+            pred = coeffs[0] + coeffs[1] * left_out['precip'] + coeffs[2] * left_out['AE']
+            rows.append({
+                'variable': 'inv_lifetime', 'region': region, 'model': left_out['model'],
+                'modelled': float(left_out['inv_lifetime']), 'predicted': float(pred),
+                'left_out': f"{region}/{left_out['model']}",
+            })
+    return pd.DataFrame(rows)
+
+
+def compute_loo_metrics(loo_df, variable):
+    """Pearson R, NMB, RMSE for LOO validation (Zhong Fig. 2c/d uses R not R²)."""
+    sub = loo_df[loo_df['variable'] == variable].dropna(subset=['modelled', 'predicted'])
+    if sub.empty:
+        return {'r': np.nan, 'r2': np.nan, 'nmb': np.nan, 'rmse': np.nan, 'n': 0}
+    y = sub['modelled'].values.astype(float)
+    yp = sub['predicted'].values.astype(float)
+    if len(y) < 2 or np.nanstd(y) == 0 or np.nanstd(yp) == 0:
+        r = np.nan
+    else:
+        r = float(np.corrcoef(y, yp)[0, 1])
+    ss_res = np.sum((y - yp) ** 2)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+    nmb = 100.0 * np.mean(yp - y) / np.mean(y) if np.mean(y) != 0 else np.nan
+    rmse = float(np.sqrt(np.mean((yp - y) ** 2)))
+    return {'r': r, 'r2': r2, 'nmb': nmb, 'rmse': rmse, 'n': len(sub)}
+
+
+def build_table1_comparison(constrained_df, ensemble):
+    """Compare constrained estimates with PAPER_TABLE1."""
+    rows = []
+    for region in SOURCE_REGIONS:
+        paper = PAPER_TABLE1.get(region, {})
+        csub = constrained_df[constrained_df['region'] == region]
+        if csub.empty:
+            continue
+        row = csub.iloc[0]
+        for var, paper_key, scale, display_key in [
+            ('precip_obs', 'precip', 1.0, 'precip'),
+            ('AE_obs', 'AE', 1.0, 'AE'),
+            ('AOD_obs', 'AOD', 1.0, 'AOD'),
+            ('E_c', 'E', 1e11, 'E (10^-11)'),
+            ('tau_c_days', 'tau', 1.0, 'tau'),
+            ('MEC_c', 'MEC', 1.0 / 1000.0, 'MEC (m2/g)'),
+        ]:
+            computed = float(row[var]) * scale if var == 'MEC_c' else (
+                float(row[var]) * scale if var == 'E_c' else float(row[var])
+            )
+            paper_val = paper.get(paper_key if paper_key != 'E' else 'E', np.nan)
+            if var == 'E_c':
+                paper_val = paper.get('E', np.nan)
+            gap = computed - paper_val
+            gap_pct = 100.0 * gap / paper_val if paper_val not in (0, np.nan) and np.isfinite(paper_val) else np.nan
+            rows.append({
+                'ensemble': ensemble, 'region': region, 'variable': display_key,
+                'computed': computed, 'paper': paper_val,
+                'gap': gap, 'gap_pct': gap_pct,
+            })
+    return pd.DataFrame(rows)
+
+
+def robustness_drop_extremes(reg_df, constrained_df, model_list, aod_obs, ae_obs, n_drop=2):
+    """Drop n_drop extreme precip and AE models; recompute constrained."""
+    rows = []
+    base = compute_constrained(
+        {'mec_ae': fit_mec_ae(reg_df), 'inv_lt': fit_inv_lt(reg_df)},
+        model_list, aod_obs, ae_obs,
+    )
+    for region in SOURCE_REGIONS:
+        sub = reg_df[reg_df['region'] == region]
+        if sub.empty:
+            continue
+        for label, col in [('drop_precip_high', 'precip'), ('drop_precip_low', 'precip'),
+                           ('drop_AE_high', 'AE'), ('drop_AE_low', 'AE')]:
+            ascending = 'low' in label
+            drop_models = sub.sort_values(col, ascending=ascending)['model'].head(n_drop).tolist()
+            sub_reg = reg_df[~((reg_df['region'] == region) & (reg_df['model'].isin(drop_models)))]
+            fits = {'mec_ae': fit_mec_ae(sub_reg), 'inv_lt': fit_inv_lt(sub_reg)}
+            cnew = compute_constrained(fits, model_list, aod_obs, ae_obs)
+            creg = cnew[cnew['region'] == region]
+            if creg.empty:
+                continue
+            brow = creg.iloc[0]
+            brow_base = base[base['region'] == region]
+            if brow_base.empty:
+                continue
+            brow_base = brow_base.iloc[0]
+            rows.append({
+                'region': region, 'test': label, 'n_drop': n_drop,
+                'dMEC_c': brow['MEC_c'] - brow_base['MEC_c'],
+                'dTau_c': brow['tau_c_days'] - brow_base['tau_c_days'],
+                'dE_c': brow['E_c'] - brow_base['E_c'],
+            })
+    return pd.DataFrame(rows)
+
+
 
 # -------------------------------------------------------------------------------
-# 10. Figure 2: linear regressions (SI Fig. 1 / main Fig. 2 style)
+# 8. Dual-ensemble main loop
 # -------------------------------------------------------------------------------
-print('\n--- Figure 2: regressions ---')
+results = {}
+all_table1 = []
+all_loo = []
+all_robustness = []
+all_reg = []
+all_constrained = []
+all_decomp = []
+all_outflow = []
 
-plot_regions = [r for r in REGIONS if r != 'global']
-colors = plt.cm.tab10(np.linspace(0, 1, len(plot_regions)))
-region_colors = {r: colors[i] for i, r in enumerate(plot_regions)}
+for ens_name, ens_models in ENSEMBLES.items():
+    print(f'\n{"=" * 72}\nENSEMBLE: {ens_name} ({len(ens_models)} models)\n{"=" * 72}', flush=True)
+    aod_obs, ae_obs = get_obs_constraints(model_seasonal, ens_models)
+    reg_df_ens = build_reg_df(ens_models)
+    mec_ae = fit_mec_ae(reg_df_ens)
+    inv_lt = fit_inv_lt(reg_df_ens)
+    inv_lt_simple = fit_inv_lt_simple(reg_df_ens)
+    fits = {'mec_ae': mec_ae, 'inv_lt': inv_lt, 'inv_lt_simple': inv_lt_simple}
+    constrained_df_ens = compute_constrained(fits, ens_models, aod_obs, ae_obs)
+    decomp_df_ens = compute_decomp(constrained_df_ens, reg_df_ens, ens_models)
+    outflow_params, outflow_pred_df = compute_outflow(constrained_df_ens, ens_models, aod_obs)
+    loo_df_ens = loo_validation(reg_df_ens)
+    table1_df = build_table1_comparison(constrained_df_ens, ens_name)
+    robust_df = robustness_drop_extremes(reg_df_ens, constrained_df_ens, ens_models, aod_obs, ae_obs)
 
-# Dedicated SI Fig. 1 / main Fig. 2 style panel: all regions, one colour each.
-fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    reg_df_ens = reg_df_ens.copy()
+    reg_df_ens['ensemble'] = ens_name
+    constrained_df_ens = constrained_df_ens.copy()
+    constrained_df_ens['ensemble'] = ens_name
+    decomp_df_ens = decomp_df_ens.copy()
+    decomp_df_ens['ensemble'] = ens_name
+    if not outflow_pred_df.empty:
+        outflow_pred_df = outflow_pred_df.copy()
+        outflow_pred_df['ensemble'] = ens_name
+    loo_df_ens = loo_df_ens.copy()
+    loo_df_ens['ensemble'] = ens_name
+    if not robust_df.empty:
+        robust_df = robust_df.copy()
+        robust_df['ensemble'] = ens_name
 
-ax = axes[0]
-for region in plot_regions:
-    if region not in mec_ae_results:
-        continue
-    sub = reg_df[reg_df['region'] == region].dropna(subset=['MEC', 'AE'])
-    if sub.empty:
-        continue
-    fit = mec_ae_results[region]
-    x_line = fit['x_sampled']
-    ax.scatter(sub['AE'], sub['MEC'], s=40, alpha=0.7, color=region_colors[region],
-               label=region, edgecolors='none')
-    ax.plot(x_line, fit['slope'] * x_line + fit['inter'], '-', color=region_colors[region], lw=2)
-    ax.fill_between(x_line, fit['ci_lower'], fit['ci_upper'], color=region_colors[region], alpha=0.15)
-ax.set_xlabel('Ångström Exponent', fontweight='bold')
-ax.set_ylabel('MEC (m² kg⁻¹)', fontweight='bold')
-ax.set_title('(a) MEC vs AE', fontweight='bold')
-ax.grid(True, alpha=0.3)
-ax.legend(fontsize=8, loc='best')
+    results[ens_name] = {
+        'models': ens_models,
+        'aod_obs': aod_obs,
+        'ae_obs': ae_obs,
+        'reg_df': reg_df_ens,
+        'mec_ae': mec_ae,
+        'inv_lt': inv_lt,
+        'inv_lt_simple': inv_lt_simple,
+        'constrained_df': constrained_df_ens,
+        'decomp_df': decomp_df_ens,
+        'outflow_params': outflow_params,
+        'outflow_pred_df': outflow_pred_df,
+        'loo_df': loo_df_ens,
+        'table1_df': table1_df,
+        'robust_df': robust_df,
+    }
 
-ax = axes[1]
-for region in plot_regions:
-    if region not in inv_lt_simple:
-        continue
-    sub = reg_df[reg_df['region'] == region].dropna(subset=['inv_lifetime', 'precip'])
-    if sub.empty:
-        continue
-    fit = inv_lt_simple[region]
-    x_line = fit['x_sampled']
-    ax.scatter(sub['precip'], sub['inv_lifetime'], s=40, alpha=0.7,
-               color=region_colors[region], label=region, edgecolors='none')
-    ax.plot(x_line, fit['slope'] * x_line + fit['inter'], '-', color=region_colors[region], lw=2)
-    ax.fill_between(x_line, fit['ci_lower'], fit['ci_upper'], color=region_colors[region], alpha=0.15)
-ax.set_xlabel('Precipitation (mm day⁻¹)', fontweight='bold')
-ax.set_ylabel('1 / lifetime (day⁻¹)', fontweight='bold')
-ax.set_title('(b) 1/τ vs precipitation', fontweight='bold')
-ax.grid(True, alpha=0.3)
-ax.legend(fontsize=8, loc='best')
+    all_reg.append(reg_df_ens)
+    all_constrained.append(constrained_df_ens)
+    all_decomp.append(decomp_df_ens)
+    if not outflow_pred_df.empty:
+        all_outflow.append(outflow_pred_df)
+    all_loo.append(loo_df_ens)
+    all_table1.append(table1_df)
+    if not robust_df.empty:
+        all_robustness.append(robust_df)
 
-plt.suptitle(
-    'Figure 2 / SI Fig. 1 style: multi-region MEC–AE and precip–1/τ (Zhong et al. 2022)',
-    fontsize=14, fontweight='bold',
-)
-plt.tight_layout()
-fig_path = project_root / 'notebooks' / 'AOD_error_attribution_figure2_si_style.png'
-if SAVE_FIGURE:
-    plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-    print(f'Saved: {fig_path}')
-plt.show()
+    print(constrained_df_ens.set_index('region')[['MEC_c', 'tau_c_days', 'E_c']], flush=True)
 
-# Extended validation panels (same colour scheme).
-fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+# Back-compat aliases from 'full' ensemble
+_full = results['full']
+reg_df = _full['reg_df']
+mec_ae_results = _full['mec_ae']
+inv_lt_results = _full['inv_lt']
+inv_lt_simple = _full['inv_lt_simple']
+constrained_df = _full['constrained_df']
+decomp_df = _full['decomp_df']
+outflow_meta_params = _full['outflow_params']
+outflow_pred_df = _full['outflow_pred_df']
+aod_obs_by_region = _full['aod_obs']
+ae_obs_by_region = _full['ae_obs']
 
-# (a) MEC vs AE
-ax = axes[0, 0]
-for region in plot_regions:
-    if region not in mec_ae_results:
-        continue
-    sub = reg_df[reg_df['region'] == region].dropna(subset=['MEC', 'AE'])
-    if sub.empty:
-        continue
-    fit = mec_ae_results[region]
-    x_line = fit['x_sampled']
-    ax.scatter(sub['AE'], sub['MEC'], s=30, alpha=0.6, color=region_colors[region], label=region)
-    ax.plot(x_line, fit['slope'] * x_line + fit['inter'], '--', color=region_colors[region], lw=2)
-    ax.fill_between(x_line, fit['ci_lower'], fit['ci_upper'], color=region_colors[region], alpha=0.15)
-    csub = constrained_df[constrained_df['region'] == region]
-    if not csub.empty:
-        ax.axvline(csub['AE_obs'].mean(), color=region_colors[region], ls=':', alpha=0.7)
-        ax.axhline(csub['MEC_c'].mean(), color=region_colors[region], ls='-.', alpha=0.7)
-ax.set_xlabel('Ångström Exponent', fontweight='bold')
-ax.set_ylabel('MEC (m² kg⁻¹)', fontweight='bold')
-ax.set_title('(a) MEC vs AE', fontweight='bold')
-ax.grid(True, alpha=0.3)
-ax.legend(fontsize=8)
+combined_reg_df = pd.concat(all_reg, ignore_index=True) if all_reg else pd.DataFrame()
+combined_constrained_df = pd.concat(all_constrained, ignore_index=True) if all_constrained else pd.DataFrame()
+combined_decomp_df = pd.concat(all_decomp, ignore_index=True) if all_decomp else pd.DataFrame()
+combined_loo_df = pd.concat(all_loo, ignore_index=True) if all_loo else pd.DataFrame()
+combined_table1_df = pd.concat(all_table1, ignore_index=True) if all_table1 else pd.DataFrame()
+combined_robust_df = pd.concat(all_robustness, ignore_index=True) if all_robustness else pd.DataFrame()
+combined_outflow_df = pd.concat(all_outflow, ignore_index=True) if all_outflow else pd.DataFrame()
 
-# (b) 1/lifetime vs precipitation — all regions in different colours (paper Fig. 2 / SI style)
-ax = axes[0, 1]
-for region in plot_regions:
-    if region not in inv_lt_simple:
-        continue
-    sub = reg_df[reg_df['region'] == region].dropna(subset=['inv_lifetime', 'precip'])
-    if sub.empty:
-        continue
-    fit = inv_lt_simple[region]
-    x_line = fit['x_sampled']
-    ax.scatter(sub['precip'], sub['inv_lifetime'], s=40, alpha=0.7,
-               color=region_colors[region], label=region, edgecolors='none')
-    ax.plot(x_line, fit['slope'] * x_line + fit['inter'], '--', color=region_colors[region], lw=2)
-    ax.fill_between(x_line, fit['ci_lower'], fit['ci_upper'], color=region_colors[region], alpha=0.12)
-    csub = constrained_df[constrained_df['region'] == region]
-    if not csub.empty and np.isfinite(csub['tau_c_days'].mean()) and csub['tau_c_days'].mean() > 0:
-        ax.axvline(csub['precip_obs'].mean(), color=region_colors[region], ls=':', alpha=0.6)
-        ax.axhline(1.0 / csub['tau_c_days'].mean(), color=region_colors[region], ls='-.', alpha=0.6)
-ax.set_xlabel('Precipitation (mm day⁻¹)', fontweight='bold')
-ax.set_ylabel('1 / lifetime (day⁻¹)', fontweight='bold')
-ax.set_title('(b) 1/τ vs precipitation (all regions)', fontweight='bold')
-ax.grid(True, alpha=0.3)
-ax.legend(fontsize=7, loc='best')
-
-# (c) Predicted vs observed MEC
-ax = axes[1, 0]
-for region in plot_regions:
-    if region not in mec_ae_results:
-        continue
-    sub = reg_df[reg_df['region'] == region].dropna(subset=['AE', 'MEC'])
-    if sub.empty:
-        continue
-    fit = mec_ae_results[region]
-    pred = fit['slope'] * sub['AE'].values + fit['inter']
-    ax.scatter(pred, sub['MEC'].values, color=region_colors[region], label=region, alpha=0.6)
-lims = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
-ax.plot(lims, lims, 'k--', alpha=0.5)
-ax.set_xlabel('Predicted MEC (m² kg⁻¹)', fontweight='bold')
-ax.set_ylabel('Model MEC (m² kg⁻¹)', fontweight='bold')
-ax.set_title('(c) MEC regression validation', fontweight='bold')
-ax.grid(True, alpha=0.3)
-ax.legend(fontsize=8)
-
-# (d) Predicted vs observed 1/lifetime
-ax = axes[1, 1]
-for region in plot_regions:
-    if region not in inv_lt_results:
-        continue
-    sub = reg_df[reg_df['region'] == region].dropna(subset=['inv_lifetime', 'precip', 'AE'])
-    if sub.empty:
-        continue
-    fit = inv_lt_results[region]
-    pred = fit['intercept'] + fit['alpha_pr'] * sub['precip'].values + fit['beta_ae'] * sub['AE'].values
-    ax.scatter(pred, sub['inv_lifetime'].values, color=region_colors[region], label=region, alpha=0.6)
-lims = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
-ax.plot(lims, lims, 'k--', alpha=0.5)
-ax.set_xlabel('Predicted 1/τ (day⁻¹)', fontweight='bold')
-ax.set_ylabel('Model 1/τ (day⁻¹)', fontweight='bold')
-ax.set_title('(d) Lifetime regression validation', fontweight='bold')
-ax.grid(True, alpha=0.3)
-ax.legend(fontsize=8)
-
-plt.suptitle('Figure 2: Linear regressions for MEC and lifetime (Zhong et al. 2022)', fontsize=15, fontweight='bold')
-plt.tight_layout()
-fig_path = project_root / 'notebooks' / 'AOD_error_attribution_figure2.png'
-if SAVE_FIGURE:
-    plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-    print(f'Saved: {fig_path}')
-plt.show()
+region_colors = {r: REGION_COLORS.get(r, plt.cm.tab10(i / max(len(plot_regions), 1)))
+                 for i, r in enumerate(plot_regions)}
 
 # -------------------------------------------------------------------------------
-# 11. Figure 4: stacked-bar AOD error attribution
+# 9. Figure 2: linear regressions (SI + extended, both ensembles)
 # -------------------------------------------------------------------------------
-print('\n--- Figure 4: AOD error attribution ---')
+print('\n--- Figure 2: regressions (both ensembles) ---', flush=True)
 
-fig_regions = [r for r in plot_regions if not decomp_df[decomp_df['region'] == r].empty]
-n_regions = len(fig_regions)
-fig, axes = plt.subplots(2, int(np.ceil(n_regions / 2)), figsize=(7 * int(np.ceil(n_regions / 2)), 10))
-axes_flat = axes.flatten() if n_regions > 1 else [axes]
 
-for idx, region in enumerate(fig_regions):
-    ax = axes_flat[idx]
-    sub = decomp_df[decomp_df['region'] == region].copy()
-    # Alphabetical model order (shared numbering style with paper Fig. 4)
-    sub = sub.sort_values('model', ascending=True).reset_index(drop=True)
-    if sub.empty:
-        ax.set_visible(False)
-        continue
+def plot_figure2_si(ens_name, res, suffix):
+    """SI-style two-panel regression figure."""
+    reg_df_e = res['reg_df']
+    mec_ae = res['mec_ae']
+    inv_lt_simple_e = res['inv_lt_simple']
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    ax = axes[0]
+    for region in plot_regions:
+        if region not in mec_ae:
+            continue
+        sub = reg_df_e[reg_df_e['region'] == region].dropna(subset=['MEC', 'AE'])
+        if sub.empty:
+            continue
+        fit = mec_ae[region]
+        x_line = fit['x_sampled']
+        ax.scatter(sub['AE'], sub['MEC'] / 1000.0, s=40, alpha=0.7,
+                   color=region_colors[region], label=region, edgecolors='none')
+        ax.plot(x_line, (fit['slope'] * x_line + fit['inter']) / 1000.0,
+                '-', color=region_colors[region], lw=2)
+        ax.fill_between(x_line, fit['ci_lower'] / 1000.0, fit['ci_upper'] / 1000.0,
+                        color=region_colors[region], alpha=0.15)
+    ax.set_xlabel('Angstrom Exponent', fontweight='bold')
+    ax.set_ylabel('MEC (m2 g-1)', fontweight='bold')
+    ax.set_title('(a) MEC vs AE', fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc='best')
 
-    x = np.arange(len(sub))
-    pos_bottom = np.zeros(len(sub))
-    neg_bottom = np.zeros(len(sub))
+    ax = axes[1]
+    for region in plot_regions:
+        if region not in inv_lt_simple_e:
+            continue
+        sub = reg_df_e[reg_df_e['region'] == region].dropna(subset=['inv_lifetime', 'precip'])
+        if sub.empty:
+            continue
+        fit = inv_lt_simple_e[region]
+        x_line = fit['x_sampled']
+        ax.scatter(sub['precip'], sub['inv_lifetime'], s=40, alpha=0.7,
+                   color=region_colors[region], label=region, edgecolors='none')
+        ax.plot(x_line, fit['slope'] * x_line + fit['inter'], '-', color=region_colors[region], lw=2)
+        ax.fill_between(x_line, fit['ci_lower'], fit['ci_upper'], color=region_colors[region], alpha=0.15)
+    ax.set_xlabel('Precipitation (mm day-1)', fontweight='bold')
+    ax.set_ylabel('1 / lifetime (day-1)', fontweight='bold')
+    ax.set_title('(b) 1/tau vs precipitation', fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc='best')
 
+    plt.suptitle(f'Figure 2 SI style ({ens_name} ensemble)', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    fig_path = project_root / 'notebooks' / f'AOD_error_attribution_figure2_si_style_{suffix}.png'
+    if SAVE_FIGURE:
+        fig.savefig(fig_path, dpi=300, bbox_inches='tight')
+        print(f'Saved: {fig_path}', flush=True)
+        plt.close(fig)
+    if _IN_IPYTHON:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def plot_figure2_extended(ens_name, res, suffix):
+    """Extended 2x2 validation panels."""
+    reg_df_e = res['reg_df']
+    mec_ae = res['mec_ae']
+    inv_lt_e = res['inv_lt']
+    inv_lt_simple_e = res['inv_lt_simple']
+    constrained_df_e = res['constrained_df']
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+
+    ax = axes[0, 0]
+    for region in plot_regions:
+        if region not in mec_ae:
+            continue
+        sub = reg_df_e[reg_df_e['region'] == region].dropna(subset=['MEC', 'AE'])
+        if sub.empty:
+            continue
+        fit = mec_ae[region]
+        x_line = fit['x_sampled']
+        ax.scatter(sub['AE'], sub['MEC'] / 1000.0, s=30, alpha=0.6, color=region_colors[region], label=region)
+        ax.plot(x_line, (fit['slope'] * x_line + fit['inter']) / 1000.0,
+                '--', color=region_colors[region], lw=2)
+        csub = constrained_df_e[constrained_df_e['region'] == region]
+        if not csub.empty:
+            ax.axvline(csub['AE_obs'].mean(), color=region_colors[region], ls=':', alpha=0.7)
+            ax.axhline(csub['MEC_c'].mean() / 1000.0, color=region_colors[region], ls='-.', alpha=0.7)
+    ax.set_xlabel('Angstrom Exponent', fontweight='bold')
+    ax.set_ylabel('MEC (m2 g-1)', fontweight='bold')
+    ax.set_title('(a) MEC vs AE', fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+    ax = axes[0, 1]
+    for region in plot_regions:
+        if region not in inv_lt_simple_e:
+            continue
+        sub = reg_df_e[reg_df_e['region'] == region].dropna(subset=['inv_lifetime', 'precip'])
+        if sub.empty:
+            continue
+        fit = inv_lt_simple_e[region]
+        x_line = fit['x_sampled']
+        ax.scatter(sub['precip'], sub['inv_lifetime'], s=40, alpha=0.7,
+                   color=region_colors[region], label=region, edgecolors='none')
+        ax.plot(x_line, fit['slope'] * x_line + fit['inter'], '--', color=region_colors[region], lw=2)
+        csub = constrained_df_e[constrained_df_e['region'] == region]
+        if not csub.empty and np.isfinite(csub['tau_c_days'].mean()) and csub['tau_c_days'].mean() > 0:
+            ax.axvline(csub['precip_obs'].mean(), color=region_colors[region], ls=':', alpha=0.6)
+            ax.axhline(1.0 / csub['tau_c_days'].mean(), color=region_colors[region], ls='-.', alpha=0.6)
+    ax.set_xlabel('Precipitation (mm day-1)', fontweight='bold')
+    ax.set_ylabel('1 / lifetime (day-1)', fontweight='bold')
+    ax.set_title('(b) 1/tau vs precipitation', fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=7, loc='best')
+
+    ax = axes[1, 0]
+    for region in plot_regions:
+        if region not in mec_ae:
+            continue
+        sub = reg_df_e[reg_df_e['region'] == region].dropna(subset=['AE', 'MEC'])
+        if sub.empty:
+            continue
+        fit = mec_ae[region]
+        pred = fit['slope'] * sub['AE'].values + fit['inter']
+        ax.scatter(pred / 1000.0, sub['MEC'].values / 1000.0, color=region_colors[region], label=region, alpha=0.6)
+    lims = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
+    ax.plot(lims, lims, 'k--', alpha=0.5)
+    ax.set_xlabel('Predicted MEC (m2 g-1)', fontweight='bold')
+    ax.set_ylabel('Model MEC (m2 g-1)', fontweight='bold')
+    ax.set_title('(c) MEC regression validation', fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+    ax = axes[1, 1]
+    for region in plot_regions:
+        if region not in inv_lt_e:
+            continue
+        sub = reg_df_e[reg_df_e['region'] == region].dropna(subset=['inv_lifetime', 'precip', 'AE'])
+        if sub.empty:
+            continue
+        fit = inv_lt_e[region]
+        pred = fit['intercept'] + fit['alpha_pr'] * sub['precip'].values + fit['beta_ae'] * sub['AE'].values
+        ax.scatter(pred, sub['inv_lifetime'].values, color=region_colors[region], label=region, alpha=0.6)
+    lims = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
+    ax.plot(lims, lims, 'k--', alpha=0.5)
+    ax.set_xlabel('Predicted 1/tau (day-1)', fontweight='bold')
+    ax.set_ylabel('Model 1/tau (day-1)', fontweight='bold')
+    ax.set_title('(d) Lifetime regression validation', fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+    plt.suptitle(f'Figure 2 extended ({ens_name} ensemble)', fontsize=15, fontweight='bold')
+    plt.tight_layout()
+    fig_path = project_root / 'notebooks' / f'AOD_error_attribution_figure2_{suffix}.png'
+    if SAVE_FIGURE:
+        fig.savefig(fig_path, dpi=300, bbox_inches='tight')
+        print(f'Saved: {fig_path}', flush=True)
+        plt.close(fig)
+    if _IN_IPYTHON:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+for ens_name, res in results.items():
+    plot_figure2_si(ens_name, res, suffix=ens_name)
+    plot_figure2_extended(ens_name, res, suffix=ens_name)
+
+# -------------------------------------------------------------------------------
+# 10. Figure 2c/d LOO validation (both ensembles)
+# -------------------------------------------------------------------------------
+print('\n--- Figure 2c/d LOO validation ---', flush=True)
+
+
+def plot_loo_validation(ens_name, res, suffix):
+    loo_df_e = res['loo_df']
+    if loo_df_e.empty:
+        print(f'  {ens_name}: no LOO data', flush=True)
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    for ax, variable, ylabel, paper_r in zip(
+        axes,
+        ['MEC', 'inv_lifetime'],
+        ['MEC (m2 kg-1)', '1/tau (day-1)'],
+        [PAPER_LOO_R['MEC'], PAPER_LOO_R['inv_lifetime']],
+    ):
+        sub = loo_df_e[loo_df_e['variable'] == variable].dropna(subset=['modelled', 'predicted'])
+        if sub.empty:
+            ax.set_visible(False)
+            continue
+        y = sub['modelled'].values
+        yp = sub['predicted'].values
+        if variable == 'MEC':
+            y, yp = y / 1000.0, yp / 1000.0
+            ylabel = 'MEC (m2 g-1)'
+            # Metrics on paper units (m2 g-1) so RMSE matches Fig. 2c scale
+            metrics_df = loo_df_e.copy()
+            msub = metrics_df['variable'] == 'MEC'
+            metrics_df.loc[msub, 'modelled'] = metrics_df.loc[msub, 'modelled'] / 1000.0
+            metrics_df.loc[msub, 'predicted'] = metrics_df.loc[msub, 'predicted'] / 1000.0
+            metrics = compute_loo_metrics(metrics_df, variable)
+        else:
+            metrics = compute_loo_metrics(loo_df_e, variable)
+        for region in sub['region'].unique():
+            rsub = sub[sub['region'] == region]
+            yy = rsub['modelled'].values
+            yyp = rsub['predicted'].values
+            if variable == 'MEC':
+                yy, yyp = yy / 1000.0, yyp / 1000.0
+            ax.scatter(yyp, yy, color=region_colors.get(region, 'gray'), label=region, alpha=0.7, s=35)
+        lims = [min(y.min(), yp.min()), max(y.max(), yp.max())]
+        ax.plot(lims, lims, 'k--', alpha=0.5)
+        ax.set_xlabel(f'LOO predicted {ylabel}', fontweight='bold')
+        ax.set_ylabel(f'Modelled {ylabel}', fontweight='bold')
+        ax.set_title(
+            f'{variable}: R={metrics["r"]:.3f} (paper {paper_r:.2f}), '
+            f'NMB={metrics["nmb"]:.1f}%, RMSE={metrics["rmse"]:.4g}, n={metrics["n"]}',
+            fontweight='bold', fontsize=10,
+        )
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=7)
+    plt.suptitle(f'LOO validation ({ens_name} ensemble)', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    fig_path = project_root / 'notebooks' / f'AOD_error_attribution_figure2_loo_{suffix}.png'
+    if SAVE_FIGURE:
+        fig.savefig(fig_path, dpi=300, bbox_inches='tight')
+        print(f'Saved: {fig_path}', flush=True)
+        plt.close(fig)
+    if _IN_IPYTHON:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+for ens_name, res in results.items():
+    plot_loo_validation(ens_name, res, suffix=ens_name)
+
+# -------------------------------------------------------------------------------
+# 11. Table 1 comparison and gap figures
+# -------------------------------------------------------------------------------
+print('\n--- Table 1 comparison ---', flush=True)
+if not combined_table1_df.empty:
+    print(combined_table1_df.pivot_table(index=['region', 'variable'], columns='ensemble', values='computed'),
+          flush=True)
+
+
+def plot_gap_figures(table1_df, ens_name, suffix):
+    """Gap bar charts per region when |gap_pct| > GAP_THRESHOLD_PCT."""
+    for region in SOURCE_REGIONS:
+        sub = table1_df[table1_df['region'] == region]
+        flagged = sub[sub['gap_pct'].abs() > GAP_THRESHOLD_PCT]
+        if flagged.empty:
+            continue
+        fig, ax = plt.subplots(figsize=(8, 4))
+        x = np.arange(len(flagged))
+        ax.bar(x, flagged['gap_pct'], color=[region_colors.get(region, 'gray')] * len(flagged))
+        ax.axhline(GAP_THRESHOLD_PCT, color='red', ls='--', label=f'threshold +/-{GAP_THRESHOLD_PCT}%')
+        ax.axhline(-GAP_THRESHOLD_PCT, color='red', ls='--')
+        ax.axhline(0, color='black', lw=0.8)
+        ax.set_xticks(x)
+        ax.set_xticklabels(flagged['variable'], rotation=45, ha='right')
+        ax.set_ylabel('Gap vs paper (%)', fontweight='bold')
+        ax.set_title(f'{region}: constrained estimate gaps ({ens_name})', fontweight='bold')
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        plt.tight_layout()
+        fig_path = project_root / 'notebooks' / f'AOD_error_attribution_gap_{region}_{suffix}.png'
+        if SAVE_FIGURE:
+            fig.savefig(fig_path, dpi=200, bbox_inches='tight')
+            print(f'Saved: {fig_path}', flush=True)
+            plt.close(fig)
+        if _IN_IPYTHON:
+            plt.show()
+        else:
+            plt.close(fig)
+
+
+for ens_name, res in results.items():
+    plot_gap_figures(res['table1_df'], ens_name, suffix=ens_name)
+
+
+
+# -------------------------------------------------------------------------------
+# 12. Figure 4: stacked-bar AOD error attribution (both ensembles)
+# -------------------------------------------------------------------------------
+print('\n--- Figure 4: AOD error attribution ---', flush=True)
+
+
+def plot_figure4(ens_name, res, suffix):
+    decomp_df_e = res['decomp_df']
+    fig_regions = [r for r in SOURCE_REGIONS if not decomp_df_e[decomp_df_e['region'] == r].empty]
+    if not fig_regions:
+        print(f'  {ens_name}: no decomposition regions; skipping Figure 4', flush=True)
+        return
+    n_regions = len(fig_regions)
+    ncols = int(np.ceil(n_regions / 2))
+    fig, axes = plt.subplots(2, ncols, figsize=(7 * ncols, 10))
+    axes_flat = np.atleast_1d(axes).flatten()
+    idx = -1
     components = [
         ('dAOD_E', 'Emission', '#1f77b4'),
         ('dAOD_tau', 'Lifetime', '#ff7f0e'),
         ('dAOD_MEC', 'MEC', '#2ca02c'),
         ('dAOD_cross', 'Cross', '#d62728'),
     ]
+    for idx, region in enumerate(fig_regions):
+        ax = axes_flat[idx]
+        sub = decomp_df_e[decomp_df_e['region'] == region].sort_values('model').reset_index(drop=True)
+        if sub.empty:
+            ax.set_visible(False)
+            continue
+        x = np.arange(len(sub))
+        pos_bottom = np.zeros(len(sub))
+        neg_bottom = np.zeros(len(sub))
+        for col, label, color in components:
+            vals = sub[col].to_numpy(dtype=float)
+            bottoms = np.where(vals >= 0, pos_bottom, neg_bottom)
+            ax.bar(x, vals, bottom=bottoms, color=color, width=0.8, label=label)
+            pos_bottom = np.where(vals >= 0, pos_bottom + vals, pos_bottom)
+            neg_bottom = np.where(vals < 0, neg_bottom + vals, neg_bottom)
+        ax.scatter(x, sub['dAOD_total'], color='black', s=45, zorder=5, label='Total')
+        ax.axhline(0, color='black', linewidth=1)
+        ax.set_xticks(x)
+        ax.set_xticklabels(np.arange(1, len(sub) + 1), fontsize=10)
+        ax.set_ylabel('AOD error contribution', fontsize=12, fontweight='bold')
+        ax.set_xlabel('Model number (alphabetical)', fontsize=12, fontweight='bold')
+        ax.set_title(region.upper(), fontsize=13, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        if idx == 0:
+            ax.legend(loc='upper right', fontsize=9)
+    for j in range(idx + 1, len(axes_flat)):
+        axes_flat[j].set_visible(False)
+    plt.suptitle(f'Figure 4: AOD error attribution ({ens_name})', fontsize=15, fontweight='bold')
+    plt.tight_layout()
+    fig_path = project_root / 'notebooks' / f'AOD_error_attribution_figure4_{suffix}.png'
+    if SAVE_FIGURE:
+        fig.savefig(fig_path, dpi=300, bbox_inches='tight')
+        print(f'Saved: {fig_path}', flush=True)
+        plt.close(fig)
+    if _IN_IPYTHON:
+        plt.show()
+    else:
+        plt.close(fig)
 
-    for col, label, color in components:
-        vals = sub[col].to_numpy(dtype=float)
-        bottoms = np.where(vals >= 0, pos_bottom, neg_bottom)
-        ax.bar(x, vals, bottom=bottoms, color=color, width=0.8, label=label)
-        pos_bottom = np.where(vals >= 0, pos_bottom + vals, pos_bottom)
-        neg_bottom = np.where(vals < 0, neg_bottom + vals, neg_bottom)
 
-    ax.scatter(x, sub['dAOD_total'], color='black', s=45, zorder=5, label='Total AOD error')
-    ax.axhline(0, color='black', linewidth=1)
+for ens_name, res in results.items():
+    plot_figure4(ens_name, res, suffix=ens_name)
+
+# Mean pct comparison: paper vs full vs paper ensemble
+mean_rows = []
+for ens_name, res in results.items():
+    decomp_df_e = res['decomp_df']
+    if decomp_df_e.empty:
+        continue
+    m = decomp_df_e.groupby('region')[['pct_E', 'pct_tau', 'pct_MEC', 'pct_cross']].mean()
+    m['source'] = ens_name
+    mean_rows.append(m.reset_index())
+paper_mean = pd.DataFrame([
+    {'region': r, 'pct_E': PAPER_DECOMP_PCT['pct_E'], 'pct_tau': PAPER_DECOMP_PCT['pct_tau'],
+     'pct_MEC': PAPER_DECOMP_PCT['pct_MEC'], 'pct_cross': PAPER_DECOMP_PCT['pct_cross'], 'source': 'paper_target'}
+    for r in SOURCE_REGIONS
+])
+if mean_rows:
+    mean_decomp_all = pd.concat(mean_rows + [paper_mean], ignore_index=True)
+    fig, ax = plt.subplots(figsize=(12, 5))
+    plot_regions_src = [r for r in SOURCE_REGIONS if r in mean_decomp_all['region'].unique()]
+    width = 0.25
+    x = np.arange(len(plot_regions_src))
+    sources = ['paper_target', 'full', 'paper']
+    colors_src = {'paper_target': '#cccccc', 'full': '#1f77b4', 'paper': '#ff7f0e'}
+    for i, src in enumerate(sources):
+        sub = mean_decomp_all[mean_decomp_all['source'] == src].set_index('region').reindex(plot_regions_src)
+        bottom = np.zeros(len(plot_regions_src))
+        for col, color in zip(['pct_E', 'pct_tau', 'pct_MEC', 'pct_cross'],
+                              ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']):
+            vals = sub[col].fillna(0).values
+            ax.bar(x + (i - 1) * width, vals, width=width, bottom=bottom, color=color,
+                   alpha=0.85 if src != 'paper_target' else 0.4, label=f'{col} ({src})' if i == 0 else None)
+            bottom += vals
     ax.set_xticks(x)
-    ax.set_xticklabels(np.arange(1, len(sub) + 1), fontsize=10)
-    ax.set_ylabel('AOD error contribution', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Model number (alphabetical)', fontsize=12, fontweight='bold')
-    ax.set_title(region.upper(), fontsize=13, fontweight='bold')
+    ax.set_xticklabels(plot_regions_src, rotation=45, ha='right')
+    ax.set_ylabel('Mean contribution to |AOD error| (%)', fontweight='bold')
+    ax.set_title('Figure 4 summary: mean pct (paper target vs full vs paper ensemble)', fontweight='bold')
+    plt.tight_layout()
+    fig_path2 = project_root / 'notebooks' / 'AOD_error_attribution_figure4_mean_pct_compare.png'
+    if SAVE_FIGURE:
+        fig.savefig(fig_path2, dpi=300, bbox_inches='tight')
+        print(f'Saved: {fig_path2}', flush=True)
+        plt.close(fig)
+    if _IN_IPYTHON:
+        plt.show()
+    else:
+        plt.close(fig)
+
+# -------------------------------------------------------------------------------
+# 13. Figure 5: African outflow Default / EC / MFC (both ensembles)
+# -------------------------------------------------------------------------------
+print('\n--- Figure 5: African outflow ---', flush=True)
+
+
+def plot_figure5(ens_name, res, suffix):
+    outflow_pred = res['outflow_pred_df']
+    outflow_params = res['outflow_params']
+    if outflow_pred.empty:
+        print(f'  {ens_name}: no outflow predictions', flush=True)
+        return
+    sub = outflow_pred.sort_values('model').reset_index(drop=True)
+    x = np.arange(len(sub))
+    width = 0.25
+    fig, ax = plt.subplots(figsize=(max(10, 0.55 * len(sub)), 6))
+    ax.bar(x - width, sub['AOD_default'], width=width, color='#2ca02c', label='Default', alpha=0.9)
+    ax.bar(x, sub['AOD_EC'], width=width, color='#ff7f0e', label='EC', alpha=0.9)
+    ax.bar(x + width, [sub['AOD_MFC'].iloc[0]] * len(sub), width=width, color='#1f77b4', label='MFC', alpha=0.9)
+    ax.axhline(sub['AOD_obs'].iloc[0], color='red', linestyle=':', linewidth=2, label='POLDER')
+    ax.axhline(sub['AOD_default'].median(), color='#2ca02c', linestyle='--', linewidth=1.5, alpha=0.7)
+    ax.axhline(sub['AOD_EC'].median(), color='#ff7f0e', linestyle='--', linewidth=1.5, alpha=0.7)
+    ax.set_xticks(x)
+    ax.set_xticklabels(np.arange(1, len(sub) + 1))
+    ax.set_xlabel('Model number (alphabetical)', fontweight='bold')
+    ax.set_ylabel('Africa outflow AOD', fontweight='bold')
+    r2txt = outflow_params['r2'] if outflow_params else np.nan
+    ax.set_title(f'Figure 5: Outflow AOD ({ens_name}, meta R2={r2txt:.3f})', fontweight='bold')
+    ax.legend(fontsize=9, ncol=2)
     ax.grid(True, alpha=0.3, axis='y')
-    if idx == 0:
-        ax.legend(loc='upper right', fontsize=9)
+    plt.tight_layout()
+    fig_path = project_root / 'notebooks' / f'AOD_error_attribution_figure5_outflow_{suffix}.png'
+    if SAVE_FIGURE:
+        fig.savefig(fig_path, dpi=300, bbox_inches='tight')
+        print(f'Saved: {fig_path}', flush=True)
+        plt.close(fig)
+    if _IN_IPYTHON:
+        plt.show()
+    else:
+        plt.close(fig)
 
-# Hide unused panels.
-for j in range(idx + 1, len(axes_flat)):
-    axes_flat[j].set_visible(False)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    ax = axes[0]
+    ax.scatter(sub['AOD_default'], sub['AOD_meta_fit'], s=40, alpha=0.8)
+    lims = [
+        min(sub['AOD_default'].min(), sub['AOD_meta_fit'].min()) * 0.9,
+        max(sub['AOD_default'].max(), sub['AOD_meta_fit'].max()) * 1.1,
+    ]
+    ax.plot(lims, lims, 'k--', alpha=0.5)
+    ax.set_xlabel('Default outflow AOD', fontweight='bold')
+    ax.set_ylabel('Meta-model fitted AOD', fontweight='bold')
+    ax.set_title(f'(a) Meta-model fit (R2={r2txt:.3f})', fontweight='bold')
+    ax.grid(True, alpha=0.3)
 
-plt.suptitle('Figure 4: AOD error attribution by region (Zhong et al. 2022)', fontsize=15, fontweight='bold')
-plt.tight_layout()
-fig_path = project_root / 'notebooks' / 'AOD_error_attribution_figure4.png'
-if SAVE_FIGURE:
-    fig.savefig(fig_path, dpi=300, bbox_inches='tight')
-    print(f'Saved: {fig_path}')
-plt.show()
+    ax = axes[1]
+    ax.scatter(x, sub['AOD_default'], label='Default', s=40, color='#2ca02c')
+    ax.scatter(x, sub['AOD_EC'], label='EC', s=40, marker='s', color='#ff7f0e')
+    ax.axhline(sub['AOD_MFC'].iloc[0], color='#1f77b4', linestyle='--', linewidth=2, label='MFC')
+    ax.axhline(sub['AOD_obs'].iloc[0], color='red', linestyle=':', linewidth=2, label='POLDER')
+    ax.set_xticks(x)
+    ax.set_xticklabels(np.arange(1, len(sub) + 1))
+    ax.set_xlabel('Model number (alphabetical)', fontweight='bold')
+    ax.set_ylabel('Outflow AOD', fontweight='bold')
+    ax.set_title('(b) Default / EC / MFC / POLDER', fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.suptitle(f'African outflow meta-model ({ens_name})', fontweight='bold')
+    plt.tight_layout()
+    fig_path2 = project_root / 'notebooks' / f'AOD_error_attribution_figure5_meta_{suffix}.png'
+    if SAVE_FIGURE:
+        fig.savefig(fig_path2, dpi=300, bbox_inches='tight')
+        print(f'Saved: {fig_path2}', flush=True)
+        plt.close(fig)
+    if _IN_IPYTHON:
+        plt.show()
+    else:
+        plt.close(fig)
 
-# Shared alphabetical model legend for Fig. 4 numbering
-common_model_list = sorted(decomp_df['model'].dropna().unique().tolist())
-fig_leg, ax_leg = plt.subplots(figsize=(6, max(3, 0.28 * max(len(common_model_list), 1))))
-ax_leg.axis('off')
-legend_lines = ['SHARED MODEL LIST (alphabetical):']
-for i, model in enumerate(common_model_list, start=1):
-    legend_lines.append(f'  {i:>2d}. {model}')
-ax_leg.text(0.02, 0.98, '\n'.join(legend_lines), transform=ax_leg.transAxes,
-            va='top', ha='left', fontsize=11, family='monospace')
-plt.tight_layout()
-fig_path_leg = project_root / 'notebooks' / 'AOD_error_attribution_figure4_model_legend.png'
-if SAVE_FIGURE:
-    fig_leg.savefig(fig_path_leg, dpi=300, bbox_inches='tight')
-    print(f'Saved: {fig_path_leg}')
-plt.show()
 
-# Mean percentage contribution per region.
-mean_decomp = decomp_df.groupby('region')[['pct_E', 'pct_tau', 'pct_MEC', 'pct_cross']].mean().loc[fig_regions]
-fig, ax = plt.subplots(figsize=(10, 5))
-mean_decomp.plot(kind='bar', stacked=True, ax=ax,
-                 color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728'])
-ax.set_ylabel('Mean contribution to |AOD error| (%)', fontweight='bold')
-ax.set_title('Figure 4 (summary): Mean AOD error attribution by region', fontweight='bold')
-ax.legend(title='Component', bbox_to_anchor=(1.05, 1), loc='upper left')
-ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
-plt.tight_layout()
-fig_path2 = project_root / 'notebooks' / 'AOD_error_attribution_figure4_mean_pct.png'
-if SAVE_FIGURE:
-    plt.savefig(fig_path2, dpi=300, bbox_inches='tight')
-    print(f'Saved: {fig_path2}')
-plt.show()
+for ens_name, res in results.items():
+    plot_figure5(ens_name, res, suffix=ens_name)
 
 # -------------------------------------------------------------------------------
-# 12. Figure 5 / Figure 6: outflow Default–EC–MFC and paper Fig. 6
+# 14. Regional map (once)
 # -------------------------------------------------------------------------------
-print('\n--- Figure 5: African outflow Default / EC / MFC ---')
-
-# Regional map of study areas.
-print('\n--- Regional map ---')
-sample_field = data[sample_model]['od550aer']['od550aer'].isel(time=0)
+print('\n--- Regional map ---', flush=True)
 region_boxes = {
     name: (cfg['lon_range'][0], cfg['lon_range'][1], cfg['lat_range'][0], cfg['lat_range'][1])
     for name, cfg in REGIONS.items() if name != 'global'
 }
+sample_field = data[sample_model]['od550aer']['od550aer'].isel(time=0)
 fig_map = ct.fake_uba_map(
     lon=sample_field.lon.values,
     lat=sample_field.lat.values,
@@ -1355,128 +1809,18 @@ fig_map = ct.fake_uba_map(
 if SAVE_FIGURE:
     save_path = project_root / 'notebooks' / 'AOD_error_attribution_regions.png'
     fig_map.savefig(save_path, bbox_inches='tight', dpi=300)
-    print(f'Saved regional map: {save_path}')
-fig_map
+    print(f'Saved regional map: {save_path}', flush=True)
+    plt.close(fig_map)
+if _IN_IPYTHON:
+    pass  # display fig_map in notebook
 
-# Fig. 5 style: Default / EC / MFC outflow AOD (models alphabetical)
-if outflow_pred_df.empty:
-    print('  No outflow Default/EC/MFC predictions to plot.')
-else:
-    sub = outflow_pred_df.sort_values('model', ascending=True).reset_index(drop=True)
-    x = np.arange(len(sub))
-    width = 0.25
-    fig, ax = plt.subplots(figsize=(max(10, 0.55 * len(sub)), 6))
-    ax.bar(x - width, sub['AOD_default'], width=width, color='#2ca02c', label='Default', alpha=0.9)
-    ax.bar(x, sub['AOD_EC'], width=width, color='#ff7f0e', label='EC', alpha=0.9)
-    ax.bar(x + width, [sub['AOD_MFC'].iloc[0]] * len(sub), width=width, color='#1f77b4',
-           label='MFC', alpha=0.9)
-    ax.axhline(sub['AOD_obs'].iloc[0], color='red', linestyle=':', linewidth=2, label='POLDER')
-    ax.axhline(sub['AOD_default'].median(), color='#2ca02c', linestyle='--', linewidth=1.5,
-               alpha=0.7, label='Default median')
-    ax.axhline(sub['AOD_EC'].median(), color='#ff7f0e', linestyle='--', linewidth=1.5,
-               alpha=0.7, label='EC median')
-    ax.set_xticks(x)
-    ax.set_xticklabels(np.arange(1, len(sub) + 1))
-    ax.set_xlabel('Model number (alphabetical)', fontweight='bold')
-    ax.set_ylabel('Africa outflow AOD', fontweight='bold')
-    ax.set_title('Figure 5 style: Outflow AOD — Default / EC / MFC', fontweight='bold')
-    ax.legend(fontsize=9, ncol=2)
-    ax.grid(True, alpha=0.3, axis='y')
-    plt.tight_layout()
-    fig_path = project_root / 'notebooks' / 'AOD_error_attribution_figure5_outflow.png'
-    if SAVE_FIGURE:
-        plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-        print(f'Saved: {fig_path}')
-    plt.show()
+# -------------------------------------------------------------------------------
+# 15. AOD error maps companion (guard colorbar when im is None)
+# -------------------------------------------------------------------------------
+print('\n--- AOD error maps ---', flush=True)
 
-    # Companion: meta-fit vs model and EC/MFC vs POLDER
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    ax = axes[0]
-    ax.scatter(sub['AOD_default'], sub['AOD_meta_fit'], s=40, alpha=0.8, label='meta-fit vs Default')
-    lims = [
-        min(sub['AOD_default'].min(), sub['AOD_meta_fit'].min()) * 0.9,
-        max(sub['AOD_default'].max(), sub['AOD_meta_fit'].max()) * 1.1,
-    ]
-    ax.plot(lims, lims, 'k--', alpha=0.5)
-    ax.set_xlabel('Default outflow AOD', fontweight='bold')
-    ax.set_ylabel('Meta-model fitted AOD', fontweight='bold')
-    title_r2 = outflow_meta_params['r2'] if outflow_meta_params else np.nan
-    ax.set_title(f'(a) Meta-model fit (R²={title_r2:.3f})', fontweight='bold')
-    ax.grid(True, alpha=0.3)
-    ax.legend()
 
-    ax = axes[1]
-    ax.scatter(x, sub['AOD_default'], label='Default', s=40, color='#2ca02c')
-    ax.scatter(x, sub['AOD_EC'], label='EC', s=40, marker='s', color='#ff7f0e')
-    ax.axhline(sub['AOD_MFC'].iloc[0], color='#1f77b4', linestyle='--', linewidth=2, label='MFC')
-    ax.axhline(sub['AOD_obs'].iloc[0], color='red', linestyle=':', linewidth=2, label='POLDER')
-    ax.set_xticks(x)
-    ax.set_xticklabels(np.arange(1, len(sub) + 1))
-    ax.set_xlabel('Model number (alphabetical)', fontweight='bold')
-    ax.set_ylabel('Outflow AOD', fontweight='bold')
-    ax.set_title('(b) Default / EC / MFC / POLDER', fontweight='bold')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-    plt.suptitle('African outflow meta-model predictions', fontweight='bold')
-    plt.tight_layout()
-    fig_path = project_root / 'notebooks' / 'AOD_error_attribution_figure5_meta.png'
-    if SAVE_FIGURE:
-        plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-        print(f'Saved: {fig_path}')
-    plt.show()
-
-print('\n--- Figure 6 (Zhong et al. 2022 main paper) ---')
-# Display the published Fig. 6 (ECHAM-HAM Default / EC / MFC longitude transect).
-paper_fig6 = project_root / 'notebooks' / 'AOD_paper_figure6.png'
-if paper_fig6.exists():
-    img = plt.imread(paper_fig6)
-    fig, ax = plt.subplots(figsize=(12, 7))
-    ax.imshow(img)
-    ax.axis('off')
-    ax.set_title(
-        'Figure 6 (Zhong et al. 2022): ECHAM-HAM AOD errors — Default / EC / MFC\n'
-        'Source & outflow of Southern Hemisphere Africa (from s41467-022-33680-4.pdf)',
-        fontweight='bold', fontsize=12,
-    )
-    plt.tight_layout()
-    if SAVE_FIGURE:
-        out_path = project_root / 'notebooks' / 'AOD_error_attribution_figure6_paper.png'
-        plt.savefig(out_path, dpi=300, bbox_inches='tight')
-        print(f'Saved: {out_path}')
-    plt.show()
-else:
-    print(f'  Paper Fig. 6 image not found at {paper_fig6}')
-
-# Model vs POLDER AOD scatter by region (diagnostic companion).
-fig, ax = plt.subplots(figsize=(9, 7))
-all_vals = []
-for region in plot_regions:
-    sub = decomp_df[decomp_df['region'] == region]
-    if sub.empty:
-        continue
-    aod_obs = polder_monthly[region]['AOD_550'].mean() if not polder_monthly[region].empty else np.nan
-    if np.isnan(aod_obs):
-        continue
-    ax.scatter([aod_obs] * len(sub), sub['AOD_model'], color=region_colors[region],
-               label=region, alpha=0.6, s=60)
-    all_vals.extend([aod_obs] + sub['AOD_model'].tolist())
-max_val = max(all_vals) if all_vals else 1.0
-ax.plot([0, max_val], [0, max_val], 'k--', alpha=0.5, label='1:1')
-ax.set_xlabel('POLDER AOD (observation)', fontweight='bold')
-ax.set_ylabel('Model AOD', fontweight='bold')
-ax.set_title('Diagnostic: Model vs POLDER AOD by region', fontweight='bold')
-ax.grid(True, alpha=0.3)
-ax.legend(fontsize=9)
-plt.tight_layout()
-fig_path = project_root / 'notebooks' / 'AOD_error_attribution_figure6_scatter.png'
-if SAVE_FIGURE:
-    plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-    print(f'Saved: {fig_path}')
-plt.show()
-
-# Helper: build a POLDER seasonal-mean AOD field on the model grid.
 def polder_grid_seasonal(region_name, var='AOD_550'):
-    """Return POLDER seasonal-mean AOD as an xarray DataArray on its native 1° grid."""
     cfg = REGIONS[region_name]
     mask = polder_region_mask(polder_df, cfg['lon_range'], cfg['lat_range'])
     sub = polder_df[mask].copy()
@@ -1491,7 +1835,6 @@ def polder_grid_seasonal(region_name, var='AOD_550'):
 
 
 def model_grid_seasonal(model_name, region_name):
-    """Return model seasonal-mean AOD on the model's native grid."""
     cfg = REGIONS[region_name]
     da = data[model_name]['od550aer']['od550aer']
     da = da.sel(time=slice(*cfg['time_slice'])).mean('time')
@@ -1500,15 +1843,12 @@ def model_grid_seasonal(model_name, region_name):
 
 
 def plot_region_aod_diff(region_name, model_name, ax=None):
-    """Plot model - POLDER AOD difference for one region/model."""
     model_da = model_grid_seasonal(model_name, region_name)
     polder_da = polder_grid_seasonal(region_name)
     if polder_da is None:
         return None
     polder_on_model = polder_da.interp(lat=model_da.lat, lon=model_da.lon, method='nearest')
     diff = model_da - polder_on_model
-
-    # Mask outside the region.
     region_mask = ct.create_region_mask(
         model_da, name=region_name,
         lon_range=REGIONS[region_name]['lon_range'],
@@ -1516,7 +1856,6 @@ def plot_region_aod_diff(region_name, model_name, ax=None):
         surface_type=REGIONS[region_name]['surface_type'],
     )
     diff = diff.where(region_mask > 0)
-
     if ax is None:
         fig = ct.fake_uba_map(
             lon=model_da.lon.values, lat=model_da.lat.values, c_array=diff.values,
@@ -1524,56 +1863,176 @@ def plot_region_aod_diff(region_name, model_name, ax=None):
             mycolor='diff', zmin=-0.3, zmax=0.3, show=False,
         )
         return fig
-    else:
-        lon_grid, lat_grid = np.meshgrid(model_da.lon.values, model_da.lat.values)
-        im = ax.pcolormesh(lon_grid, lat_grid, diff.values, cmap='RdBu_r', vmin=-0.3, vmax=0.3, shading='auto')
-        ax.coastlines()
-        ax.set_title(f'{region_name.upper()} AOD error ({model_name})', fontweight='bold')
-        return im
+    lon_grid, lat_grid = np.meshgrid(model_da.lon.values, model_da.lat.values)
+    im = ax.pcolormesh(lon_grid, lat_grid, diff.values, cmap='RdBu_r', vmin=-0.3, vmax=0.3,
+                       shading='auto', transform=ccrs.PlateCarree())
+    ax.coastlines()
+    ax.set_title(f'{region_name.upper()} AOD error ({short_model_name(model_name)})', fontweight='bold')
+    return im
 
 
-# Map AOD error for one selected model in a few key regions (Fig. 6 companion maps).
 map_regions = [r for r in ['africa', 'amazon', 'outflow_af'] if r in REGIONS]
 if map_regions:
-    selected_model = next((m for m in sorted(models) if m in model_seasonal.get('africa', {}).get('od550aer', {})),
-                          sorted(models)[0] if models else None)
+    selected_model = next(
+        (m for m in sorted(models) if m in model_seasonal.get('africa', {}).get('od550aer', {})),
+        sorted(models)[0] if models else None,
+    )
     if selected_model is not None:
-        print(f'Selected model for AOD-error maps: {selected_model}')
+        print(f'Selected model for AOD-error maps: {selected_model}', flush=True)
         fig, axes = plt.subplots(1, len(map_regions), figsize=(6 * len(map_regions), 5),
                                  subplot_kw={'projection': ccrs.PlateCarree()})
         if len(map_regions) == 1:
             axes = [axes]
+        im = None
         for ax, region in zip(axes, map_regions):
             im = plot_region_aod_diff(region, selected_model, ax=ax)
-        cbar = fig.colorbar(im, ax=axes, orientation='horizontal', pad=0.05, fraction=0.046)
-        cbar.set_label('AOD error (model - POLDER)', fontweight='bold')
+        if im is not None:
+            cbar = fig.colorbar(im, ax=axes, orientation='horizontal', pad=0.05, fraction=0.046)
+            cbar.set_label('AOD error (model - POLDER)', fontweight='bold')
         plt.suptitle('Figure 6 companion: AOD error maps (model - POLDER)', fontsize=14, fontweight='bold')
         plt.tight_layout()
         fig_path = project_root / 'notebooks' / 'AOD_error_attribution_figure6_maps.png'
         if SAVE_FIGURE:
-            plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-            print(f'Saved: {fig_path}')
-        plt.show()
+            fig.savefig(fig_path, dpi=300, bbox_inches='tight')
+            print(f'Saved: {fig_path}', flush=True)
+            plt.close(fig)
+        if _IN_IPYTHON:
+            plt.show()
+        else:
+            plt.close(fig)
+
+# Diagnostic scatter: model vs POLDER AOD by region (full ensemble)
+fig, ax = plt.subplots(figsize=(9, 7))
+all_vals = []
+for region in plot_regions:
+    sub = decomp_df[decomp_df['region'] == region]
+    if sub.empty:
+        continue
+    aod_obs = float(aod_obs_by_region.get(region, np.nan))
+    if not np.isfinite(aod_obs):
+        continue
+    ax.scatter([aod_obs] * len(sub), sub['AOD_model'], color=region_colors[region],
+               label=region, alpha=0.6, s=60)
+    all_vals.extend([aod_obs] + sub['AOD_model'].tolist())
+if all_vals:
+    max_val = max(all_vals)
+    ax.plot([0, max_val], [0, max_val], 'k--', alpha=0.5, label='1:1')
+ax.set_xlabel('POLDER AOD (observation)', fontweight='bold')
+ax.set_ylabel('Model AOD', fontweight='bold')
+ax.set_title('Diagnostic: Model vs POLDER AOD by region (full ensemble)', fontweight='bold')
+ax.grid(True, alpha=0.3)
+ax.legend(fontsize=9)
+plt.tight_layout()
+fig_path = project_root / 'notebooks' / 'AOD_error_attribution_figure6_scatter.png'
+if SAVE_FIGURE:
+    fig.savefig(fig_path, dpi=300, bbox_inches='tight')
+    print(f'Saved: {fig_path}', flush=True)
+    plt.close(fig)
+if _IN_IPYTHON:
+    plt.show()
+else:
+    plt.close(fig)
 
 # -------------------------------------------------------------------------------
-# 13. Optional CSV outputs and final summary
+# 16. CSV outputs, robustness, and gap summary markdown
 # -------------------------------------------------------------------------------
+print('\n--- Saving outputs ---', flush=True)
+
 if SAVE_CSV:
-    out_csv = project_root / 'notebooks' / 'AOD_error_attribution_regression_data.csv'
-    reg_df.to_csv(out_csv, index=False)
-    print(f'Saved CSV: {out_csv}')
+    nb = project_root / 'notebooks'
+    combined_reg_df.to_csv(nb / 'AOD_error_attribution_regression_data.csv', index=False)
+    combined_constrained_df.to_csv(nb / 'AOD_error_attribution_constrained_estimates.csv', index=False)
+    combined_decomp_df.to_csv(nb / 'AOD_error_attribution_decomposition.csv', index=False)
+    if not combined_outflow_df.empty:
+        combined_outflow_df.to_csv(nb / 'AOD_error_attribution_outflow_predictions.csv', index=False)
+    combined_table1_df.to_csv(nb / 'AOD_error_attribution_table1_comparison.csv', index=False)
+    combined_loo_df.to_csv(nb / 'AOD_error_attribution_loo_validation.csv', index=False)
+    if not combined_robust_df.empty:
+        combined_robust_df.to_csv(nb / 'AOD_error_attribution_robustness.csv', index=False)
+    for ens_name, res in results.items():
+        res['reg_df'].to_csv(nb / f'AOD_error_attribution_regression_data_{ens_name}.csv', index=False)
+        res['constrained_df'].to_csv(nb / f'AOD_error_attribution_constrained_estimates_{ens_name}.csv', index=False)
+        res['decomp_df'].to_csv(nb / f'AOD_error_attribution_decomposition_{ens_name}.csv', index=False)
+        if not res['outflow_pred_df'].empty:
+            res['outflow_pred_df'].to_csv(nb / f'AOD_error_attribution_outflow_predictions_{ens_name}.csv', index=False)
+    print('Saved CSV outputs.', flush=True)
 
-    out_csv = project_root / 'notebooks' / 'AOD_error_attribution_constrained_estimates.csv'
-    constrained_df.to_csv(out_csv, index=False)
-    print(f'Saved CSV: {out_csv}')
+# Gap summary markdown
+gap_md_lines = [
+    '# AOD error attribution — gap summary vs Zhong et al. 2022 Table 1',
+    '',
+    f'Ensembles: full={len(models)} models, paper={len(paper_models)} models.',
+    f'Gap threshold: |gap_pct| > {GAP_THRESHOLD_PCT}%.',
+    '',
+    '## Out of scope (no data in this repo)',
+    '',
+    '- Fig. 3 emission-inventory comparison (GFED/QFED/FEER/GFAS)',
+    '- Fig. 6 ECHAM-HAM EC/MFC climate-model rerun',
+    '- AERONET cross-check of regional AOD/AE',
+    '',
+    '## Known methodological caveats',
+    '',
+    '- GPCP SE Asia / Eastern Siberia precip in our boxes is much wetter than',
+    '  Zhong Table 1 (our land-masked GPCP vs their regional means). This',
+    '  propagates into constrained τ and E.',
+    '- Homogenized AOD for SE Asia / Boreal NA can diverge strongly from',
+    '  Table 1 when sampling/coverage differs from the paper.',
+    '- LOO validation uses per-region leave-one-model-out, pooled across the',
+    '  five SOURCE_REGIONS; metrics report Pearson R (as in Fig. 2c/d).',
+    '',
+]
+for ens_name, res in results.items():
+    gap_md_lines.append(f'## Ensemble: {ens_name}')
+    gap_md_lines.append('')
+    t1 = res['table1_df']
+    flagged = t1[t1['gap_pct'].abs() > GAP_THRESHOLD_PCT].sort_values(['region', 'variable'])
+    if flagged.empty:
+        gap_md_lines.append('No variables exceed the gap threshold.')
+    else:
+        gap_md_lines.append('| region | variable | computed | paper | gap | gap_pct |')
+        gap_md_lines.append('| --- | --- | --- | --- | --- | --- |')
+        for _, row in flagged.iterrows():
+            gap_md_lines.append(
+                f"| {row['region']} | {row['variable']} | {row['computed']:.4g} | "
+                f"{row['paper']:.4g} | {row['gap']:.4g} | {row['gap_pct']:.1f}% |"
+            )
+    gap_md_lines.append('')
+    loo = res['loo_df']
+    for var in ['MEC', 'inv_lifetime']:
+        loo_m = loo.copy()
+        if var == 'MEC' and not loo_m.empty:
+            msub = loo_m['variable'] == 'MEC'
+            loo_m.loc[msub, 'modelled'] = loo_m.loc[msub, 'modelled'] / 1000.0
+            loo_m.loc[msub, 'predicted'] = loo_m.loc[msub, 'predicted'] / 1000.0
+        m = compute_loo_metrics(loo_m, var)
+        gap_md_lines.append(
+            f'- LOO {var}: R={m["r"]:.3f} (paper {PAPER_LOO_R[var]:.2f}), '
+            f'NMB={m["nmb"]:.1f}%, RMSE={m["rmse"]:.4g}, n={m["n"]}'
+        )
+    dmean = res['decomp_df'][['pct_E', 'pct_tau', 'pct_MEC', 'pct_cross']].mean()
+    if len(dmean):
+        gap_md_lines.append(
+            f'- Fig.4 mean |error| %: E={dmean["pct_E"]:.1f} / tau={dmean["pct_tau"]:.1f} / '
+            f'MEC={dmean["pct_MEC"]:.1f} / cross={dmean["pct_cross"]:.1f} '
+            f'(paper {PAPER_DECOMP_PCT["pct_E"]}/{PAPER_DECOMP_PCT["pct_tau"]}/'
+            f'{PAPER_DECOMP_PCT["pct_MEC"]}/{PAPER_DECOMP_PCT["pct_cross"]})'
+        )
+    op = res['outflow_params']
+    if op:
+        gap_md_lines.append(
+            f'- Outflow meta-model: R2={op["r2"]:.3f}, NMB={op["nmb"]:.1f}%, '
+            f'RMSE={op["rmse"]:.4f}, n={op["n"]}'
+        )
+    gap_md_lines.append('')
 
-    out_csv = project_root / 'notebooks' / 'AOD_error_attribution_decomposition.csv'
-    decomp_df.to_csv(out_csv, index=False)
-    print(f'Saved CSV: {out_csv}')
+gap_md_path = project_root / 'notebooks' / 'AOD_error_attribution_gap_summary.md'
+gap_md_path.write_text('\n'.join(gap_md_lines))
+print(f'Saved gap summary: {gap_md_path}', flush=True)
 
-    if not outflow_pred_df.empty:
-        out_csv = project_root / 'notebooks' / 'AOD_error_attribution_outflow_predictions.csv'
-        outflow_pred_df.to_csv(out_csv, index=False)
-        print(f'Saved CSV: {out_csv}')
-
-print('\nDone.')
+# Final summary
+print('\n--- Final summary ---', flush=True)
+print(f'Models (full): {len(models)}; paper subset: {len(paper_models)}', flush=True)
+for ens_name, res in results.items():
+    print(f'  [{ens_name}] reg rows={len(res["reg_df"])}, constrained={len(res["constrained_df"])}, '
+          f'decomp={len(res["decomp_df"])}, outflow={len(res["outflow_pred_df"])}', flush=True)
+print('\nDone.', flush=True)
