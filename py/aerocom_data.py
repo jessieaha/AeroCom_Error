@@ -1,1026 +1,1039 @@
-""" Script to get the AeroCom data. This file only contains functions.
-All AeroCom variables are obtained at 'get_data.py'.
-
-Direct model output --> get_data()
-    - emissions (monthly)                                       units: kg/m2s
-    - load (or burden) (monthly)                                units: kg/m2
-    - AOD_550, AOD_870, AOD_440 (monthly, daily or 3hourly)     units: none
-    - precipitation (monthly)                                   units: mm/day
-
-Other variables --> calculate_var()
-    - MEC = AOD_550 / load                                      units: m2/g
-    - MAC = AAOD_550 / load_BC_OA                               units: m2/g
-    - SSA = 1 - AAOD/AOD                                        units: none
-    - lifetime = load / emissions                               units: day
-    - AE = - log(AOD_550/AOD_other) / log(550/other)            units: none
-
-Regional masks and area means are handled in post-processing (see functions.create_region_mask
-and functions.regional_aggregate in notebooks).
-
-FRdM, 7th of August 2024 """
+"""
+Modernized, automated AeroCom Phase III data extraction engine.
+This module dynamically scans model directories, discovers files matching variable patterns,
+standardizes coordinates to ('lon', 'lat', 'time'), and returns clean, analysis-ready
+lazy xarray Datasets. Missing variables are gracefully marked as None.
 
 
-###################### IMPORT MODULES ######################
+"""
 
-import xarray as xr
+import os
+import sys
+import gc
+import glob
+import logging
+from datetime import datetime
+from pathlib import Path
+
 import numpy as np
-import functions
+import pandas as pd
+import xarray as xr
+from xarray.coding.times import decode_cf_datetime
 
-import importlib
-importlib.reload(functions)
+# Configure standard logging to report missing files cleanly
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+# Default zlib encoding complevel for processed NetCDF writes
+_ZLIB_COMPLEVEL = 4
+# ==============================================================================
+# GLOBAL CONFIGURATIONS
+# ==============================================================================
+# VARIABLES = (
+#     "abs550aer", "depbc", "depdust", "depoa", "depso2", "depso4", "depss",
+#     "emibc", "emidust", "emioa", "emiso2", "emiss", "loadbc", "loaddust",
+#     "loadoa", "loadso2", "loadso4", "loadss", "od440aer", "od550aer",
+#     "od870aer", "od865aer", "od550bc", "od550dust", "od550oa", "od550so4", "od550ss"
+# )
 
-###################### DEFINE VARIABLES ######################
-
-S = 'Surface'
-C = 'Column'
-M = 'monthly'
-emi_units = 1               # units: kg/m2s ; 1e9*3600*24*365 units: g/km2 yr
-load_units = 1              # units: kg/m2 ; 1e3 units: g/m2
-pr_units = 3600*24          # units: mm/day
-
-
-###################### DEFINE FUNCTIONS ######################
-
-def get_data(path, models_names, var_name,
-             od550_freq = 'monthly', odother_freq = 'monthly', abs550_freq = 'monthly'):
-
-    """ Opens the AeroCom files (all times and for everywhere).
-    The files are shifted to a longitude range 0,360 and converted to datetime with
-    - functions.shift360()
-    - functions.convert_cftime_to_datetime()
-
-    :param path: path to the files (string).
-    :param models_names: names of the models to open (list).
-    :param var_name: name of the variable to get (string).
-    :param od550_freq: frequency of the AOD 550 (monthly, daily or 3hourly).
-    :param odother_freq: frequency of the other AOD (monthly, daily or 3hourly).
-    :param abs550_freq: frequency of the AAOD (monthly, daily or 3hourly).
-
-    :returns: dictionary with the desired data for every model.
-              If one model is not requested, it deletes it from the dictionary.
-               
-    :raises ValueError: If path template doesn't contain placeholders, var_name is invalid, or frequency is invalid.
-    :raises FileNotFoundError: If no files match the path pattern.
-    :raises KeyError: If requested variable is not found in the model configuration.
+# # Define regional models that use 870nm instead of 440nm for Angstrom Exponent
+# AE_870_MODELS = {
+#     'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 
+#     'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010'
+# }
+# do auto search on 870 first otherwise 865 then 440 
+# ==============================================================================
+# LONGITUDE NORMALIZATION
+# ==============================================================================
+def normalize_longitude(ds, lon_name='lon'):
     """
+    Normalize longitude coordinates to a consistent 0-360 range and sort the
+    dataset along the longitude axis so that coordinates are monotonically
+    increasing. This is required for correct interpolation against the POLDER
+    0-360 grid and avoids gaps at the -180/180 anti-meridian.
+    """
+    if lon_name not in ds.coords:
+        return ds
 
-    import os
-    import glob
+    lon = ds[lon_name].values
+    # Already in 0-360 and sorted -> nothing to do
+    if np.all(lon >= 0) and np.all(lon <= 360) and np.all(np.diff(lon) >= 0):
+        return ds
 
-    # Validate input parameters
-    if not isinstance(models_names, (list, tuple)):
-        raise TypeError(f"models_names must be a list or tuple, got {type(models_names).__name__}")
-     
-    if not isinstance(path, str):
-        raise TypeError(f"path must be a string, got {type(path).__name__}")
-     
-    if not isinstance(var_name, str):
-        raise TypeError(f"var_name must be a string, got {type(var_name).__name__}")
+    # Wrap any -180..180 values into 0..360
+    lon360 = np.mod(lon + 360.0, 360.0)
 
-    # Validate path template contains format placeholders
+    ds = ds.assign_coords({lon_name: lon360})
+    ds = ds.sortby(lon_name)
+
+    # Drop any duplicate longitudes that can appear after wrapping (e.g. 0 and 360)
+    lon_sorted = ds[lon_name].values
+    _, unique_idx = np.unique(lon_sorted, return_index=True)
+    if len(unique_idx) < len(lon_sorted):
+        ds = ds.isel({lon_name: unique_idx})
+
+    return ds
+
+def _to_month_start(values):
+    """Convert any datetime-like values to first-of-month datetime64."""
     try:
-        # Try to see if path has format placeholders
-        if '{}' not in path:
-            raise ValueError(
-                f"❌ ERROR: Path template is invalid.\n"
-                f"   Expected format string with {{}} placeholders for model, model, variable, location, frequency.\n"
-                f"   Received: {path}\n"
-                f"   Example: './Data/AEROCOM_III_regrid/{{}}/aerocom3_{{}}_{{}}_{{}}__{{}}.nc'"
-            )
-    except Exception as e:
-        if isinstance(e, ValueError):
-            raise
-        raise ValueError(f"❌ ERROR: Failed to validate path template: {str(e)}")
+        return pd.to_datetime(values).to_period('M').to_timestamp().values
+    except Exception:
+        return np.array([
+            np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
+            for t in values
+        ])
 
-    # Validate frequency parameters
-    valid_freq = ['monthly', 'daily', '3hourly']
-    freq_params = {'od550_freq': od550_freq, 'odother_freq': odother_freq, 'abs550_freq': abs550_freq}
 
-    for freq_name, freq_value in freq_params.items():
-        if freq_value not in valid_freq:
-            raise ValueError(
-                f"❌ ERROR: Invalid frequency for {freq_name}.\n"
-                f"   Valid options: {', '.join(valid_freq)}\n"
-                f"   Received: {freq_value}"
-            )
+def _decode_months_since(raw, units, year=None):
+    """Decode 'months since YYYY-MM-DD' units for non-standard calendars without cftime.
 
-    def safe_open_dataset(filepath, model, variable_name, location=None):
-        """
-        Safely open a netCDF dataset with comprehensive error handling.
-         
-        Args:
-            filepath: Full file path to open
-            model: Model name (for error messages)
-            variable_name: Variable name being loaded (for error messages)
-            location: Location/region info (for error messages)
-             
-        Returns:
-            xr.Dataset: The opened dataset
-             
-        Raises:
-            FileNotFoundError: If file doesn't exist
-            KeyError: If variable not found in file
-            Exception: For other file opening errors
-        """
-        import os
-         
-        # Check if parent directory exists
-        directory = os.path.dirname(filepath)
-        if directory and not os.path.exists(directory):
-            raise FileNotFoundError(
-                f"❌ ERROR: Data directory does not exist.\n"
-                f"   Model: {model}\n"
-                f"   Variable: {variable_name}\n"
-                f"   Directory: {directory}\n"
-                f"   Please check the data path configuration."
-            )
-         
-        # Check if file exists
-        if not os.path.exists(filepath):
-            raise FileNotFoundError(
-                f"❌ ERROR: Data file not found.\n"
-                f"   Model: {model}\n"
-                f"   Variable: {variable_name}\n"
-                f"   Expected file: {filepath}\n"
-                f"   Please verify:\n"
-                f"     - File path is correct\n"
-                f"     - File has been downloaded/created\n"
-                f"     - File permissions allow reading"
-            )
-         
-        # Try to open the file
-        try:
-            dataset = xr.open_dataset(filepath)
-            return dataset
-        except KeyError as e:
-            raise KeyError(
-                f"❌ ERROR: Variable not found in dataset.\n"
-                f"   Model: {model}\n"
-                f"   Variable: {variable_name}\n"
-                f"   File: {filepath}\n"
-                f"   Available variables: {list(dataset.data_vars) if 'dataset' in locals() else 'Unknown'}\n"
-                f"   Original error: {str(e)}"
-            )
-        except Exception as e:
-            raise Exception(
-                f"❌ ERROR: Failed to open data file.\n"
-                f"   Model: {model}\n"
-                f"   Variable: {variable_name}\n"
-                f"   File: {filepath}\n"
-                f"   Error type: {type(e).__name__}\n"
-                f"   Error message: {str(e)}"
-            )
+    If a target year is supplied and the raw values are 1..12 while the parsed
+    reference year is far from the target year (e.g. OsloCTM3 files that store
+    1..12 but claim 'Monthssince 1850-01-01'), treat the values as 1-based
+    months of the target year instead.
+    """
+    import re
+    m = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', units)
+    if not m:
+        return None
+    # Accept strings like 'Monthssince 1850-01-01', 'months since 1850-01-01', etc.
+    if 'month' not in units.lower().replace(' ', ''):
+        return None
+    months = np.asarray(raw, dtype=np.int64)
+    ref_year, ref_month, ref_day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    total_months = (ref_year * 12 + ref_month - 1) + months
+    years = total_months // 12
+    months_of_year = (total_months % 12) + 1
+    dates = np.array([
+        np.datetime64(f'{int(y):04d}-{int(m):02d}-01', 'ns')
+        for y, m in zip(years, months_of_year)
+    ])
+    # Fallback for files with a bogus reference year but 1-based month-of-year values.
+    if (year is not None and
+            np.all(months >= 1) and np.all(months <= 12) and
+            np.all(np.abs(years - year) > 100)):
+        dates = np.array([
+            np.datetime64(f'{year:04d}-{int(m):02d}-01', 'ns')
+            for m in months
+        ])
+    return dates
 
-    def get_variable_safely(dataset, variable_name, model, filepath):
-        """
-        Safely extract variable from dataset with error handling.
-         
-        Args:
-            dataset: xr.Dataset to extract from
-            variable_name: Name of variable to extract
-            model: Model name (for error messages)
-            filepath: File path (for error messages)
-             
-        Returns:
-            xr.DataArray: The extracted variable
-             
-        Raises:
-            KeyError: If variable not found in dataset
-        """
-        try:
-            return dataset[variable_name]
-        except KeyError:
-            available_vars = list(dataset.data_vars.keys())
-            raise KeyError(
-                f"❌ ERROR: Variable not found in dataset.\n"
-                f"   Model: {model}\n"
-                f"   Requested variable: {variable_name}\n"
-                f"   File: {filepath}\n"
-                f"   Available variables ({len(available_vars)}): {', '.join(available_vars[:5])}{'...' if len(available_vars) > 5 else ''}\n"
-                f"   Please check variable name spelling or file contents."
-            )
 
-    # define dictionary to fill in with the data
-    x = {
-        'CAM5-ATRAS_AP3-CTRL': {'emi':
-                                    {'emibc': [C, emi_units, M],
-                                     'emidust': [C, emi_units, M],
-                                     'emiss': [C, emi_units, M],
-                                     'emioa': [C, emi_units, M],
-                                     'emiso2': [C, emi_units, M]},
-                                'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                'emi_total': 0, 'emi_BC_OA': 0,
-                                'load':
-                                    {'loadbc': [C, load_units, M],
-                                     'loaddu': [C, load_units, M],
-                                     'loadss': [C, load_units, M],
-                                     'loadoa': [C, load_units, M],
-                                     'loadso4': [C, load_units, M]},
-                                'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                'load_total': 0, 'load_BC_OA': 0,
-                                'od550aer': {'od550aer': [C, M]},
-                                'od440aer': {'od440aer': [C, M]},
-                                'abs550aer': {'abs550aer': [C, M]},
-                                'AOD550': 0,
-                                'AOD440': 0,
-                                'AAOD550': 0,
-                                'precipitation': {'pr': [S, pr_units, M]},
-                                'prect': 0,
-                                'color': '#1f77b4'},
+def _cftime_to_datetime64(values):
+    """Convert cftime objects (e.g. DatetimeJulian, DatetimeNoLeap) to datetime64.
 
-        'CAM5.3-Oslo_AP3-CTRL2016-PD': {'emi':
-                                            {'emibc': [S, emi_units, M],
-                                             'emidust': [S, emi_units, M],
-                                             'emiss': [S, emi_units, M],
-                                             'emioa': [S, emi_units, M],
-                                             'emiso2': [S, emi_units, M]},
-                                        'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                        'emi_total': 0, 'emi_BC_OA': 0,
-                                        'load':
-                                            {'loadbc': [C, load_units, M],
-                                             'loaddust': [C, load_units, M],
-                                             'loadss': [C, load_units, M],
-                                             'loadoa': [C, load_units, M],
-                                             'loadso4': [C, load_units, M]},
-                                        'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                        'load_total': 0, 'load_BC_OA': 0,
-                                        'od550aer': {'od550aer': [C, od550_freq]},     # od550csaer
-                                        'od440aer': {'od440aer': [C, odother_freq]},     # od440csaer
-                                        'abs550aer': {'abs550aer': [C, abs550_freq]},
-                                        'AOD550': 0,
-                                        'AOD440': 0,
-                                        'AAOD550': 0,
-                                        'precipitation': {'precip': ['ModelLevel', pr_units, M]},
-                                        'prect': 0,
-                                        'color': '#aec7e8'},
+    Monthly data is normalised to first-of-month afterwards, so mapping to
+    year-month-01 is sufficient and avoids invalid days in non-standard calendars.
+    """
+    if len(values) == 0:
+        return values
+    first = values[0]
+    if hasattr(first, 'year') and hasattr(first, 'month'):
+        return np.array([
+            np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
+            for t in values
+        ])
+    return values
 
-        'CAM5_CTRL2016': {'emi':
-                              {'emibc': [C, emi_units, M],
-                               'emidust': [C, emi_units, M],
-                               # 'emiss': [S, emi_units, M],
-                               'emioa': [C, emi_units, M],
-                               'emiso2': [C, emi_units, M]},
-                          'emi_bc': 0, 'emi_dust': 0, 'emi_oa': 0, 'emi_so2': 0,
-                          'emi_total': 0, 'emi_BC_OA': 0,
-                          'load':
-                              {'loadbc': [C, load_units, M],
-                               'loaddust': [C, load_units, M],
-                               'loadss': [C, load_units, M],
-                               'loadoa': [C, load_units, M],
-                               'loadso4': [C, load_units, M]},
-                          'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                          'load_total': 0, 'load_BC_OA': 0,
-                          'od550aer': {'od550aer': [C, od550_freq]},
-                          'od440aer': {'od440aer': [C, odother_freq]},
-                          'abs550aer': {'abs550aer': [S, abs550_freq]},
-                          'AOD550': 0,
-                          'AOD440': 0,
-                          'AAOD550': 0,
-                          'precipitation': {'precip': [S, pr_units, M]},
-                          'prect': 0,
-                          'color': '#d62728'},
 
-        'EC-Earth3-AerChem-met2010_AP3-CTRL2019': {'emi':
-                                                       {'emibc': [C, emi_units, M],
-                                                        'emidust': [C, emi_units, M],
-                                                        'emiss': [C, emi_units, M],
-                                                        'emiso2': [C, emi_units, M],
-                                                        'emioa': [C, emi_units, M]},
-                                                   'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                                   'emi_total': 0, 'emi_BC_OA': 0,
-                                                   'load':
-                                                       {'loadbc': [C, load_units, M],
-                                                        'loaddust': [C, load_units, M],
-                                                        'loadss': [C, load_units, M],
-                                                        'loadoa': [C, load_units, M],
-                                                        'loadso4': [C, load_units, M]},
-                                                   'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                                   'load_total': 0, 'load_BC_OA': 0,
-                                                   'od550aer': {'od550aer': [C, M]},
-                                                   'od440aer': {'od440aer': [C, M]},
-                                                   'abs550aer': {'abs550aer': [C, M]},
-                                                   'AOD550': 0,
-                                                   'AOD440': 0,
-                                                   'AAOD550': 0,
-                                                   'precipitation': {'pr': [S, pr_units, M]},
-                                                   'prect': 0,
-                                                   'color': '#ff7f0e'},
+def _decode_time_index(da, var_hint=None, year=None):
+    """Decode an xarray time index to datetime64[ns], handling cftime & non-standard calendars.
 
-         'ECHAM6-HAM2_AP3-CTRL2016-PD': {'emi':
-                                             {'emibc': [S, emi_units, M],
-                                              'emidust': [S, emi_units, M],
-                                              'emiss': [S, emi_units, M],
-                                              'emioa': [S, emi_units, M],
-                                              'emiso2': [S, emi_units, M]},
-                                         'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                         'emi_total': 0, 'emi_BC_OA': 0,
-                                         'load':
-                                             {'loadbc': [C, load_units, M],
-                                              'loaddust': [C, load_units, M],
-                                              'loadss': [C, load_units, M],
-                                              'loadoa': [C, load_units, M],
-                                              'loadso4': [C, load_units, M]},
-                                         'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                         'load_total': 0, 'load_BC_OA': 0,
-                                         'od550aer': {'od550aer': [C, od550_freq]},
-                                         'od440aer': {'od440aer': [C, odother_freq]},
-                                         'abs550aer': {'abs550aer': [C, abs550_freq]},
-                                         'AOD550': 0,
-                                         'AOD440': 0,
-                                         'AAOD550': 0,
-                                         'precipitation': {'precip': [S, pr_units, M]},
-                                         'prect': 0,
-                                         'color': '#ffbb78'},
+    Parameters
+    ----------
+    da : xr.DataArray
+        DataArray with a 'time' coordinate.
+    var_hint : str, optional
+        Used in warning messages.
+    year : int, optional
+        Target year for non-standard calendar overrides.
 
-        'ECHAM6.3-HAM2.3-met2010_AP3-CTRL': {'emi':
-                                                 {'emibc': [S, emi_units, M],
-                                                  'emidust': [S, emi_units, M],
-                                                  'emiss': [S, emi_units, M],
-                                                  'emioa': [S, emi_units, M],
-                                                  'emiso2': [S, emi_units, M]},
-                                             'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                             'emi_total': 0, 'emi_BC_OA': 0,
-                                             'load':
-                                                 {'loadbc': [C, load_units, M],
-                                                  'loaddu': [C, load_units, M],
-                                                  'loadss': [C, load_units, M],
-                                                  'loadoa': [C, load_units, M],
-                                                  'loadso4': [C, load_units, M]},
-                                             'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                             'load_total': 0, 'load_BC_OA': 0,
-                                             'od550aer': {'od550aer': [C, M]},     # od550csaer
-                                             'od440aer': {'od440aer': [C, M]},
-                                             'abs550aer': {'abs550aer': [C, M]},
-                                             'AOD550': 0,
-                                             'AOD440': 0,
-                                             'AAOD550': 0,
-                                             'precipitation': {'pr': [S, pr_units, M]},
-                                             'prect': 0,
-                                             'color': '#2ca02c'},
+    Returns
+    -------
+    xr.DataArray
+        DataArray with decoded time coordinate.
+    """
+    if da is None or 'time' not in da.dims or len(da.time) == 0:
+        return da
 
-        'ECHAM6-SALSA_CTRL2016-PD': {'emi':
-                                         {'emibc': [S, emi_units, M],
-                                          'emidust': [S, emi_units, M],
-                                          'emiss': [S, emi_units, M],
-                                          'emioa': [S, emi_units, M],
-                                          'emiso2': [S, emi_units, M]},
-                                     'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                     'emi_total': 0, 'emi_BC_OA': 0,
-                                     'load':
-                                         {'loadbc': [C, load_units, M],
-                                          'loaddust': [C, load_units, M],
-                                          'loadss': [C, load_units, M],
-                                          'loadoa': [C, load_units, M],
-                                          'loadso4': [C, load_units, M]},
-                                     'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                     'load_total': 0, 'load_BC_OA': 0,
-                                     'od550aer': {'od550aer': [C, od550_freq]},
-                                     'od440aer': {'od440aer': [C, odother_freq]},
-                                     'abs550aer': {'abs550aer': [C, abs550_freq]},
-                                     'AOD550': 0,
-                                     'AOD440': 0,
-                                     'AAOD550': 0,
-                                     'precipitation': {'precip': [S, pr_units, M]},
-                                     'prect': 0,
-                                     'color': '#98df8a'},
+    if isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
+        return da
 
-        'ECHAM6.3-SALSA2.0-met2010_AP3-CTRL': {'emi':
-                                                   {'emibc': [S, emi_units, M],
-                                                    'emidust': [S, emi_units, M],
-                                                    'emiss': [S, emi_units, M],
-                                                    'emioa': [S, emi_units, M],
-                                                    'emiso2': [S, emi_units, M]},
-                                               'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                               'emi_total': 0, 'emi_BC_OA': 0,
-                                               'load':
-                                                   {'loadbc': [C, load_units, M],
-                                                    'loaddu': [C, load_units, M],
-                                                    'loadss': [C, load_units, M],
-                                                    'loadoa': [C, load_units, M],
-                                                    'loadso4': [C, load_units, M]},
-                                               'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                               'load_total': 0, 'load_BC_OA': 0,
-                                               'od550aer': {'od550aer': [C, M]},     # od550csaer
-                                               'od440aer': {'od440aer': [C, M]},
-                                               'abs550aer': {'abs550aer': [C, M]},
-                                               'AOD550': 0,
-                                               'AOD440': 0,
-                                               'AAOD550': 0,
-                                               'precipitation': {'pr': [S, pr_units, M]},
-                                               'prect': 0,
-                                               'color': '#ff9896'},
+    try:
+        raw = da.time.values
+        # Drop any fill values (e.g. OsloCTM3 emiss has a trailing 9.96921e36).
+        if raw.dtype.kind in 'iuf':
+            valid_mask = raw < 1e30
+            if not np.all(valid_mask):
+                da = da.isel(time=np.where(valid_mask)[0])
+                raw = da.time.values
 
-        'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD': {'emi':
-                                                              {'emibc': [C, emi_units, M],
-                                                               'emidust': [C, emi_units, M],
-                                                               'emiss': [C, emi_units, M],
-                                                               'emioa': [C, emi_units, M],
-                                                               'emiso2': [C, emi_units, M]},
-                                                          'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                                          'emi_total': 0, 'emi_BC_OA': 0,
-                                                          'load':
-                                                              {'loadbc': [C, load_units, M],
-                                                               'loaddust': [C, load_units, M],
-                                                               'loadss': [C, load_units, M],
-                                                               'loadoa': [C, load_units, M],
-                                                               'loadso4': [C, load_units, M]},
-                                                          'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                                          'load_total': 0, 'load_BC_OA': 0,
-                                                          'od550aer': {'od550aer': [C, od550_freq]},
-                                                          'od440aer': {'od440aer': [C, odother_freq]},
-                                                          'abs550aer': {'abs550aer': [C, abs550_freq]},
-                                                          'AOD550': 0,
-                                                          'AOD440': 0,
-                                                          'AAOD550': 0,
-                                                          'precipitation': {'precip': [S, pr_units, M]},
-                                                          'prect': 0,
-                                                          'color': '#9467bd'},
-
-        'GEOS-i33p2-met2010_AP3-CTRL': {'emi':
-                                            {'emibc': [S, emi_units, M],
-                                             'emidust': [S, emi_units, M],
-                                             'emiss': [S, emi_units, M],
-                                             'emioa': [S, emi_units, M],
-                                             'emiso2': [S, emi_units, M]},
-                                        'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                        'emi_total': 0, 'emi_BC_OA': 0,
-                                        'load':
-                                            {'loadbc': [C, load_units, M],
-                                             'loaddu': [C, load_units, M],
-                                             'loadss': [C, load_units, M],
-                                             'loadoa': [C, load_units, M],
-                                             'loadso4': [C, load_units, M]},
-                                        'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0,
-                                        'load_total': 0, 'load_BC_OA': 0,
-                                        'od550aer': {'od550aer': [C, od550_freq]},
-                                        'od440aer': {'od440aer': [C, odother_freq]},
-                                        'abs550aer': {'abs550aer': [C, abs550_freq]},
-                                        'AOD550': 0,
-                                        'AOD440': 0,
-                                        'AAOD550': 0,
-                                        'precipitation': {'pr': [S, pr_units, M]},
-                                        'prect': 0,
-                                        'color': '#c5b0d5'},
-
-        'GFDL-AM4-met2010_AP3-CTRL': {'emi':
-                                          {'emibc': [S, emi_units, M],
-                                           'emidust': [S, emi_units, M],
-                                           'emiss': [S, emi_units, M],
-                                           'emioa': [S, emi_units, M],
-                                           'emiso2': [S, emi_units, M]},
-                                      'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                      'emi_total': 0, 'emi_BC_OA': 0,
-                                      'load':
-                                          {'loadbc': [C, load_units, M],
-                                           'loaddu': [C, load_units, M],
-                                           'loadss': [C, load_units, M],
-                                           'loadoa': [C, load_units, M],
-                                           'loadso4': [C, load_units, M]},
-                                      'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                      'load_total': 0, 'load_BC_OA': 0,
-                                      'od550aer': {'od550aer': [C, M]},
-                                      'od440aer': {'od440aer': [C, M]},
-                                      'abs550aer': {'abs550aer': [C, M]},
-                                      'AOD550': 0,
-                                      'AOD440': 0,
-                                      'AAOD550': 0,
-                                      'precipitation': {'pr': [S, pr_units, M]},
-                                      'prect': 0,
-                                      'color': '#8c564b'},
-
-        'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010': {'emi':
-                                                      {'emibc': [S, emi_units, M],
-                                                       'emidust': [S, emi_units, M],
-                                                       'emiss': [S, emi_units, M],
-                                                       'emioa': [S, emi_units, M],
-                                                       'emiso2': [S, emi_units, M]},
-                                                  'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                                  'emi_total': 0, 'emi_BC_OA': 0,
-                                                  'load':
-                                                      {'loadbc': [C, load_units, M],
-                                                       'loaddu': [C, load_units, M],
-                                                       'loadss': [C, load_units, M],
-                                                       'loadoa': [C, load_units, M],
-                                                       'loadso4': [C, load_units, M]},
-                                                  'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                                  'load_total': 0, 'load_BC_OA': 0,
-                                                  'od550aer': {'od550aer': [C, M]},    # od550csaer
-                                                  'od440aer': {'od870csaer': [C, M]},
-                                                  'abs550aer': {'abs550aer': [C, M]},
-                                                  'AOD550': 0,
-                                                  'AOD440': 0,
-                                                  'AAOD550': 0,
-                                                  'precipitation': {'pr': [C, pr_units, M]},
-                                                  'prect': 0,
-                                                  'color': '#c49c94'},
-
-        'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010': {'emi':
-                                                   {'emibc': [S, emi_units, M],
-                                                    'emidust': [S, emi_units, M],
-                                                    'emiss': [S, emi_units, M],
-                                                    'emioa': [S, emi_units, M],
-                                                    'emiso2': [S, emi_units, M]},
-                                               'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                               'emi_total': 0, 'emi_BC_OA': 0,
-                                               'load':
-                                                   {'loadbc': [C, load_units, M],
-                                                    'loaddu': [C, load_units, M],
-                                                    'loadss': [C, load_units, M],
-                                                    'loadoa': [C, load_units, M],
-                                                    'loadso4': [C, load_units, M]},
-                                               'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                               'load_total': 0, 'load_BC_OA': 0,
-                                               'od550aer': {'od550aer': [C, M]},   # od550csaer
-                                               'od440aer': {'od870csaer': [C, M]},
-                                               'abs550aer': {'abs550aer': [C, M]},
-                                               'AOD550': 0,
-                                               'AOD440': 0,
-                                               'AAOD550': 0,
-                                               'precipitation': {'pr': [C, pr_units, M]},
-                                               'prect': 0,
-                                               'color': '#e377c2'},
-
-        'HadGEM3-GA7.1_AP3-CTRL2016-PD': {'emi':
-                                              {'emibc': [S, emi_units, M],
-                                               'emidust': [S, emi_units, M],
-                                               'emiss': [S, emi_units, M],
-                                               'emioa': [S, emi_units, M],
-                                               'emiso2': [S, emi_units, M]},
-                                          'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                          'emi_total': 0, 'emi_BC_OA': 0,
-                                          'load':
-                                              {'loadbc': [C, load_units, M],
-                                               'loaddust': [C, load_units, M],
-                                               'loadss': [C, load_units, M],
-                                               'loadoa': [C, load_units, M],
-                                               'loadso4': [C, load_units, M]},
-                                          'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                          'load_total': 0, 'load_BC_OA': 0,
-                                          'od550aer': {'od550aer': [C, od550_freq]},
-                                          'od440aer': {'od870aer': [C, M]},
-                                          'abs550aer': {'abs550aer': [C, M]},
-                                          'AOD550': 0,
-                                          'AOD440': 0,
-                                          'AAOD550': 0,
-                                          # 'prect': 0,
-                                          'color': '#7f7f7f'},
-
-        'INCA_AP3-CTRL': {'emi':
-                              {'emibc': [S, emi_units, M],
-                               'emidust': [S, emi_units, M],
-                               'emiss': [S, emi_units, M],
-                               'emioa': [S, emi_units, M],
-                               'emiso2': [S, emi_units, M]},
-                          'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                          'emi_total': 0, 'emi_BC_OA': 0,
-                          'load':
-                              {'loadbc': [C, load_units, M],
-                               'loaddust': [C, load_units, M],
-                               'loadss': [C, load_units, M],
-                               'loadoa': [C, load_units, M],
-                               'loadso4': [C, load_units, M]},
-                          'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                          'load_total': 0, 'load_BC_OA': 0,
-                          'od550aer': {'od550aer': [C, M]},
-                          'od440aer': {'od440aer': [C, M]},
-                          'abs550aer': {'abs550aer': [C, M]},
-                          'AOD550': 0,
-                          'AOD440': 0,
-                          'AAOD550': 0,
-                          'precipitation': {'pr': [S, pr_units, M]},
-                          'prect': 0,
-                          'color': '#c7c7c7'},
-
-        'NorESM2-met2010_AP3-CTRL': {'emi':
-                                         {'emibc': [S, emi_units, M],
-                                          'emidust': [S, emi_units, M],
-                                          'emiss': [S, emi_units, M],
-                                          'emioa': [S, emi_units, M],
-                                          'emiso2': [S, emi_units, M]},
-                                     'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                     'emi_total': 0, 'emi_BC_OA': 0,
-                                     'load':
-                                         {'loadbc': [C, load_units, M],
-                                          'loaddust': [C, load_units, M],
-                                          'loadss': [C, load_units, M],
-                                          'loadoa': [C, load_units, M],
-                                          'loadso4': [C, load_units, M]},
-                                     'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                     'load_total': 0, 'load_BC_OA': 0,
-                                     'od550aer': {'od550aer': [C, M]},     # od550csaer
-                                     'od440aer': {'od440csaer': [C, M]},
-                                     'abs550aer': {'abs550aer': [C, M]},
-                                     'AOD550': 0,
-                                     'AOD440': 0,
-                                     'AAOD550': 0,
-                                     'precipitation': {'precip': ['ModelLevel', pr_units, M]},
-                                     'prect': 0,
-                                     'color': '#bcbd22'},
-
-        'MIROC-SPRINTARS_AP3-CTRL': {'emi':
-                                         {'emibc': [C, emi_units, M],
-                                          'emidust': [C, emi_units, M],
-                                          'emiss': [C, emi_units, M],
-                                          'emioa': [C, emi_units, M],
-                                          'emiso2': [C, emi_units, M]},
-                                     'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                     'emi_total': 0, 'emi_BC_OA': 0,
-                                     'load':
-                                         {'loadbc': [C, load_units, M],
-                                          'loaddust': [C, load_units, M],
-                                          'loadss': [C, load_units, M],
-                                          'loadoa': [C, load_units, M],
-                                          'loadso4': [C, load_units, M]},
-                                     'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                     'load_total': 0, 'load_BC_OA': 0,
-                                     'od550aer': {'od550aer': [C, od550_freq]},
-                                     'od440aer': {'od440aer': [C, odother_freq]},
-                                     'abs550aer': {'abs550aer': [C, abs550_freq]},
-                                     'AOD550': 0,
-                                     'AOD440': 0,
-                                     'AAOD550': 0,
-                                     'precipitation': {'pr': [S, pr_units, M]},
-                                     'prect': 0,
-                                     'color': '#dbdb8d'},
-
-        'SPRINTARS-T213_AP3-CTRL2016-PD': {'emi':
-                                               {'emibc': [S, emi_units, M],
-                                                'emidust': [S, emi_units, M],
-                                                'emiss': [S, emi_units, M],
-                                                'emioa': [S, emi_units, M],
-                                                'emiso2': [S, emi_units, M]},
-                                           'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                           'emi_total': 0, 'emi_BC_OA': 0,
-                                           'load':
-                                               {'loadbc': [S, load_units, M],
-                                                'loaddust': [S, load_units, M],
-                                                'loadss': [S, load_units, M],
-                                                'loadoa': [S, load_units, M],
-                                                'loadso4': [S, load_units, M]},
-                                           'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                           'load_total': 0, 'load_BC_OA': 0,
-                                           'od550aer': {'od550aer': [C, od550_freq]},
-                                           'od440aer': {'od440aer': [C, odother_freq]},
-                                           'abs550aer': {'abs550aer': [C, abs550_freq]},
-                                           'AOD550': 0,
-                                           'AOD440': 0,
-                                           'AAOD550': 0,
-                                           'precipitation': {'pr': [S, pr_units, M]},
-                                           'prect': 0,
-                                           'color': '#f7b6d2'},
-
-        'TM5_AP3-CTRL2016': {'emi':
-                                 {'emibc': [C, emi_units, M],
-                                  'emidust': [C, emi_units, M],
-                                  'emiss': [C, emi_units, M],
-                                  'emioa': [C, emi_units, M],
-                                  'emiso2': [C, emi_units, M]},
-                             'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                             'emi_total': 0, 'emi_BC_OA': 0,
-                             'load':
-                                 {'loadbc': [C, load_units, M],
-                                  'loaddust': [C, load_units, M],
-                                  'loadss': [C, load_units, M],
-                                  'loadoa': [C, load_units, M],
-                                  'loadso4': [C, load_units, M]},
-                             'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                             'load_total': 0, 'load_BC_OA': 0,
-                             'od550aer': {'od550aer': [C, od550_freq]},
-                             'od440aer': {'od440aer': [C, odother_freq]},
-                             'abs550aer': {'abs550aer': [C, abs550_freq]},
-                             'AOD550': 0,
-                             'AOD440': 0,
-                             'AAOD550': 0,
-                             'precipitation': {'pr': [S, pr_units, M]},
-                             'prect': 0,
-                             'color': '#17becf'},
-
-        'TM5-met2010_AP3-CTRL2019': {'emi':
-                                         {'emibc': [C, emi_units, M],
-                                          'emidust': [C, emi_units, M],
-                                          'emiss': [C, emi_units, M],
-                                          'emioa': [C, emi_units, M],
-                                          'emiso2': [C, emi_units, M]},
-                                     'emi_bc': 0, 'emi_dust': 0, 'emi_ss': 0, 'emi_oa': 0, 'emi_so2': 0,
-                                     'emi_total': 0, 'emi_BC_OA': 0,
-                                     'load':
-                                         {'loadbc': [C, load_units, M],
-                                          'loaddust': [C, load_units, M],
-                                          'loadss': [C, load_units, M],
-                                          'loadoa': [C, load_units, M],
-                                          'loadso4': [C, load_units, M]},
-                                     'load_bc': 0, 'load_dust': 0, 'load_ss': 0, 'load_oa': 0, 'load_so4': 0,
-                                     'load_total': 0, 'load_BC_OA': 0,
-                                     'od550aer': {'od550aer': [C, M]},
-                                     'od440aer': {'od440aer': [C, M]},
-                                     'abs550aer': {'abs550aer': [C, M]},
-                                     'AOD550': 0,
-                                     'AOD440': 0,
-                                     'AAOD550': 0,
-                                     'precipitation': {'pr': [S, pr_units, M]},
-                                     'prect': 0,
-                                     'color': '#9edae5'}
-        }
-
-    # delete the models not requested
-    keys_to_delete = []
-    failed_models = []
-
-    for model in x.keys():
-        # print(model)
-        if model not in models_names:
-            keys_to_delete.append(model)
-            continue
-
-        try:
-            if 'emi_total' == var_name:
-                for var in x[model]['emi']:
-                    try:
-                        file_path = path.format(model, model, var, x[model]['emi'][var][0], x[model]['emi'][var][2])
-                        dataset = safe_open_dataset(file_path, model, var)
-                        var_data = get_variable_safely(dataset, var, model, file_path)
-                        data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                        x[model]['emi_total'] += (data[var]*x[model]['emi'][var][1])
-                    except (FileNotFoundError, KeyError) as e:
-                        print(f"⚠️  WARNING: {str(e)}")
-                        failed_models.append((model, var, str(e)))
-                        raise
-
-            elif 'emi_BC_OA' == var_name:
-                try:
-                    # Load emibc
-                    file_path_bc = path.format(model, model, 'emibc', x[model]['emi']['emibc'][0], M)
-                    dataset_bc = safe_open_dataset(file_path_bc, model, 'emibc')
-                    data_bc = functions.shift360(functions.convert_cftime_to_datetime(dataset_bc))
-                    emibc_data = get_variable_safely(data_bc, 'emibc', model, file_path_bc)
-                     
-                    # Load emioa
-                    file_path_oa = path.format(model, model, 'emioa', x[model]['emi']['emibc'][0], M)
-                    dataset_oa = safe_open_dataset(file_path_oa, model, 'emioa')
-                    data_oa = functions.shift360(functions.convert_cftime_to_datetime(dataset_oa))
-                    emioa_data = get_variable_safely(data_oa, 'emioa', model, file_path_oa)
-                     
-                    x[model]['emi_BC_OA'] = (emibc_data + emioa_data) * x[model]['emi']['emibc'][1]
-                except (FileNotFoundError, KeyError) as e:
-                    print(f"⚠️  WARNING: {str(e)}")
-                    failed_models.append((model, 'emi_BC_OA', str(e)))
-                    raise
-
-            elif 'emi_ss' == var_name:
-                try:
-                    file_path = path.format(model, model, 'emiss', x[model]['emi']['emiss'][0], M)
-                    dataset = safe_open_dataset(file_path, model, 'emiss')
-                    data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                    x[model]['emi_ss'] = get_variable_safely(data, 'emiss', model, file_path) * x[model]['emi']['emiss'][1]
-                except (FileNotFoundError, KeyError) as e:
-                    print(f"⚠️  WARNING: {str(e)}")
-                    failed_models.append((model, 'emiss', str(e)))
-                    raise
-
-            elif 'emi_bc' == var_name:
-                try:
-                    file_path = path.format(model, model, 'emibc', x[model]['emi']['emibc'][0], M)
-                    dataset = safe_open_dataset(file_path, model, 'emibc')
-                    data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                    x[model]['emi_bc'] = get_variable_safely(data, 'emibc', model, file_path) * x[model]['emi']['emibc'][1]
-                except (FileNotFoundError, KeyError) as e:
-                    print(f"⚠️  WARNING: {str(e)}")
-                    failed_models.append((model, 'emibc', str(e)))
-                    raise
-
-            elif 'emi_oa' == var_name:
-                try:
-                    file_path = path.format(model, model, 'emioa', x[model]['emi']['emioa'][0], M)
-                    dataset = safe_open_dataset(file_path, model, 'emioa')
-                    data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                    x[model]['emi_oa'] = get_variable_safely(data, 'emioa', model, file_path) * x[model]['emi']['emioa'][1]
-                except (FileNotFoundError, KeyError) as e:
-                    print(f"⚠️  WARNING: {str(e)}")
-                    failed_models.append((model, 'emioa', str(e)))
-                    raise
-
-            elif 'load_total' == var_name:
-                for var in x[model]['load']:
-                    try:
-                        file_path = path.format(model, model, var, x[model]['load'][var][0], x[model]['load'][var][2])
-                        dataset = safe_open_dataset(file_path, model, var)
-                        data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                        var_data = get_variable_safely(data, var, model, file_path)
-                        x[model]['load_total'] += (data[var]*x[model]['load'][var][1])
-                    except (FileNotFoundError, KeyError) as e:
-                        print(f"⚠️  WARNING: {str(e)}")
-                        failed_models.append((model, var, str(e)))
-                        raise
-
-            elif 'load_BC_OA' == var_name:
-                try:
-                    # Load loadbc
-                    file_path_bc = path.format(model, model, 'loadbc', x[model]['load']['loadbc'][0], M)
-                    dataset_bc = safe_open_dataset(file_path_bc, model, 'loadbc')
-                    data_bc = functions.shift360(functions.convert_cftime_to_datetime(dataset_bc))
-                    loadbc_data = get_variable_safely(data_bc, 'loadbc', model, file_path_bc)
-                     
-                    # Load loadoa
-                    file_path_oa = path.format(model, model, 'loadoa', x[model]['load']['loadbc'][0], M)
-                    dataset_oa = safe_open_dataset(file_path_oa, model, 'loadoa')
-                    data_oa = functions.shift360(functions.convert_cftime_to_datetime(dataset_oa))
-                    loadoa_data = get_variable_safely(data_oa, 'loadoa', model, file_path_oa)
-                     
-                    x[model]['load_BC_OA'] = (loadbc_data + loadoa_data) * x[model]['load']['loadbc'][1]
-                except (FileNotFoundError, KeyError) as e:
-                    print(f"⚠️  WARNING: {str(e)}")
-                    failed_models.append((model, 'load_BC_OA', str(e)))
-                    raise
-
-            elif 'load_ss' == var_name:
-                try:
-                    file_path = path.format(model, model, 'loadss', x[model]['load']['loadss'][0], M)
-                    dataset = safe_open_dataset(file_path, model, 'loadss')
-                    data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                    x[model]['load_ss'] = get_variable_safely(data, 'loadss', model, file_path)
-                except (FileNotFoundError, KeyError) as e:
-                    print(f"⚠️  WARNING: {str(e)}")
-                    failed_models.append((model, 'loadss', str(e)))
-                    raise
-
-            elif 'load_bc' == var_name:
-                try:
-                    file_path = path.format(model, model, 'loadbc', x[model]['load']['loadbc'][0], M)
-                    dataset = safe_open_dataset(file_path, model, 'loadbc')
-                    data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                    x[model]['load_bc'] = get_variable_safely(data, 'loadbc', model, file_path) / 1e-6
-                except (FileNotFoundError, KeyError) as e:
-                    print(f"⚠️  WARNING: {str(e)}")
-                    failed_models.append((model, 'loadbc', str(e)))
-                    raise
-
-            elif 'load_oa' == var_name:
-                try:
-                    file_path = path.format(model, model, 'loadoa', x[model]['load']['loadoa'][0], M)
-                    dataset = safe_open_dataset(file_path, model, 'loadoa')
-                    data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                    x[model]['load_oa'] = get_variable_safely(data, 'loadoa', model, file_path) / 1e-6
-                except (FileNotFoundError, KeyError) as e:
-                    print(f"⚠️  WARNING: {str(e)}")
-                    failed_models.append((model, 'loadoa', str(e)))
-                    raise
-            # TODO: some models have 'loaddust' and others 'loaddu' --> FIX IT
-
-            elif 'AOD550' == var_name:
-                for var in x[model]['od550aer']:
-                    try:
-                        file_path = path.format(model, model, var, x[model]['od550aer'][var][0], x[model]['od550aer'][var][1])
-                        dataset = safe_open_dataset(file_path, model, var)
-                        data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                        x[model]['AOD550'] = get_variable_safely(data, var, model, file_path)
-                    except (FileNotFoundError, KeyError) as e:
-                        print(f"⚠️  WARNING: {str(e)}")
-                        failed_models.append((model, var, str(e)))
-                        raise
-
-            elif 'AOD440' == var_name:
-                for var in x[model]['od440aer']:
-                    try:
-                        file_path = path.format(model, model, var, x[model]['od440aer'][var][0], x[model]['od440aer'][var][1])
-                        dataset = safe_open_dataset(file_path, model, var)
-                        data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                        x[model]['AOD440'] = get_variable_safely(data, var, model, file_path)
-                    except (FileNotFoundError, KeyError) as e:
-                        print(f"⚠️  WARNING: {str(e)}")
-                        failed_models.append((model, var, str(e)))
-                        raise
-
-            elif 'AAOD550' == var_name:
-                for var in x[model]['abs550aer']:
-                    try:
-                        file_path = path.format(model, model, var, x[model]['abs550aer'][var][0], x[model]['abs550aer'][var][1])
-                        dataset = safe_open_dataset(file_path, model, var)
-                        data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                        x[model]['AAOD550'] = get_variable_safely(data, var, model, file_path)
-                    except (FileNotFoundError, KeyError) as e:
-                        print(f"⚠️  WARNING: {str(e)}")
-                        failed_models.append((model, var, str(e)))
-                        raise
-
-            elif 'prect' == var_name:
-                for var in x[model]['precipitation']:
-                    try:
-                        file_path = path.format(model, model, var, x[model]['precipitation'][var][0], x[model]['precipitation'][var][2])
-                        dataset = safe_open_dataset(file_path, model, var)
-                        data = functions.shift360(functions.convert_cftime_to_datetime(dataset))
-                        x[model]['prect'] = get_variable_safely(data, var, model, file_path) * x[model]['precipitation'][var][1]
-                    except (FileNotFoundError, KeyError) as e:
-                        print(f"⚠️  WARNING: {str(e)}")
-                        failed_models.append((model, var, str(e)))
-                        raise
-
-            else:
-                raise ValueError(
-                    f"ERROR: Unknown variable requested.\n"
-                    f"   Variable: {var_name}\n"
-                    f"   Model: {model}\n"
-                    f"   Valid variables: emi_total, emi_BC_OA, emi_ss, emi_bc, emi_oa,\n"
-                    f"                    load_total, load_BC_OA, load_ss, load_bc, load_oa,\n"
-                    f"                    AOD550, AOD440, AAOD550, prect"
-                )
-
-            # Regional masks are created in notebook post-processing (functions.create_region_mask).
-        except Exception as e:
-            error_msg = f"ERROR: Failed to load data for model '{model}' and variable '{var_name}'.\n{str(e)}"
-            print(error_msg)
-            keys_to_delete.append(model)
-            continue
-        # x[model]['masks']'north_am'] = functions.create_mask_old(x[model][var_name].isel(time=0), 232, 265, 55,67) # lon:-128,-95
-        # x[model]['masks']['siberia'] = functions.create_mask(x[model]['AOD550'].isel(time=0), 156, 176, 62, 71)
-        # x[model]['masks']['se_asia'] = functions.create_mask(x[model]['AOD550'].isel(time=0), 93, 109, 11, 22)
-        # x[model]['masks']['outflow_af'] = functions.create_mask_weigth(x[model][var_name].isel(time=0), 350, 8, -15,3)
-
-    # Remove failed models
-    for key in keys_to_delete:
-        del x[key]
-
-    # Print summary
-    successful_models = [m for m in models_names if m in x.keys()]
-    if len(models_names) > len(successful_models):
-        print(f"\n📊 Data Loading Summary:")
-        print(f"   ✓ Successful: {len(successful_models)} / {len(models_names)} models")
-        print(f"   ✗ Failed: {len(models_names) - len(successful_models)} models")
-        if failed_models:
-            print(f"\n   Failed models:")
-            for model, var, error in failed_models[:5]:
-                print(f"     - {model}: {var}")
-            if len(failed_models) > 5:
-                print(f"     ... and {len(failed_models) - 5} more")
-    else:
-        print(f"\n✓ Successfully loaded data for {len(successful_models)} models")
-
-    if not x:
-        raise ValueError(
-            f"❌ ERROR: No models were successfully loaded.\n"
-            f"   Requested variable: {var_name}\n"
-            f"   Requested models: {', '.join(models_names[:3])}{'...' if len(models_names) > 3 else ''}\n"
-            f"   Path template: {path}\n"
-            f"   Please check:\n"
-            f"     1. Data files exist in the specified path\n"
-            f"     2. Path template is correct\n"
-            f"     3. Model names are spelled correctly\n"
-            f"     4. Variable name is valid"
+        calendar = da.time.attrs.get('calendar', 'standard')
+        is_nonstd_calendar = calendar in ('365_day', '360_day', 'noleap', 'all_leap', '366_day')
+        values_are_months = (
+            raw.dtype.kind in 'iuf' and
+            np.all(raw >= 1) and np.all(raw <= 12)
         )
 
-    # Normalise the time coordinate of every loaded DataArray to first-of-month.
-    # Models differ in their time stamping convention (mid-month, end-of-month,
-    # or next-month-start), which would otherwise misalign variables when
-    # computing derived quantities such as MEC = AOD / load or SSA = 1 - abs/AOD.
-    for model in x:
-        if isinstance(x[model].get(var_name), xr.DataArray):
-            x[model][var_name] = functions.normalize_monthly_time(x[model][var_name])
+        if raw.dtype.kind in 'iuf' and np.all(raw > 100000) and np.all(raw < 999999):
+            pass
+        elif is_nonstd_calendar and values_are_months and year is not None:
+            # OsloCTM3-style files store 1..12 (months of the target year) but
+            # give a bogus reference date / units string. Ignore the reference and
+            # map directly to first-of-month of the year from the filename.
+            new_times = np.array([
+                np.datetime64(f'{year:04d}-{int(round(m)):02d}-01', 'ns')
+                for m in raw
+            ])
+            da = da.assign_coords(time=new_times)
+        elif 'units' in da.time.attrs:
+            units = da.time.attrs.get('units', '')
+            try:
+                new_times = decode_cf_datetime(raw, units, calendar)
+            except Exception:
+                # Fallback for non-standard calendars (e.g. 365_day) without cftime.
+                new_times = _decode_months_since(raw, units, year=year)
+                if new_times is None:
+                    new_times = pd.to_datetime([str(t) for t in raw]).values
+            # decode_cf_datetime may return cftime objects (Julian/NoLeap/365_day).
+            # Convert them to datetime64 so pandas/xarray can handle them later.
+            new_times = _cftime_to_datetime64(new_times)
+            da = da.assign_coords(time=new_times)
+        elif hasattr(da.indexes.get('time', None), 'to_datetimeindex'):
+            try:
+                new_times = da.indexes['time'].to_datetimeindex().values
+            except Exception:
+                # Fall back: manually build datetime64 from cftime year/month
+                new_times = np.array([
+                    np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
+                    for t in da.indexes['time']
+                ])
+            da = da.assign_coords(time=new_times)
+        else:
+            da = da.assign_coords(
+                time=pd.to_datetime([str(t) for t in raw]).values
+            )
+    except Exception as e:
+        print(f'  Warning: cftime conversion failed for {var_hint}: {e}')
 
-    return x
+    return da
 
-def calculate_var(dict1, dict2, var='MEC', lifetime_inv=False):
 
-    """ Calculates MEC (m2/g), MAC (m2/g), lifetime (day), AE or SSA for every model.
-        The input units should be:  - emissions: kg/m2s
-                                    - load: kg/m2
-        If these units change, the conversion factors also need to change!!
+def normalize_dataset_time(ds, var_hint=None, year=None):
+    """Normalize time coordinate of a dataset to first-of-month."""
+    # Lazy import: functions pulls optional viz deps (cartopy) at module level
+    _script_dir = Path(__file__).resolve().parent
+    if str(_script_dir) not in sys.path:
+        sys.path.insert(0, str(_script_dir))
+    import functions
 
-    :param dict1: dictionary containing the data.
-    :param dict2: dictionary containing the data.
-    :param var: name of the variable to calculate. It has to be MEC, lifetime_inv, AE or SSA (string).
-    :param lifetime_inv: False --> lifetime, True --> 1/lifetime
+    if ds is None or not list(ds.data_vars):
+        return None
+    var_name = list(ds.data_vars)[0]
+    da = ds[var_name]
+    if 'time' not in da.dims or len(da.time) == 0:
+        return ds
 
-    :returns: dictionary containing the desired variable.
+    if var_hint and 'GEOS' in str(var_hint).upper():
+        try:
+            ds = xr.decode_cf(ds)
+            da = ds[var_name]
+        except Exception as e:
+            print(f'  Warning: GEOS decode_cf failed for {var_hint}: {e}')
+
+    da = _decode_time_index(da, var_hint=var_hint, year=year)
+    da = functions.normalize_monthly_time(da)
+    da = da.assign_coords(time=_to_month_start(da.time.values))
+    return da.to_dataset(name=var_name)
+
+
+def _resample_3hourly_to_monthly(ds, var_hint=None, year=None):
+    """Convert a 3-hourly (or any sub-monthly) dataset to monthly means.
+
+    Decodes the time coordinate using the same robust logic as
+    normalize_dataset_time, then resamples to monthly means and normalizes
+    the resulting monthly timestamps to first-of-month.
     """
+    # Lazy import: functions pulls optional viz deps (cartopy) at module level
+    _script_dir = Path(__file__).resolve().parent
+    if str(_script_dir) not in sys.path:
+        sys.path.insert(0, str(_script_dir))
+    import functions
 
-    assert var in ['MEC', 'MAC', 'lifetime', 'AE', 'SSA'], f'var must be either MEC, MAC, lifetime, AE or SSA and not {var}'
+    if ds is None or not list(ds.data_vars):
+        return None
+    var_name = list(ds.data_vars)[0]
+    da = ds[var_name]
+    if 'time' not in da.dims or len(da.time) == 0:
+        return ds
 
-    # Define the models that use 870nm
-    ae_models = {'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010'}
-    result = {}
+    da = _decode_time_index(da, var_hint=var_hint, year=year)
+    if da is None:
+        return ds
 
-    # Context manager to handle warnings globally within the loop
-    with np.errstate(divide='ignore', invalid='ignore'):
-        for mask in dict1.keys():
-            result[mask] = {}
-            for model in dict1[mask].keys():
-                val1 = dict1[mask][model]
-                val2 = dict2[mask][model]
-                
-                if var in ['MEC', 'MAC']:
-                    result[mask][model] = val1 / (val2 * 1e3)
-                
-                elif var == 'SSA':
-                    result[mask][model] = 1 - (val1 / val2)
-                
-                elif var == 'AE':
-                    divisor = np.log(550/870) if model in ae_models else np.log(550/440)
-                    result[mask][model] = - np.log(val1 / val2) / divisor
-                
-                elif var == 'lifetime':
-                    if lifetime_inv:
-                        result[mask][model] = (val2 * 3600 * 24) / val1
-                    else:
-                        result[mask][model] = val1 / (val2 * 3600 * 24)
+    # Resample to monthly mean
+    monthly_da = da.resample(time='1MS').mean()
 
-    return result
+    # Normalize monthly time to first-of-month
+    monthly_da = functions.normalize_monthly_time(monthly_da)
+    monthly_da = monthly_da.assign_coords(time=_to_month_start(monthly_da.time.values))
+
+    return monthly_da.to_dataset(name=var_name)
+
+
+
+def normalize_precipitation_units(precip_ds):
+    """Convert model precipitation to mm day^-1.
+
+    Handles kg/m2/s, g/m2/s, and the typo 'km m-2 s-1' seen in ECHAM6.3-HAM2.3.
+    Also applies a sanity check: if the global mean is > 100 mm/day after the
+    stated-unit conversion, the file is likely in g/m2/s despite the label.
+    """
+    if precip_ds is None:
+        return None
+    var_name = list(precip_ds.data_vars)[0]
+    da = precip_ds[var_name]
+    units = da.attrs.get('units', 'kg m-2 s-1').lower().replace(' ', '')
+    # Common variants
+    if units in ('kgm-2s-1', 'kgm^-2s^-1', 'kg/m2/s', 'kgm-2s-1'):
+        factor = 86400.0  # kg m^-2 s^-1 -> mm day^-1
+    elif units in ('gm-2s-1', 'gm^-2s^-1', 'g/m2/s', 'gm-2s-1'):
+        factor = 86.4  # g m^-2 s^-1 -> mm day^-1
+    elif units in ('mmday-1', 'mm/day', 'mmday^-1', 'mmd-1'):
+        factor = 1.0
+    elif units in ('ms-1', 'm/s', 'm s-1'):
+        factor = 86400.0 * 1000.0  # m s^-1 -> mm day^-1 (water density ~1000 kg/m3)
+    else:
+        # 'km m-2 s-1' is treated as a typo for kg m^-2 s^-1
+        factor = 86400.0
+    da = da * factor
+    # Sanity check: global mean should be ~2-3 mm/day. If > 100 mm/day, divide by 1000
+    # because the file was probably in g m^-2 s^-1 despite the label.
+    # Compute once per file (streaming path); use skipna for robustness.
+    try:
+        mean_da = da.mean(skipna=True)
+        # Force compute for dask-backed arrays; .values also works for numpy.
+        global_mean = float(np.asarray(mean_da.values))
+    except Exception:
+        global_mean = np.nan
+    if not np.isnan(global_mean) and global_mean > 100.0:
+        da = da / 1000.0
+    da.attrs['units'] = 'mm day-1'
+    return da.to_dataset(name=var_name)
+
+
+# ==============================================================================
+# COORDINATE STANDARDIZATION ENGINE
+# ==============================================================================
+def standardize_dataset(ds, var_name):
+    """
+    Standardizes coordinate and dimension names to 'lon', 'lat', and 'time', 
+    and slices the dataset to contain only the target variable. Squeezes out 
+    unneeded singleton dimensions (e.g. height, levels).
+    """
+    rename_dict = {}
+    
+    # 1. Identify and standardize Longitude
+    lon_coords = [c for c in ds.coords if c.lower() in ['lon', 'longitude', 'lons']]
+    if lon_coords and lon_coords[0] != 'lon':
+        rename_dict[lon_coords[0]] = 'lon'
+        
+    # 2. Identify and standardize Latitude
+    lat_coords = [c for c in ds.coords if c.lower() in ['lat', 'latitude', 'lats']]
+    if lat_coords and lat_coords[0] != 'lat':
+        rename_dict[lat_coords[0]] = 'lat'
+        
+    # 3. Identify and standardize Time
+    time_coords = [c for c in ds.coords if c.lower() in ['time', 't', 'times']]
+    if time_coords and time_coords[0] != 'time':
+        rename_dict[time_coords[0]] = 'time'
+        
+    # Rename matching coordinates
+    if rename_dict:
+        ds = ds.rename(rename_dict)
+        
+    # Squeeze out singleton dimensions (like level or height) to simplify analytical shapes
+    ds = ds.squeeze()
+
+    # Normalize longitude to a consistent 0-360 grid for POLDER interpolation
+    ds = normalize_longitude(ds)
+
+    # Keep only standardized dimensions & the variable itself
+    dims_to_keep = [d for d in ['lon', 'lat', 'time'] if d in ds.coords]
+    
+    if var_name in ds.variables:
+        # Filter down dataset variables to save system memory
+        ds = ds[dims_to_keep + [var_name]]
+    else:
+        # Sometimes variable name inside NetCDF is slightly different than file pattern
+        # Handle known aliases (e.g., precipitation files may use 'pr' internally)
+        aliases = {
+            'precip': ['pr', 'precipitation', 'PRECT', 'prect'],
+            'pr': ['precip', 'precipitation', 'PRECT', 'prect'],
+        }
+
+        data_vars = list(ds.data_vars)
+        target_var = None
+        for alt in aliases.get(var_name, []):
+            if alt in data_vars:
+                target_var = alt
+                break
+
+        if target_var is not None:
+            ds = ds.rename({target_var: var_name})
+            ds = ds[dims_to_keep + [var_name]]
+        elif len(data_vars) == 1:
+            ds = ds.rename({data_vars[0]: var_name})
+            ds = ds[dims_to_keep + [var_name]]
+        else:
+            raise KeyError(f"Could not reliably isolate data variable '{var_name}' in dataset variables: {data_vars}")
+
+    return ds
+
+
+def preprocess_for_save(ds, var_name, model_hint=None, temporal='monthly', year=None):
+    """Full analysis-ready preprocess: coords, lon 0-360, monthly time, precip units.
+
+    Pipeline (matches AAOD_error_attribution.ipynb cell-5 expectations):
+      1. standardize_dataset (rename / squeeze / normalize_longitude)
+      2. normalize_dataset_time (first-of-month) — monthly only
+      3. normalize_precipitation_units when var_name is precip/pr
+    """
+    ds = standardize_dataset(ds, var_name)
+    hint = model_hint if model_hint is not None else var_name
+    if temporal == 'monthly':
+        ds = normalize_dataset_time(ds, var_hint=hint, year=year)
+        if ds is None:
+            return None
+    if var_name in ('precip', 'pr'):
+        ds = normalize_precipitation_units(ds)
+    return ds
+
+
+def _netcdf_encoding(ds):
+    """zlib compression encoding for all data variables."""
+    return {
+        name: {'zlib': True, 'complevel': _ZLIB_COMPLEVEL}
+        for name in ds.data_vars
+    }
+
+
+# ==============================================================================
+# SAFE FILE HANDLE HELPERS
+# ==============================================================================
+def _close_dataset_safely(ds):
+    """Close an xarray Dataset, swallowing any errors from a corrupted backend."""
+    try:
+        if ds is not None:
+            ds.close()
+    except Exception:
+        pass
+
+
+def _log_failed_files(failed_files, output_base_dir):
+    """Write a timestamped log of failed source NetCDF files and print a summary."""
+    if not failed_files:
+        return
+
+    os.makedirs(output_base_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(output_base_dir, f"failed_netcdf_files_{timestamp}.log")
+
+    try:
+        with open(log_file, 'w') as f:
+            f.write(f"# Failed NetCDF source files - {timestamp}\n")
+            f.write(f"# Total failures: {len(failed_files)}\n\n")
+            for filepath, model_var, err in failed_files:
+                f.write(f"{model_var}\n")
+                f.write(f"  file: {filepath}\n")
+                f.write(f"  error: {err}\n\n")
+    except Exception as e:
+        logging.warning(f"Could not write failed-files log {log_file}: {e}")
+        return
+
+    print("\n=============================================")
+    print(f"FAILED NETCDF FILES: {len(failed_files)}")
+    print("=============================================")
+    for filepath, model_var, err in failed_files:
+        print(f"  {model_var}")
+        print(f"    {filepath}")
+        print(f"    -> {err}")
+    print(f"\nFull failure log written to: {log_file}")
+    print("=============================================\n")
+
+
+def _extract_year_from_path(filepath):
+    """Extract a four-digit year from the filename (e.g. 2010)."""
+    import re
+    m = re.search(r'(20\d{2}|19\d{2})', os.path.basename(filepath))
+    return int(m.group(1)) if m else None
+
+
+# ==============================================================================
+# FILE DISCOVERY
+# ==============================================================================
+def find_variable_file(base_dir, model, var, temporal):
+    """Locate the first matching AeroCom NetCDF for model/variable/temporal.
+
+    Returns
+    -------
+    str or None
+        Absolute path to the first matching file, or None if not found.
+    """
+    model_dir = os.path.join(base_dir, model)
+    var_names = [var]
+    if var == 'precip':
+        var_names.append('pr')
+    elif var == 'pr':
+        var_names.append('precip')
+
+    patterns = []
+    for vn in var_names:
+        patterns.extend([
+            os.path.join(model_dir, f"*{vn}_*Column*2010*{temporal}*.nc"),
+            os.path.join(model_dir, f"*{vn}_*Surface*2010*{temporal}*.nc"),
+            os.path.join(model_dir, f"*{vn}_*ModelLevel*2010*{temporal}*.nc"),
+            os.path.join(model_dir, f"*{vn}_*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*{vn}_*Column*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*{vn}_*Surface*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*{vn}_*ModelLevel*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*{vn}_*2010*{temporal}*.nc"),
+        ])
+
+    for pattern in patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    return None
+
+
+# ==============================================================================
+# BULK DYNAMIC DATA LOADER (GLOB PATTERNS)
+# ==============================================================================
+def load_all_model_data(base_dir, models, variables, temporal, standardize=True):
+    """
+    Automatically search files, open them lazily via Xarray, and return
+    a structured dictionary map: data[model][variable] = xr.Dataset (or None)
+
+    :param base_dir: Path to directory containing model subfolders.
+    :param models: List of model directory names to scan.
+    :param variables: Iterable containing variables to look up.
+    :param temporal: Frequency filter (e.g. '3hourly', 'daily', 'monthly').
+    :param standardize: Rename variations of coord names to 'lon', 'lat', 'time'.
+    :return: dict structured as {model: {variable: xr.Dataset_or_None}}
+    """
+    data_dict = {}
+
+    for model in models:
+        data_dict[model] = {}
+        logging.info(f"Scanning directory for model: {model} ...")
+
+        for var in variables:
+            filepath = find_variable_file(base_dir, model, var, temporal)
+
+            if filepath and os.path.exists(filepath):
+                try:
+                    ds = xr.open_dataset(filepath, chunks='auto', engine='netcdf4')
+
+                    if standardize:
+                        ds = standardize_dataset(ds, var)
+
+                    data_dict[model][var] = ds
+                    logging.debug(f"  Found & opened: {var} -> {os.path.basename(filepath)}")
+                except Exception as e:
+                    logging.warning(f"  Error reading '{filepath}' for variable '{var}': {e}")
+                    data_dict[model][var] = None
+            else:
+                data_dict[model][var] = None
+
+    return data_dict
+
+
+# ==============================================================================
+# STREAMING PROCESS + SAVE
+# ==============================================================================
+def process_and_save_model_data(
+    base_dirs,
+    variables,
+    temporal,
+    output_base_dir,
+    renew=False,
+    fallback_3hourly=False,
+):
+    """Open, normalize, and save one model x variable at a time.
+
+    Never builds a master dictionary of Datasets. Each file is opened,
+    preprocessed (lon / time / precip), written, and closed before the next.
+
+    Parameters
+    ----------
+    base_dirs : list of (base_dir, models)
+        Ordered source groups, e.g. [(dir_primary, primary_models), ...].
+        A model present in an earlier group is not reprocessed from a later one.
+    variables : iterable of str
+        Variable names to process.
+    temporal : str
+        Frequency filter ('monthly', '3hourly', ...).
+    output_base_dir : str
+        Root for processed NetCDFs: {base}/{var}/{model}_{var}_processed.nc
+    renew : bool, default False
+        If False, skip when the output already exists and is at least as new
+        as the source (mtime). If True, overwrite all outputs.
+    fallback_3hourly : bool, default False
+        If True and temporal='monthly', when a monthly source file is missing
+        try to find a 3-hourly source file for the same model/variable and
+        resample it to monthly means before saving.
+
+    Returns
+    -------
+    dict
+        Summary counts: saved, skipped, missing, errors, plus a 'failed_files'
+        list of (filepath, model/var, error_message) tuples.
+    """
+    print(f"\nStreaming process -> {output_base_dir} (RENEW={renew})")
+    summary = {'saved': 0, 'skipped': 0, 'missing': 0, 'errors': 0}
+    failed_files = []
+    seen_models = set()
+
+    for base_dir, models in base_dirs:
+        for model in models:
+            if model in seen_models:
+                continue
+            seen_models.add(model)
+            logging.info(f"Processing model: {model} ...")
+
+            for var in variables:
+                out_dir = os.path.join(output_base_dir, var)
+                out_file = os.path.join(out_dir, f"{model}_{var}_processed.nc")
+                filepath = find_variable_file(base_dir, model, var, temporal)
+                used_3hourly = False
+
+                # 3h2month fallback: missing monthly source -> try 3-hourly source
+                if (filepath is None or not os.path.exists(filepath)) and fallback_3hourly and temporal == 'monthly':
+                    filepath = find_variable_file(base_dir, model, var, '3hourly')
+                    used_3hourly = filepath is not None and os.path.exists(filepath)
+                    if used_3hourly:
+                        logging.info(f"  3h2month fallback for {model}/{var}: {filepath}")
+
+                if filepath is None or not os.path.exists(filepath):
+                    summary['missing'] += 1
+                    continue
+
+                year = None
+
+                if not renew and os.path.exists(out_file):
+                    try:
+                        if os.path.getmtime(out_file) >= os.path.getmtime(filepath):
+                            summary['skipped'] += 1
+                            continue
+                    except OSError:
+                        pass  # fall through and rewrite
+
+                os.makedirs(out_dir, exist_ok=True)
+
+                ds_raw = None
+                ds = None
+                try:
+                    # Decode time ourselves so malformed/missing-space units (e.g.
+                    # OsloCTM3's 'Monthssince 1850-01-01' with calendar '365_day')
+                    # do not make xarray throw before preprocess_for_save can fix them.
+                    ds_raw = xr.open_dataset(
+                        filepath, chunks='auto', engine='netcdf4', decode_times=False
+                    )
+                    # Only pass the target year for non-standard calendars that need
+                    # the reference-year override (e.g. OsloCTM3 365_day files), or
+                    # when converting 3-hourly data to monthly means.
+                    calendar = ds_raw.time.attrs.get('calendar', 'standard') if 'time' in ds_raw.coords else 'standard'
+                    if calendar in ('365_day', '360_day', 'noleap', 'all_leap', '366_day') or used_3hourly:
+                        year = _extract_year_from_path(filepath)
+                    ds = preprocess_for_save(
+                        ds_raw, var, model_hint=f'{model}/{var}',
+                        temporal='3hourly' if used_3hourly else temporal,
+                        year=year,
+                    )
+                    if ds is None:
+                        summary['missing'] += 1
+                        continue
+
+                    # Convert 3-hourly data to monthly means before writing
+                    if used_3hourly:
+                        ds = _resample_3hourly_to_monthly(
+                            ds, var_hint=f'{model}/{var}', year=year
+                        )
+                        if ds is None:
+                            summary['missing'] += 1
+                            continue
+
+                    # Load into memory so the source handle can be closed immediately.
+                    ds = ds.load()
+                    ds.to_netcdf(
+                        out_file,
+                        engine='netcdf4',
+                        encoding=_netcdf_encoding(ds),
+                    )
+                    ds.close()
+                    summary['saved'] += 1
+                    logging.info(f"  Saved {model}/{var}")
+
+                except Exception as e:
+                    summary['errors'] += 1
+                    failed_files.append((filepath, f"{model}/{var}", str(e)))
+                    logging.warning(f"  Error processing {model}/{var}: {e}")
+                    # Force cleanup of any leaked HDF5 objects after a backend error.
+                    gc.collect()
+
+                finally:
+                    _close_dataset_safely(ds)
+                    _close_dataset_safely(ds_raw)
+                    ds = None
+                    ds_raw = None
+
+    print("=============================================")
+    print(
+        f"Done: {summary['saved']} saved, {summary['skipped']} skipped, "
+        f"{summary['missing']} missing, {summary['errors']} errors."
+    )
+    print("=============================================\n")
+
+    _log_failed_files(failed_files, output_base_dir)
+    summary['failed_files'] = failed_files
+    return summary
+
+
+# ==============================================================================
+# VECTORIZED DERIVED VARIABLE CALCULATOR
+# ==============================================================================
+def _get_dataarray(value, var_name):
+    """Extract a DataArray from a Dataset, or pass a DataArray through."""
+    if value is None:
+        return None
+    if isinstance(value, xr.DataArray):
+        return value
+    if isinstance(value, xr.Dataset):
+        if var_name in value.data_vars:
+            return value[var_name]
+        data_vars = list(value.data_vars)
+        if len(data_vars) == 1:
+            return value[data_vars[0]]
+        raise KeyError(
+            f"Could not extract '{var_name}' from dataset with variables {data_vars}"
+        )
+    raise TypeError(f"Unsupported type for {var_name}: {type(value)}")
+
+
+def _coords_compatible(da, ref, atol=1e-4):
+    """True if lon/lat sizes match and values agree within atol (degrees)."""
+    for coord in ('lon', 'lat'):
+        if coord not in da.coords or coord not in ref.coords:
+            return False
+        a = np.asarray(da[coord].values, dtype=float)
+        b = np.asarray(ref[coord].values, dtype=float)
+        if a.shape != b.shape:
+            return False
+        if not np.allclose(a, b, atol=atol, rtol=0.0, equal_nan=True):
+            return False
+    return True
+
+
+def _align_da_to_ref(da, ref, model_hint=None):
+    """Align *da* onto *ref* lon/lat (interp_like), fixing micro-mismatches / res diffs.
+
+    Handles:
+    - SPRINTARS-style float lon offsets (~1e-5 deg) between 3h-derived and monthly files
+    - CAM5-style different grids (e.g. od440aer 192x288 vs od550aer 96x144)
+    """
+    if da is None or ref is None:
+        return da
+    if _coords_compatible(da, ref):
+        # Snap labels exactly so xarray arithmetic aligns without dropping cells.
+        assign = {}
+        if 'lon' in ref.coords:
+            assign['lon'] = ref['lon']
+        if 'lat' in ref.coords:
+            assign['lat'] = ref['lat']
+        return da.assign_coords(assign) if assign else da
+
+    try:
+        # Prefer linear interp on lon/lat; leave time alone (aligns by label).
+        kwargs = {}
+        if 'lon' in ref.coords and 'lon' in da.coords:
+            kwargs['lon'] = ref['lon']
+        if 'lat' in ref.coords and 'lat' in da.coords:
+            kwargs['lat'] = ref['lat']
+        if not kwargs:
+            return da
+        aligned = da.interp(**kwargs, method='linear', kwargs={'fill_value': np.nan})
+        if model_hint:
+            logging.info(
+                f"  Grid-aligned {getattr(da, 'name', 'var')} -> "
+                f"{getattr(ref, 'name', 'ref')} for {model_hint}"
+            )
+        return aligned
+    except Exception as e:
+        logging.warning(f"  Grid align failed for {model_hint}: {e}")
+        return da
+
+
+def align_model_grids(model_data, ref_var='od550aer', model_hint=None):
+    """Regrid sibling variables in *model_data* onto *ref_var* lon/lat.
+
+    Mutates and returns model_data. Prefer calling before calculate_derived_var
+    so MAC/SSA/AE do not lose regions to exact-coord alignment.
+    """
+    ref_raw = model_data.get(ref_var)
+    ref = _get_dataarray(ref_raw, ref_var)
+    if ref is None:
+        return model_data
+
+    for key, val in list(model_data.items()):
+        if key == ref_var or val is None:
+            continue
+        try:
+            da = _get_dataarray(val, key)
+        except Exception:
+            continue
+        if not isinstance(da, xr.DataArray):
+            continue
+        if 'lon' not in da.coords or 'lat' not in da.coords:
+            continue
+        if _coords_compatible(da, ref):
+            # Still snap labels for exact xarray align.
+            aligned = _align_da_to_ref(da, ref, model_hint=None)
+        else:
+            aligned = _align_da_to_ref(da, ref, model_hint=f'{model_hint}/{key}')
+        if aligned is da:
+            continue
+        if isinstance(val, xr.Dataset):
+            model_data[key] = aligned.to_dataset(name=key)
+        else:
+            model_data[key] = aligned
+    return model_data
+
+
+def calculate_derived_var(model_data, model_name, derived_var):
+    """
+    Calculates complex aerosol diagnostics (MEC, MAC, SSA, AE) directly on the
+    lazily loaded xarray Datasets using highly performant, vectorized array math.
+
+    Sibling variables are grid-aligned onto od550aer (when present) before
+    arithmetic to avoid lon micro-mismatches and resolution mismatches.
+
+    :param model_data: Dictionary for a specific model (i.e. data_dict[model_name])
+    :param model_name: Name of the model currently processed (used for AE sensor wavelengths)
+    :param derived_var: Metric to calculate ('MEC', 'MAC', 'SSA', 'AE')
+    :return: Standardized, derived xr.Dataset or None if required dependencies are missing.
+    """
+    try:
+        # Align inputs onto od550aer grid when available (SPRINTARS lon snap, CAM5 AE).
+        ref = _get_dataarray(model_data.get('od550aer'), 'od550aer')
+
+        if derived_var == 'MEC':
+            # MEC = AOD_550 / (total_load * 1e3)
+            od = ref
+            load_keys = ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss']
+            loads = []
+            for k in load_keys:
+                if model_data.get(k) is None:
+                    continue
+                loads.append(_align_da_to_ref(
+                    _get_dataarray(model_data.get(k), k), od, model_hint=f'{model_name}/{k}'
+                ))
+            missing = [k for k in ['od550aer'] + load_keys if model_data.get(k) is None]
+            if od is None or not loads:
+                raise ValueError(f"Missing {', '.join(missing)} for {model_name}/MEC.")
+            total_load = sum(loads)
+
+            mec = od / (total_load * 1e3)
+            return mec.to_dataset(name='MEC')
+
+        elif derived_var == 'MAC':
+            # MAC = AAOD_550 / (load_BC_OA * 1e3)
+            mac_keys = ['abs550aer', 'loadbc', 'loadoa']
+            abs550, bc, oa = (
+                _get_dataarray(model_data.get(k), k) for k in mac_keys
+            )
+            missing = [k for k in mac_keys if model_data.get(k) is None]
+            if abs550 is None or bc is None or oa is None:
+                raise ValueError(f"Missing {', '.join(missing)} for {model_name}/MAC.")
+            # Prefer od550 as spatial reference; else loadbc.
+            spatial_ref = ref if ref is not None else bc
+            abs550 = _align_da_to_ref(abs550, spatial_ref, model_hint=f'{model_name}/abs550aer')
+            bc = _align_da_to_ref(bc, spatial_ref, model_hint=f'{model_name}/loadbc')
+            oa = _align_da_to_ref(oa, spatial_ref, model_hint=f'{model_name}/loadoa')
+
+            mac = abs550 / ((bc + oa) * 1e3)
+            return mac.to_dataset(name='MAC')
+
+        elif derived_var == 'SSA':
+            # SSA = 1 - (AAOD_550 / AOD_550)
+            ssa_keys = ['abs550aer', 'od550aer']
+            abs550, od550 = (
+                _get_dataarray(model_data.get(k), k) for k in ssa_keys
+            )
+            missing = [k for k in ssa_keys if model_data.get(k) is None]
+            if abs550 is None or od550 is None:
+                raise ValueError(f"Missing {', '.join(missing)} for {model_name}/SSA.")
+            abs550 = _align_da_to_ref(abs550, od550, model_hint=f'{model_name}/abs550aer')
+
+            ssa = 1.0 - (abs550 / od550)
+            return ssa.to_dataset(name='SSA')
+
+        elif derived_var == 'AE':
+            # AE = - log(AOD_550 / AOD_other) / log(550 / other)
+            od550 = ref if ref is not None else _get_dataarray(model_data.get('od550aer'), 'od550aer')
+
+            od870 = _get_dataarray(model_data.get('od870aer'), 'od870aer')
+            od865 = _get_dataarray(model_data.get('od865aer'), 'od865aer')
+            od_other = None
+            if od870 is not None:
+                od_other = od870
+                other_wavelength = 870
+            elif od865 is not None:
+                od_other = od865
+                other_wavelength = 865
+            else:
+                od_other = _get_dataarray(model_data.get('od440aer'), 'od440aer')
+                other_wavelength = 440
+
+            if od550 is None:
+                raise ValueError(f"Missing 550nm AOD for {model_name}.")
+            elif od_other is None:
+                raise ValueError(f"Missing other spectral bands to compute Angstrom Exponent for {model_name}.")
+
+            od_other = _align_da_to_ref(od_other, od550, model_hint=f'{model_name}/od_other')
+            divisor = np.log(550.0 / other_wavelength)
+
+            ae = - np.log(od550 / od_other) / divisor
+            return ae.to_dataset(name='AE')
+
+    except Exception as e:
+        logging.warning(f"Could not calculate {derived_var} for {model_name}: {e}")
+        return None
+
+
+def save_model_data_to_netcdf(data_dict, output_base_dir="./Data/AEROCOM_Processed/"):
+    """
+    Saves the extracted xarray Datasets into a structured directory of NetCDF files,
+    organized into folders by variable name.
+
+    Prefer process_and_save_model_data() for memory-efficient streaming writes.
+
+    :param data_dict: The master dictionary {model: {variable: xr.Dataset}}
+    :param output_base_dir: The root folder where processed data will be saved
+    """
+    print(f"\nSaving processed data to {output_base_dir} ...")
+
+    saved_count = 0
+    missing_count = 0
+
+    for model, variables in data_dict.items():
+        for var_name, ds in variables.items():
+            if ds is not None:
+                var_out_dir = os.path.join(output_base_dir, var_name)
+                os.makedirs(var_out_dir, exist_ok=True)
+
+                out_file = os.path.join(var_out_dir, f"{model}_{var_name}_processed.nc")
+
+                try:
+                    ds.to_netcdf(
+                        out_file,
+                        engine='netcdf4',
+                        encoding=_netcdf_encoding(ds),
+                    )
+                    saved_count += 1
+                except Exception as e:
+                    print(f"  Error saving {out_file}: {e}")
+            else:
+                missing_count += 1
+
+    print("=============================================")
+    print(f"Save Complete: {saved_count} files saved successfully.")
+    print(f"Skipped {missing_count} missing variables.")
+    print("=============================================\n")
+
+
+def load_monthly_data_from_netcdf(
+    output_base_dir="./Data/AP3_processed_monthly",
+    variables=None,
+    models=None,
+    standardize=True,
+):
+    """
+    Reconstruct the monthly AeroCom data dictionary directly from processed NetCDF files.
+
+    Reads files structured as:
+        <output_base_dir>/<variable>/<model>_<variable>_processed.nc
+
+    and returns the same dictionary structure that the legacy master pickle used:
+        data[model][variable] = xr.Dataset
+
+    Missing variables are returned as None. This function lets downstream notebooks
+    and scripts work without relying on the master pickle.
+
+    Parameters
+    ----------
+    output_base_dir : str
+        Root directory containing the variable sub-folders (default: Data/AP3_processed_monthly).
+    variables : list of str, optional
+        Variables to load. If None, all sub-folders of output_base_dir are scanned.
+    models : list of str, optional
+        Models to load. If None, all models with at least one file are loaded.
+    standardize : bool, default True
+        Apply standardize_dataset() to align coordinates and variable names.
+
+    Returns
+    -------
+    dict
+        {model: {variable: xr.Dataset or None}}
+    """
+    if not os.path.isdir(output_base_dir):
+        raise FileNotFoundError(f"Processed monthly directory not found: {output_base_dir}")
+
+    if variables is None:
+        variables = sorted(
+            d for d in os.listdir(output_base_dir)
+            if os.path.isdir(os.path.join(output_base_dir, d)) and d != "derived"
+        )
+    else:
+        variables = list(variables)
+
+    data_dict = {}
+    loaded_count = 0
+
+    for var in variables:
+        var_dir = os.path.join(output_base_dir, var)
+        if not os.path.isdir(var_dir):
+            continue
+
+        for fname in os.listdir(var_dir):
+            if not fname.endswith("_processed.nc"):
+                continue
+
+            # Filenames are: <model>_<variable>_processed.nc
+            parts = fname.rsplit("_", 2)
+            if len(parts) != 3 or parts[1] != var or parts[2] != "processed.nc":
+                continue
+            model = parts[0]
+
+            if models is not None and model not in models:
+                continue
+
+            fpath = os.path.join(var_dir, fname)
+            try:
+                ds = xr.open_dataset(fpath, chunks='auto', engine='netcdf4')
+                if standardize:
+                    ds = standardize_dataset(ds, var)
+                data_dict.setdefault(model, {})[var] = ds
+                loaded_count += 1
+            except Exception as e:
+                logging.warning(f"Could not load {fpath}: {e}")
+                data_dict.setdefault(model, {})[var] = None
+
+    # Ensure every model has an entry for every requested variable
+    for model in data_dict:
+        for var in variables:
+            if var not in data_dict[model]:
+                data_dict[model][var] = None
+
+    print(f"Loaded {loaded_count} NetCDF files for {len(data_dict)} models from {output_base_dir}")
+    return data_dict

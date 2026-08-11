@@ -1,11 +1,19 @@
 """ Script to get the data from the AeroCom files.
-These variables are saved as pickle files, so it is easier and faster to read them.
+
+Monthly data is written as structured NetCDF files under Data/AP3_processed_monthly/.
+Each model×variable is opened, normalized (lon 0–360, first-of-month time, precip
+mm day⁻¹), written, and closed — without loading the full catalogue into memory.
+
+The legacy master pickle can still be produced for backward compatibility by setting
+SAVE_PICKLE = True (memory-heavy: loads all datasets). See MODEL_SELECTION to switch
+between explicit and auto-discovered model lists.
 
 BEFORE RUNNING THIS FILE, CHECK:
-    - WHERE THE FILES ARE BEING SAVED (save_path / save_path_average)
-    - WHICH FILES ARE BEING OPENED (path_original / path_regrid)
+    - WHERE THE FILES ARE BEING SAVED (output_base_dir for NetCDF / pickle paths)
+    - WHICH SOURCE DIRS ARE USED (dir_primary / dir_secondary)
+    - RENEW: False skips up-to-date outputs; True rewrites all processed NetCDFs
 
-FRdM, 27th of September 2024 """
+"""
 
 
 ###################### IMPORT MODULES ######################
@@ -13,7 +21,7 @@ FRdM, 27th of September 2024 """
 import sys
 import os
 from pathlib import Path
-
+import pickle
 # Add parent directory to sys.path to enable proper imports
 script_dir = Path(__file__).parent
 project_root = script_dir.parent
@@ -33,143 +41,319 @@ importlib.reload(functions)
 ###################### DEFINE STUFF ######################
 
 # YEAR = 2010
-temporal = 'monthly'
-models_AOD = ['CAM5.3-Oslo_AP3-CTRL2016-PD', 'ECHAM6-HAM2_AP3-CTRL2016-PD', 'ECHAM6-SALSA_CTRL2016-PD',
-              'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'TM5_AP3-CTRL2016',
-              'CAM5-ATRAS_AP3-CTRL',  'EC-Earth3-AerChem-met2010_AP3-CTRL2019', 'ECHAM6.3-HAM2.3-met2010_AP3-CTRL',
-              'ECHAM6.3-SALSA2.0-met2010_AP3-CTRL', 'GEOS-i33p2-met2010_AP3-CTRL', 'GFDL-AM4-met2010_AP3-CTRL',
-              'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010', 'INCA_AP3-CTRL',
-              'NorESM2-met2010_AP3-CTRL', 'MIROC-SPRINTARS_AP3-CTRL', 'TM5-met2010_AP3-CTRL2019']
-models_AAOD = ['CAM5.3-Oslo_AP3-CTRL2016-PD', 'CAM5_CTRL2016', 'CAM5-ATRAS_AP3-CTRL',
-               'EC-Earth3-AerChem-met2010_AP3-CTRL2019', 'ECHAM6-HAM2_AP3-CTRL2016-PD',
-               'ECHAM6.3-HAM2.3-met2010_AP3-CTRL', 'ECHAM6-SALSA_CTRL2016-PD',  'ECHAM6.3-SALSA2.0-met2010_AP3-CTRL',
-               'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'GEOS-i33p2-met2010_AP3-CTRL', 'GFDL-AM4-met2010_AP3-CTRL',
-               'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010', 'INCA_AP3-CTRL', 'SPRINTARS-T213_AP3-CTRL2016-PD',
-               'MIROC-SPRINTARS_AP3-CTRL', 'TM5_AP3-CTRL2016', 'TM5-met2010_AP3-CTRL2019']
-models_3hourly = ['CAM5.3-Oslo_AP3-CTRL2016-PD', 'CAM5_CTRL2016', 'ECHAM6-SALSA_CTRL2016-PD', 'ECHAM6-HAM2_AP3-CTRL2016-PD',
-                  'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'GEOS-i33p2-met2010_AP3-CTRL',
-                  'SPRINTARS-T213_AP3-CTRL2016-PD', 'MIROC-SPRINTARS_AP3-CTRL', 'TM5_AP3-CTRL2016']
-###double check 
-# Models in AOD but missing from AAOD
-missing_from_aaod = list(set(models_AOD) - set(models_AAOD))
-print("Missing from AAOD:", missing_from_aaod)
-# Output: ['GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 'NorESM2-met2010_AP3-CTRL']
+temporal = 'monthly' #3hourly monthly
 
-# Models in AAOD but missing from AOD (Bonus check!)
-missing_from_aod = list(set(models_AAOD) - set(models_AOD))
-print("Missing from AOD:", missing_from_aod)
-###########################################
-# Output: ['SPRINTARS-T213_AP3-CTRL2016-PD', 'CAM5_CTRL2016']
-# path_regrid = './Data/AEROCOM_III_regrid/{}/aerocom3_{}_{}_{}__{}.nc'
-path_original = './Data/AEROCOM_III/{}/aerocom3_{}_{}_{}_2010_{}.nc'
+# --- Output options ---
+# RENEW=False: skip processed NetCDFs that already exist and are at least as new
+#              as the source file (mtime). RENEW=True: overwrite all outputs.
+RENEW = False
+# SAVE_PICKLE controls whether the master monthly dictionary is written to
+# Data/var_files/original/monthly/monthly_aerocom_data.pickle.
+# It is kept for backward compatibility; the default is now False because
+# downstream work is moving to the NetCDF-based loader. This path loads all
+# datasets into memory and is much heavier than the streaming NetCDF path.
+SAVE_PICKLE = False
+SAVE_NETCDF = True
+# --- Monthly model selection ---
+# 'explicit' -> use the hard-coded monthly model lists (models_AOD, models_AAOD, ...)
+#               and take the union of all monthly models (legacy behavior).
+# 'auto'     -> discover all model directories in dir_primary / dir_secondary
+#               and load every model that has at least one monthly variable.
+MODEL_SELECTION = 'auto'  # or 'auto' 'explicit
 
-save_path = f'./Data/var_files/original/{temporal}/'
-save_path_average = './Data/var_files/original/average/'
+# --- 3-hourly to monthly fallback (3h2month) ---
+# If a variable is missing from the monthly source files (e.g. abs550aer for
+# ECHAM), try to find the 3-hourly version of the same model/variable and
+# compute monthly means before writing it to the monthly processed directory.
+ENABLE_3H_TO_MONTHLY_FALLBACK = True
 
+project_root = Path('/scistor/guest/gbb083/AeroCom')
+if temporal == 'monthly':
+    print('Getting monthly data')
 
-###################### CALCULATE VARIABLES AND SAVE FILES ######################
+    # -------------------------------------------------------------------------
+    # 1. Explicit monthly model lists (Option A)
+    # -------------------------------------------------------------------------
+    models_AOD = [
+        'CAM5.3-Oslo_AP3-CTRL2016-PD', 'ECHAM6-HAM2_AP3-CTRL2016-PD', 'ECHAM6-SALSA_CTRL2016-PD',
+        'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'TM5_AP3-CTRL2016',
+        'CAM5-ATRAS_AP3-CTRL', 'EC-Earth3-AerChem-met2010_AP3-CTRL2019', 'ECHAM6.3-HAM2.3-met2010_AP3-CTRL',
+        'ECHAM6.3-SALSA2.0-met2010_AP3-CTRL', 'GEOS-i33p2-met2010_AP3-CTRL', 'GFDL-AM4-met2010_AP3-CTRL',
+        'GISS-ModelE2p1p1-MATRIX_AP3-CTRL-2010', 'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010', 'INCA_AP3-CTRL',
+        'NorESM2-met2010_AP3-CTRL', 'MIROC-SPRINTARS_AP3-CTRL', 'TM5-met2010_AP3-CTRL2019'
+    ]
 
-# for every model, get the whole dictionary containing only the data we want
+    models_AAOD = [
+        'CAM5.3-Oslo_AP3-CTRL2016-PD', 'CAM5_CTRL2016', 'CAM5-ATRAS_AP3-CTRL',
+        'EC-Earth3-AerChem-met2010_AP3-CTRL2019', 'ECHAM6-HAM2_AP3-CTRL2016-PD',
+        'ECHAM6.3-HAM2.3-met2010_AP3-CTRL', 'ECHAM6-SALSA_CTRL2016-PD', 'ECHAM6.3-SALSA2.0-met2010_AP3-CTRL',
+        'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD', 'GEOS-i33p2-met2010_AP3-CTRL', 'GFDL-AM4-met2010_AP3-CTRL',
+        'GISS-ModelE2p1p1-OMA_AP3-CTRL-2010', 'INCA_AP3-CTRL', 'SPRINTARS-T213_AP3-CTRL2016-PD',
+        'MIROC-SPRINTARS_AP3-CTRL', 'TM5_AP3-CTRL2016', 'TM5-met2010_AP3-CTRL2019'
+    ]
 
-# GET monthly AAOD data
-emi = aerocom_data.get_data(path_original, models_AOD, 'emi_total')
-functions.save_pickle_files(save_path, 'emi_total.pickle', emi)
-emi_BC_OA = aerocom_data.get_data(path_original, models_AAOD, 'emi_BC_OA',od550_freq = temporal, odother_freq = temporal, abs550_freq = temporal)
-functions.save_pickle_files(save_path, 'emi_BC_OA.pickle', emi_BC_OA, )
-emi_BC = aerocom_data.get_data(path_original, models_AAOD, 'emi_bc',od550_freq = temporal, odother_freq = temporal, abs550_freq = temporal)
-functions.save_pickle_files(save_path, 'emi_BC.pickle', emi_BC)
-emi_OA = aerocom_data.get_data(path_original, models_AAOD, 'emi_oa',od550_freq = temporal, odother_freq = temporal, abs550_freq = temporal)
-functions.save_pickle_files(save_path, 'emi_OA.pickle', emi_OA)
-print('emissions done')
+    # Optional sanity checks for the explicit lists
+    missing_from_aaod = list(set(models_AOD) - set(models_AAOD))
+    print("Missing from AAOD:", missing_from_aaod)
+    missing_from_aod = list(set(models_AAOD) - set(models_AOD))
+    print("Missing from AOD:", missing_from_aod)
 
-# GET monthly AOD data
-load = aerocom_data.get_data(path_original, models_AOD, 'load_total')
-functions.save_pickle_files(save_path, 'load_total.pickle', load)
-load_BC_OA = aerocom_data.get_data(path_original, models_AAOD, 'load_BC_OA')
-functions.save_pickle_files(save_path, 'load_BC_OA.pickle', load_BC_OA)
-load_BC = aerocom_data.get_data(path_original, models_AAOD, 'load_bc')
-functions.save_pickle_files(save_path, 'load_BC.pickle', load_BC)
-load_OA = aerocom_data.get_data(path_original, models_AAOD, 'load_oa')
-functions.save_pickle_files(save_path, 'load_OA.pickle', load_OA)
-print('load done')
+    # -------------------------------------------------------------------------
+    # 2. Directories and variables
+    # -------------------------------------------------------------------------
+    dir_primary = f"{project_root}/Data/AP3_2026"
+    dir_secondary = f"{project_root}/Data/AEROCOM_III"
 
-# # GET 3hourly AOD data   
-# what is optical depth 1
-od550 = aerocom_data.get_data(path_original, models_AOD, 'AOD550', od550_freq=temporal)
-# od550cs = aerocom_data.get_data(path_original, models_AOD, 'AOD550')
-functions.save_pickle_files(save_path, 'od550.pickle', od550)
-od_other = aerocom_data.get_data(path_original, models_AOD, 'AOD440', od550_freq=temporal, odother_freq=temporal)
-functions.save_pickle_files(save_path, 'od_other.pickle', od_other)
-abs550 = aerocom_data.get_data(path_original, models_AAOD, 'AAOD550', od550_freq=temporal, odother_freq=temporal, abs550_freq=temporal)
-functions.save_pickle_files(save_path, 'abs550.pickle', abs550)
-print('optical depth done')
+    VARIABLES = (
+        "abs550aer", "depbc", "depdust", "depoa", "depso2", "depso4", "depss",
+        "emibc", "emidust", "emioa", "emiso2", "emiss", "loadbc", "loaddust",
+        "loadoa", "loadso2", "loadso4", "loadss", "od440aer", "od550aer",
+        "od870aer", "od865aer", "od550bc", "od550dust", "od550oa", "od550so4", "od550ss",
+        "precip"
+    )
+
+    # -------------------------------------------------------------------------
+    # 3. Choose model list: explicit union or auto-discovery (Option B)
+    # -------------------------------------------------------------------------
+    def discover_models(*dirs):
+        """Return sorted model directory names found in any of the given directories."""
+        discovered = set()
+        for d in dirs:
+            if not os.path.isdir(d):
+                continue
+            discovered.update(
+                m for m in os.listdir(d)
+                if os.path.isdir(os.path.join(d, m)) and not m.startswith('.')
+            )
+        return sorted(discovered)
+
+    if MODEL_SELECTION == 'explicit':
+        all_models = sorted(set(models_AOD + models_AAOD))
+        print(f"\nMODEL_SELECTION='explicit': using {len(all_models)} models from union of models_AOD and models_AAOD")
+    elif MODEL_SELECTION == 'auto':
+        all_models = discover_models(dir_primary, dir_secondary)
+        print(f"\nMODEL_SELECTION='auto': discovered {len(all_models)} model directories")
+    else:
+        raise ValueError(f"MODEL_SELECTION must be 'explicit' or 'auto', got '{MODEL_SELECTION}'")
+
+    # Split models by availability in primary / secondary directories
+    primary_models = [m for m in all_models if os.path.isdir(os.path.join(dir_primary, m))]
+    secondary_models = [m for m in all_models if m not in primary_models and os.path.isdir(os.path.join(dir_secondary, m))]
+    missing_models = [m for m in all_models if m not in primary_models and m not in secondary_models]
+    if missing_models:
+        print(f"WARNING: {len(missing_models)} model(s) not found in either directory:")
+        for m in missing_models:
+            print(f"  - {m}")
+
+    save_path = f'./Data/var_files/original/{temporal}/'
+    save_path_average = './Data/var_files/original/average/'
+    output_netcdf_dir = "./Data/AP3_processed_monthly"
+
+    # -------------------------------------------------------------------------
+    # 4. Stream-process and save monthly NetCDFs (one model×var at a time)
+    # -------------------------------------------------------------------------
+    base_dirs = [(dir_primary, primary_models)]
+    if secondary_models:
+        base_dirs.append((dir_secondary, secondary_models))
+
+    if SAVE_NETCDF:
+        print(f"\nStreaming monthly NetCDF write to {output_netcdf_dir} (RENEW={RENEW})...")
+        aerocom_data.process_and_save_model_data(
+            base_dirs=base_dirs,
+            variables=VARIABLES,
+            temporal='monthly',
+            output_base_dir=output_netcdf_dir,
+            renew=RENEW,
+            fallback_3hourly=ENABLE_3H_TO_MONTHLY_FALLBACK,
+        )
+
+    # Optional memory-heavy pickle path (loads full catalogue)
+    if SAVE_PICKLE:
+        print(f"\nLoading monthly data into memory for pickle (memory-heavy)...")
+        data_primary = aerocom_data.load_all_model_data(
+            base_dir=dir_primary,
+            models=primary_models,
+            variables=VARIABLES,
+            temporal='monthly'
+        )
+        if secondary_models:
+            data_secondary = aerocom_data.load_all_model_data(
+                base_dir=dir_secondary,
+                models=secondary_models,
+                variables=VARIABLES,
+                temporal='monthly'
+            )
+            all_data = {**data_primary, **data_secondary}
+        else:
+            all_data = data_primary
+
+        print("\n=============================================")
+        print(f" Master dataset created with {len(all_data)} total models.")
+        print("=============================================\n")
+
+        output_base_dir = './Data/var_files/original/monthly/'
+        os.makedirs(output_base_dir, exist_ok=True)
+        print(f"\nSaving master dataset to a single PICKLE file in {output_base_dir} ...")
+        out_file = os.path.join(output_base_dir, f"{temporal}_aerocom_data.pickle")
+        try:
+            with open(out_file, 'wb') as f:
+                pickle.dump(all_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"Saved pickle: {out_file}")
+        except Exception as e:
+            print(f"Error saving pickle file: {e}")
+
+elif temporal == '3hourly':
+    print('Getting 3hourly data')
+    # 3hourly branch keeps its own output settings to preserve existing behaviour
+
+    var_3hour = (
+        "abs550aer", "od440aer", "od550aer", "od870aer", "od865aer", "od550bc", "od550dust", "od550oa", "od550so4", "od550ss",
+        "depbc", "depdust", "depoa", "depso2", "depso4", "depss",
+        "emibc", "emidust", "emioa", "emiso2", "emiss", "loadbc", "loaddust",
+        "loadoa", "loadso2", "loadso4", "loadss"
+    )
+    models_primary = [
+        'ECHAM6-SALSA_CTRL2016-PD',
+        'ECMWF-IFS-CY42R1-CAMS-RA-CTRL_AP3-CTRL2016-PD',
+        'ECMWF-IFS-CY45R1-CAMS-CTRL-met2010_AP3-CTRL',
+        'ECMWF-IFS-CY46R1-CAMS-CTRL-met2010_AP3-CTRL',
+        'GEOS-Chem-v11-01_AP3-CTRL2016-PD',
+        'HadGEM3-GA7.1_AP3-CTRL2016-PD',
+        'IMPACT_CTRL2016',
+        'MIROC-SPRINTARS_AP3-CTRL',
+        'SPRINTARS-T213_AP3-CTRL2016-PD',
+        'TM5_AP3-CTRL2016'
+    ]
+    dir_primary = "./Data/AP3_2026"
+
+    models_secondary_unique = [
+        'CAM5.3-Oslo_AP3-CTRL2016-PD',
+        'CAM5_CTRL2016',
+        'ECHAM6-HAM2_AP3-CTRL2016-PD',
+        'GEOS-i33p2-met2010_AP3-CTRL'
+    ]
+    dir_secondary = "./Data/AEROCOM_III"
+    output_netcdf_dir = "./Data/AP3_processed_3hourly"
+
+    base_dirs = [
+        (dir_primary, models_primary),
+        (dir_secondary, models_secondary_unique),
+    ]
+
+    if SAVE_NETCDF:
+        print(f"\nStreaming 3hourly NetCDF write to {output_netcdf_dir} (RENEW={RENEW})...")
+        aerocom_data.process_and_save_model_data(
+            base_dirs=base_dirs,
+            variables=var_3hour,
+            temporal='3hourly',
+            output_base_dir=output_netcdf_dir,
+            renew=RENEW,
+        )
+
+    if SAVE_PICKLE:
+        print("Loading Primary Data (AP3_2026) for pickle (memory-heavy)...")
+        data_primary = aerocom_data.load_all_model_data(
+            base_dir=dir_primary,
+            models=models_primary,
+            variables=var_3hour,
+            temporal='3hourly'
+        )
+
+        print("\nLoading Secondary Unique Data (AEROCOM_III)...")
+        data_secondary = aerocom_data.load_all_model_data(
+            base_dir=dir_secondary,
+            models=models_secondary_unique,
+            variables=var_3hour,
+            temporal=temporal
+        )
+
+        all_data = {**data_primary, **data_secondary}
+        all_models = models_primary + models_secondary_unique
+
+        print("\n=============================================")
+        print(f" Master dataset created with {len(all_models)} total models.")
+        print("=============================================\n")
+
+        output_base_dir = './Data/var_files/original/3hourly/'
+        os.makedirs(output_base_dir, exist_ok=True)
+        print(f"\nSaving entire dataset to a single PICKLE file in {output_base_dir} ...")
+        out_file = os.path.join(output_base_dir, f"{temporal}_aerocom_data.pickle")
+
+        try:
+            with open(out_file, 'wb') as f:
+                pickle.dump(all_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"Save Complete: Master dictionary saved to {out_file}")
+        except Exception as e:
+            print(f"Error saving pickle file: {e}")
+
 
 # prect = aerocom_data.get_data(path_original, models_AOD, 'prect')
-# functions.save_pickle_files(save_path, 'prect.pickle', prect)
+# functions.SAVE_PICKLE_files(save_path, 'prect.pickle', prect)
 # print('prect done')
 
 #???
 # colors_AOD = aerocom_data.get_data(path_original, models_AOD, 'AOD550')
-# functions.save_pickle_files(save_path, 'colors_AOD.pickle', colors_AOD)
+# functions.SAVE_PICKLE_files(save_path, 'colors_AOD.pickle', colors_AOD)
 # colors_AAOD = aerocom_data.get_data(path_original, models_AAOD, 'AOD550')
-# functions.save_pickle_files(save_path, 'colors_AAOD.pickle', colors_AAOD)
+# functions.SAVE_PICKLE_files(save_path, 'colors_AAOD.pickle', colors_AAOD)
 
 
 ###################### AVERAGE AND SAVE FILES ######################
 # Regional means and derived variables (MEC, SSA, lifetime, …) are computed in
 # notebooks using functions.create_region_mask() and functions.regional_aggregate()
-# on the monthly pickles saved above (save_path). Uncomment below to regenerate
-# the legacy pre-averaged pickles in save_path_average.
+# on the monthly data (now loaded from Data/AP3_processed_monthly/ NetCDF files,
+# or from the backward-compatible pickle when SAVE_PICKLE=True). Uncomment below to
+# regenerate the legacy pre-averaged pickles in save_path_average.
 
 # print('starting calculation of the regional means')
 # emi_mean = functions.apply_global_mean(emi,'emi_total', False)
-# functions.save_pickle_files(save_path_average, 'emi_total.pickle', emi_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'emi_total.pickle', emi_mean)
 # emi_BC_OA_mean = functions.apply_global_mean(emi_BC_OA,'emi_BC_OA', False)
-# functions.save_pickle_files(save_path_average, 'emi_BC_OA.pickle', emi_BC_OA_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'emi_BC_OA.pickle', emi_BC_OA_mean)
 # emi_BC_mean = functions.apply_global_mean(emi_BC,'emi_bc', False)
-# functions.save_pickle_files(save_path_average, 'emi_BC.pickle', emi_BC_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'emi_BC.pickle', emi_BC_mean)
 # emi_OA_mean = functions.apply_global_mean(emi_OA,'emi_oa', False)
-# functions.save_pickle_files(save_path_average, 'emi_OA.pickle', emi_OA_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'emi_OA.pickle', emi_OA_mean)
 # print('emissions done')
 
 # load_mean = functions.apply_global_mean(load,'load_total', False)
-# functions.save_pickle_files(save_path_average, 'load_total.pickle', load_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'load_total.pickle', load_mean)
 # load_BC_OA_mean = functions.apply_global_mean(load_BC_OA,'load_BC_OA', False)
-# functions.save_pickle_files(save_path_average, 'load_BC_OA.pickle', load_BC_OA_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'load_BC_OA.pickle', load_BC_OA_mean)
 # load_BC_mean = functions.apply_global_mean(load_BC,'load_bc', False)
-# functions.save_pickle_files(save_path_average, 'load_BC.pickle', load_BC_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'load_BC.pickle', load_BC_mean)
 # load_OA_mean = functions.apply_global_mean(load_OA,'load_oa', False)
-# functions.save_pickle_files(save_path_average, 'load_OA.pickle', load_OA_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'load_OA.pickle', load_OA_mean)
 # print('load done')
 
 # od550_mean = functions.apply_global_mean(od550, 'AOD550', False)
-# functions.save_pickle_files(save_path_average, 'od550cs.pickle', od550_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'od550cs.pickle', od550_mean)
 # od550_for_SSA = functions.apply_global_mean(aerocom_data.get_data(path_original, models_AAOD, 'AOD550'),
 #                                                   'AOD550', False)
 # od_other_mean = functions.apply_global_mean(od_other, 'AOD440', False)
-# functions.save_pickle_files(save_path_average, 'od_other.pickle', od_other_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'od_other.pickle', od_other_mean)
 # abs550_mean = functions.apply_global_mean(abs550, 'AAOD550', False)
-# functions.save_pickle_files(save_path_average, 'abs550.pickle', abs550_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'abs550.pickle', abs550_mean)
 # print('optical depth done')
 
 # prect_mean = functions.apply_global_mean(prect,'prect', False)
-# functions.save_pickle_files(save_path_average, 'prect.pickle', prect_mean)
+# functions.SAVE_PICKLE_files(save_path_average, 'prect.pickle', prect_mean)
 
 # MEC = aerocom_data.calculate_var(od550_mean, load_mean, 'MEC')
-# functions.save_pickle_files(save_path_average, 'MEC.pickle', MEC)
+# functions.SAVE_PICKLE_files(save_path_average, 'MEC.pickle', MEC)
 # MAC = aerocom_data.calculate_var(abs550_mean, load_BC_OA_mean, 'MAC')
-# functions.save_pickle_files(save_path_average, 'MAC.pickle', MAC)
+# functions.SAVE_PICKLE_files(save_path_average, 'MAC.pickle', MAC)
 
 # lifetime = aerocom_data.calculate_var(load_mean, emi_mean, 'lifetime', False)
-# functions.save_pickle_files(save_path_average, 'lifetime.pickle', lifetime)
+# functions.SAVE_PICKLE_files(save_path_average, 'lifetime.pickle', lifetime)
 # lifetime_BC_OA = aerocom_data.calculate_var(load_BC_OA_mean, emi_BC_OA_mean, 'lifetime', False)
-# functions.save_pickle_files(save_path_average, 'lifetime_BC_OA.pickle', lifetime_BC_OA)
+# functions.SAVE_PICKLE_files(save_path_average, 'lifetime_BC_OA.pickle', lifetime_BC_OA)
 # lifetime_inv = aerocom_data.calculate_var(load_mean, emi_mean, 'lifetime', True)
-# functions.save_pickle_files(save_path_average, 'lifetime_inv.pickle', lifetime_inv)
+# functions.SAVE_PICKLE_files(save_path_average, 'lifetime_inv.pickle', lifetime_inv)
 # lifetime_inv_BC_OA = aerocom_data.calculate_var(load_BC_OA_mean, emi_BC_OA_mean, 'lifetime', True)
-# functions.save_pickle_files(save_path_average, 'lifetime_inv_BC_OA.pickle', lifetime_inv_BC_OA)
+# functions.SAVE_PICKLE_files(save_path_average, 'lifetime_inv_BC_OA.pickle', lifetime_inv_BC_OA)
 
 # AE = aerocom_data.calculate_var(od550_mean, od_other_mean, 'AE')
-# functions.save_pickle_files(save_path_average, 'AE.pickle', AE)
+# functions.SAVE_PICKLE_files(save_path_average, 'AE.pickle', AE)
 # SSA = aerocom_data.calculate_var(abs550_mean, od550_for_SSA, 'SSA')
-# functions.save_pickle_files(save_path_average, 'SSA.pickle', SSA)
+# functions.SAVE_PICKLE_files(save_path_average, 'SSA.pickle', SSA)
