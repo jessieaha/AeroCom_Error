@@ -10,11 +10,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+try:
+    project_root = Path.cwd().parent
+except NameError:
+    project_root = Path('/scistor/guest/gbb083/AeroCom')
+py_dir = project_root / 'py'
+if str(py_dir) not in sys.path:
+    sys.path.insert(0, str(py_dir))
+sys.path.append(py_dir)
+import cameo_toolbox as ct
 # ==============================================================================
 # GLOBAL CONFIGURATIONS
 # ==============================================================================
-
-
 REGIONS = {
     'global': {
         'surface_type': 'all', 'lon_range': (0, 360), 'lat_range': (-90, 90),
@@ -60,7 +67,7 @@ REGIONS = {
 }
 
 
-def aggregate_region(model_dict, var_name, region_name, return_time_series=False, skipna=False):
+def aggregate_region(model_dict, var_name, region_name, masks, return_time_series=False, skipna=False):
     """Spatially aggregate `var_name` for every model."""
     cfg = REGIONS[region_name]
     result = {}
@@ -79,7 +86,7 @@ def aggregate_region(model_dict, var_name, region_name, return_time_series=False
     return result
 
 
-def compute_derived_after_aggregation(monthly_dict, seasonal_dict):
+def compute_derived_after_aggregation(monthly_dict, seasonal_dict, DERIVED_VAR_AFTER_AGG):
     """Compute lifetime-like variables from aggregated load/emission."""
     lifetime_after_agg = 'lifetime' in DERIVED_VAR_AFTER_AGG
     lifetime_bcoa_after_agg = lifetime_after_agg or 'lifetime_BC_OA' in DERIVED_VAR_AFTER_AGG

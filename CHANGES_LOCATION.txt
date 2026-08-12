@@ -1,0 +1,82 @@
+================================================================================
+MODIFIED FILES - EXACT LOCATIONS
+================================================================================
+
+📁 Main Modified Files:
+------------------------
+1. /scistor/guest/gbb083/AeroCom/notebooks/AOD_error_attribution.ipynb
+2. /scistor/guest/gbb083/AeroCom/notebooks/AAOD_error_attribution.ipynb
+
+📁 Backup Files (safe copies of originals):
+-------------------------------------------
+1. /scistor/guest/gbb083/AeroCom/notebooks/AOD_error_attribution.ipynb.backup_AeroCom
+2. /scistor/guest/gbb083/AeroCom/notebooks/AAOD_error_attribution.ipynb.backup_AeroCom
+
+================================================================================
+CHANGES IN AOD_error_attribution.ipynb
+================================================================================
+
+📍 CELL 3 (Configuration Cell):
+   Lines added:
+   - POST_AGG_LIFETIME_MAX_DAYS = 15.0
+   - POST_AGG_LIFETIME_MIN_DAYS = 0.3
+   - USE_DEPOSITION_FOR_LIFETIME = False
+   - Print statements showing the config values
+
+📍 CELL 9 (Lifetime Calculation Function):
+   Function: compute_derived_after_aggregation()
+   Changes:
+   - Added deposition flux option (dep_total vs emi_total)
+   - Added POST_AGG filtering (values < 0.3 or > 15 days → None)
+
+================================================================================
+CHANGES IN AAOD_error_attribution.ipynb
+================================================================================
+
+📍 CELL 2 (Configuration Cell):
+   Lines added:
+   - USE_DEPOSITION_FOR_LIFETIME = False
+   - Print statement showing the config value
+   Note: POST_AGG_LIFETIME already existed (set to 20 days)
+
+📍 CELL 10 (Lifetime Calculation Function):
+   Function: compute_derived_after_aggregation()
+   Changes:
+   - Added deposition flux option (dep_BC_OA vs emi_BC_OA)
+   - Added deposition option for total lifetime (dep_total vs emi_total)
+
+================================================================================
+HOW TO VIEW THE CHANGES
+================================================================================
+
+Option 1 - Open in Jupyter/VS Code:
+   - Open: notebooks/AOD_error_attribution.ipynb
+   - Look at Cell 3 (config) and Cell 9 (function)
+   
+   - Open: notebooks/AAOD_error_attribution.ipynb
+   - Look at Cell 2 (config) and Cell 10 (function)
+
+Option 2 - Compare with backups:
+   cd /scistor/guest/gbb083/AeroCom/notebooks
+   diff AOD_error_attribution.ipynb.backup_AeroCom AOD_error_attribution.ipynb
+   diff AAOD_error_attribution.ipynb.backup_AeroCom AAOD_error_attribution.ipynb
+
+Option 3 - Search for new config flags:
+   grep -n "POST_AGG_LIFETIME_MAX_DAYS" notebooks/AOD_error_attribution.ipynb
+   grep -n "USE_DEPOSITION_FOR_LIFETIME" notebooks/*.ipynb
+
+================================================================================
+WHAT WAS ADDED
+================================================================================
+
+1. POST_AGG_LIFETIME filtering (AOD notebook only):
+   - Prevents model blow-ups by filtering extreme lifetimes after aggregation
+   - Max: 15.0 days (values > 15 days set to None)
+   - Min: 0.3 days (values < 0.3 days set to None)
+
+2. USE_DEPOSITION_FOR_LIFETIME option (both notebooks):
+   - False (default): lifetime = load / emission
+   - True: lifetime = load / deposition
+   - Variables needed: depoa, depbc, dep_total (or dep_BC_OA)
+
+================================================================================
