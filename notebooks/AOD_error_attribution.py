@@ -116,6 +116,8 @@ TABLE_DIR.mkdir(parents=True, exist_ok=True)
 SOURCE_REGIONS = ['africa', 'amazon', 'se_asia', 'boreal_na', 'eastern_siberia']
 OUTFLOW_REGION = 'outflow_af'
 OUTFLOW_SOURCE = 'africa'
+# Only these regions are masked/aggregated/used in the notebook.
+ANALYSIS_REGIONS = SOURCE_REGIONS + [OUTFLOW_REGION]
 
 PAPER_TABLE1 = {
     'amazon': {'precip': 1.9, 'AE': 1.4, 'AOD': 0.4, 'E': 18.2, 'tau': 4.3, 'MEC': 5.9},
@@ -154,6 +156,7 @@ def short_model_name(model):
 print(f'  INTERCEPT_0          = {INTERCEPT_0}', flush=True)
 print(f'  POLDER_HOMOGENIZE    = {POLDER_HOMOGENIZE}', flush=True)
 print(f'  INCLUDE_AMAZON_SOA   = {INCLUDE_AMAZON_SOA}', flush=True)
+print(f'  ANALYSIS_REGIONS     = {ANALYSIS_REGIONS}', flush=True)
 print(f'  DERIVED_VAR_AFTER_AGG= {DERIVED_VAR_AFTER_AGG}', flush=True)
 print(f'  POST_AGG_LIFETIME    = [{POST_AGG_LIFETIME_MIN_DAYS}, {POST_AGG_LIFETIME_MAX_DAYS}] days',
       flush=True)
@@ -463,14 +466,15 @@ print(f'Template grid from {sample_model}: {template.dims}', flush=True)
 
 SURFACE_TYPE = None
 masks = {}
-for name, cfg in REGIONS.items():
+for name in ANALYSIS_REGIONS:
+    cfg = REGIONS[name]
     masks[name] = ct.create_region_mask(
         template, name=name,
         lon_range=cfg['lon_range'], lat_range=cfg['lat_range'],
         surface_type=SURFACE_TYPE if SURFACE_TYPE is not None else cfg.get('surface_type', 'all'),
         mask_registry=masks,
     )
-print('Regions created:', list(masks.keys()), flush=True)
+print('Regions created (ANALYSIS_REGIONS):', list(masks.keys()), flush=True)
 
 
 def aggregate_region(model_dict, var_name, region_name, return_time_series=False, skipna=False):
@@ -500,7 +504,7 @@ model_monthly = {
                               skipna=(var in LIFETIME_VARS))
         for var in variables_to_aggregate
     }
-    for region in REGIONS
+    for region in ANALYSIS_REGIONS
 }
 
 model_seasonal = {
@@ -509,7 +513,7 @@ model_seasonal = {
                               skipna=(var in LIFETIME_VARS))
         for var in variables_to_aggregate
     }
-    for region in REGIONS
+    for region in ANALYSIS_REGIONS
 }
 
 
@@ -529,7 +533,7 @@ def compute_derived_after_aggregation(monthly_dict, seasonal_dict):
 
     if 'MEC' in DERIVED_VAR_AFTER_AGG:
         for agg in (monthly_dict, seasonal_dict):
-            for region in REGIONS:
+            for region in agg:
                 aod = agg[region].get('od550aer', {})
                 load = agg[region].get('load_total', {})
                 out = {}
@@ -616,7 +620,7 @@ if 'lifetime_BC_OA' in DERIVED_VAR_AFTER_AGG or 'lifetime' in DERIVED_VAR_AFTER_
     )
 
 # Diagnostic: emission vs deposition lifetimes (always both methods).
-_compare_regions = [r for r in (['global'] + SOURCE_REGIONS + [OUTFLOW_REGION]) if r in model_seasonal]
+_compare_regions = [r for r in ANALYSIS_REGIONS if r in model_seasonal]
 lifetime_method_df = setup.compare_emission_vs_deposition_lifetimes(
     model_seasonal,
     regions=_compare_regions,
@@ -626,7 +630,7 @@ lifetime_method_df = setup.compare_emission_vs_deposition_lifetimes(
     out_csv=TABLE_DIR / 'AOD_lifetime_emission_vs_deposition_BC_OA.csv',
 )
 
-plot_regions = [r for r in REGIONS if r != 'global']
+plot_regions = list(ANALYSIS_REGIONS)
 
 # -------------------------------------------------------------------------------
 # 5. Load POLDER observations and compute monthly regional means
@@ -690,7 +694,7 @@ def polder_monthly_means(df, region_name):
     return pd.DataFrame(rows)
 
 
-polder_monthly = {region: polder_monthly_means(polder_df, region) for region in REGIONS}
+polder_monthly = {region: polder_monthly_means(polder_df, region) for region in ANALYSIS_REGIONS}
 
 
 def _polder_subsample(region_name, max_pts=8000):
@@ -806,7 +810,7 @@ def gpcp_region_mean(precip_da, region_name, apply_surface_mask=True):
     return (sub * weights).sum(dim=['lat', 'lon'])
 
 
-gpcp_region = {region: gpcp_region_mean(gpcp_precip, region) for region in REGIONS}
+gpcp_region = {region: gpcp_region_mean(gpcp_precip, region) for region in ANALYSIS_REGIONS}
 
 
 
@@ -884,9 +888,7 @@ def get_obs_constraints(model_seasonal_dict, ens_models):
 def build_reg_df(model_list):
     """Build regression dataframe for a model subset."""
     rows = []
-    for region in REGIONS:
-        if region == 'global':
-            continue
+    for region in ANALYSIS_REGIONS:
         for model in model_list:
             mec = model_seasonal[region]['MEC'].get(model)
             ae = model_seasonal[region]['AE'].get(model)
@@ -909,9 +911,7 @@ def build_reg_df(model_list):
 def fit_mec_ae(reg_df):
     """Fit MEC vs AE per region; returns dict per region."""
     results = {}
-    for region in REGIONS:
-        if region == 'global':
-            continue
+    for region in ANALYSIS_REGIONS:
         sub = reg_df[reg_df['region'] == region].dropna(subset=['MEC', 'AE'])
         if len(sub) < 3:
             continue
@@ -939,9 +939,7 @@ def fit_mec_ae(reg_df):
 def fit_inv_lt(reg_df):
     """Fit 1/tau vs precipitation + AE per region."""
     results = {}
-    for region in REGIONS:
-        if region == 'global':
-            continue
+    for region in ANALYSIS_REGIONS:
         sub = reg_df[reg_df['region'] == region].dropna(subset=['inv_lifetime', 'precip', 'AE'])
         if len(sub) < 4:
             continue
@@ -963,9 +961,7 @@ def fit_inv_lt(reg_df):
 def fit_inv_lt_simple(reg_df):
     """Simple 1/tau vs precipitation regression for plotting."""
     results = {}
-    for region in REGIONS:
-        if region == 'global':
-            continue
+    for region in ANALYSIS_REGIONS:
         sub = reg_df[reg_df['region'] == region].dropna(subset=['inv_lifetime', 'precip'])
         if len(sub) < 3:
             continue
@@ -1844,8 +1840,11 @@ for ens_name, res in results.items():
 # -------------------------------------------------------------------------------
 print('\n--- Regional map ---', flush=True)
 region_boxes = {
-    name: (cfg['lon_range'][0], cfg['lon_range'][1], cfg['lat_range'][0], cfg['lat_range'][1])
-    for name, cfg in REGIONS.items() if name != 'global'
+    name: (
+        REGIONS[name]['lon_range'][0], REGIONS[name]['lon_range'][1],
+        REGIONS[name]['lat_range'][0], REGIONS[name]['lat_range'][1],
+    )
+    for name in ANALYSIS_REGIONS
 }
 sample_field = data[sample_model]['od550aer']['od550aer'].isel(time=0)
 fig_map = ct.fake_uba_map(

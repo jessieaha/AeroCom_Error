@@ -86,38 +86,205 @@ def aggregate_region(model_dict, var_name, region_name, masks, return_time_serie
     return result
 
 
-def compute_derived_after_aggregation(monthly_dict, seasonal_dict, DERIVED_VAR_AFTER_AGG):
-    """Compute lifetime-like variables from aggregated load/emission."""
+def _lifetime_from_load_flux(load_dict, flux_dict, label, region):
+    """τ = load / (flux * 86400) in days for models present in both dicts."""
+    out = {}
+    for model in load_dict:
+        if model not in flux_dict:
+            continue
+        try:
+            out[model] = load_dict[model] / (flux_dict[model] * 3600 * 24)
+        except Exception as e:
+            print(f'  Failed post-aggregation {label} for {model} {region}: {e}')
+    return out
+
+
+def compute_derived_after_aggregation(
+    monthly_dict,
+    seasonal_dict,
+    DERIVED_VAR_AFTER_AGG,
+    use_deposition_for_lifetime=False,
+):
+    """Compute lifetime-like variables from aggregated load/(emission|deposition).
+
+    When ``use_deposition_for_lifetime`` is True, flux is ``dep_BC_OA`` /
+    ``dep_total`` (require_all sums built upstream). Otherwise emission fluxes
+    ``emi_BC_OA`` / ``emi_total`` are used. Lifetime is load / (flux * 86400) days.
+
+    Regions are taken from the aggregation dict keys so callers with a local
+    REGIONS map (e.g. AOD notebook) are not forced onto ``setup.REGIONS``.
+    """
     lifetime_after_agg = 'lifetime' in DERIVED_VAR_AFTER_AGG
     lifetime_bcoa_after_agg = lifetime_after_agg or 'lifetime_BC_OA' in DERIVED_VAR_AFTER_AGG
+    method = 'deposition' if use_deposition_for_lifetime else 'emission'
+    print(f'\nPost-aggregation lifetimes using load/{method} '
+          f'(USE_DEPOSITION_FOR_LIFETIME={use_deposition_for_lifetime})')
 
     if lifetime_bcoa_after_agg:
+        flux_key = 'dep_BC_OA' if use_deposition_for_lifetime else 'emi_BC_OA'
         for agg in (monthly_dict, seasonal_dict):
-            for region in REGIONS:
+            for region in agg:
                 load = agg[region].get('load_BC_OA', {})
-                emi = agg[region].get('emi_BC_OA', {})
-                out = {}
-                for model in load:
-                    if model in emi:
-                        try:
-                            out[model] = load[model] / (emi[model] * 3600 * 24)
-                        except Exception as e:
-                            print(f'  Failed post-aggregation lifetime_BC_OA for {model} {region}: {e}')
-                agg[region]['lifetime_BC_OA'] = out
+                flux = agg[region].get(flux_key, {})
+                agg[region]['lifetime_BC_OA'] = _lifetime_from_load_flux(
+                    load, flux, 'lifetime_BC_OA', region
+                )
 
     if lifetime_after_agg:
+        flux_key = 'dep_total' if use_deposition_for_lifetime else 'emi_total'
         for agg in (monthly_dict, seasonal_dict):
-            for region in REGIONS:
+            for region in agg:
                 load = agg[region].get('load_total', {})
-                emi = agg[region].get('emi_total', {})
-                out = {}
-                for model in load:
-                    if model in emi:
-                        try:
-                            out[model] = load[model] / (emi[model] * 3600 * 24)
-                        except Exception as e:
-                            print(f'  Failed post-aggregation lifetime for {model} {region}: {e}')
-                agg[region]['lifetime'] = out
+                flux = agg[region].get(flux_key, {})
+                agg[region]['lifetime'] = _lifetime_from_load_flux(
+                    load, flux, 'lifetime', region
+                )
+
+
+def _scalarize_lifetime(val):
+    """Convert aggregated lifetime entry to a finite float, or None."""
+    try:
+        v = float(val) if not hasattr(val, 'values') else float(np.asarray(val).mean())
+    except Exception:
+        return None
+    return v if np.isfinite(v) else None
+
+
+def print_global_lifetimes(seasonal_dict, var='lifetime_BC_OA', method_label=None):
+    """Print seasonal/regional lifetime for the global box (or spatial-mean fallback)."""
+    label = method_label or var
+    global_map = (seasonal_dict.get('global') or {}).get(var) or {}
+    print(f'\n--- Global lifetime ({label}) ---')
+    if global_map:
+        rows = []
+        for model, val in sorted(global_map.items()):
+            v = _scalarize_lifetime(val)
+            if v is None:
+                continue
+            rows.append((model, v))
+            print(f'  {model}: {v:.3f} days')
+        if rows:
+            vals = [v for _, v in rows]
+            print(f'  n={len(vals)}, mean={np.mean(vals):.3f} d, '
+                  f'median={np.median(vals):.3f} d, '
+                  f'min={np.min(vals):.3f} d, max={np.max(vals):.3f} d')
+        else:
+            print('  No finite global lifetimes available.')
+        return rows
+
+    # Fallback: unweighted mean of available regional seasonal lifetimes.
+    print('  No global region lifetimes; spatial-mean over available regions:')
+    model_vals = {}
+    for region, region_data in seasonal_dict.items():
+        for model, val in (region_data.get(var) or {}).items():
+            v = _scalarize_lifetime(val)
+            if v is None:
+                continue
+            model_vals.setdefault(model, []).append(v)
+    rows = []
+    for model in sorted(model_vals):
+        v = float(np.mean(model_vals[model]))
+        rows.append((model, v))
+        print(f'  {model}: {v:.3f} days (mean over {len(model_vals[model])} regions)')
+    if rows:
+        vals = [v for _, v in rows]
+        print(f'  n={len(vals)}, mean={np.mean(vals):.3f} d, '
+              f'median={np.median(vals):.3f} d')
+    else:
+        print('  No finite lifetimes available in any region.')
+    return rows
+
+
+def compare_emission_vs_deposition_lifetimes(
+    seasonal_dict,
+    regions=None,
+    load_key='load_BC_OA',
+    emi_key='emi_BC_OA',
+    dep_key='dep_BC_OA',
+    out_csv=None,
+):
+    """Side-by-side emission vs deposition lifetimes from aggregated load/flux.
+
+    Returns a DataFrame with per-model/region τ_emi, τ_dep, difference, and ratio.
+    Models missing any required flux for a method get NaN for that method (same
+    require_all semantics as the upstream summed products).
+    """
+    if regions is None:
+        regions = [r for r in REGIONS if r in seasonal_dict]
+    rows = []
+    for region in regions:
+        load = (seasonal_dict.get(region) or {}).get(load_key) or {}
+        emi = (seasonal_dict.get(region) or {}).get(emi_key) or {}
+        dep = (seasonal_dict.get(region) or {}).get(dep_key) or {}
+        models = sorted(set(load) | set(emi) | set(dep))
+        for model in models:
+            lt_emi = lt_dep = np.nan
+            if model in load and model in emi:
+                try:
+                    lt_emi = float(load[model] / (emi[model] * 3600 * 24))
+                except Exception:
+                    lt_emi = np.nan
+            if model in load and model in dep:
+                try:
+                    lt_dep = float(load[model] / (dep[model] * 3600 * 24))
+                except Exception:
+                    lt_dep = np.nan
+            if not (np.isfinite(lt_emi) or np.isfinite(lt_dep)):
+                continue
+            diff = lt_dep - lt_emi if (np.isfinite(lt_emi) and np.isfinite(lt_dep)) else np.nan
+            ratio = (
+                lt_dep / lt_emi
+                if (np.isfinite(lt_emi) and np.isfinite(lt_dep) and lt_emi != 0)
+                else np.nan
+            )
+            rows.append({
+                'region': region,
+                'model': model,
+                'lifetime_emission_days': lt_emi,
+                'lifetime_deposition_days': lt_dep,
+                'dep_minus_emi_days': diff,
+                'dep_over_emi': ratio,
+            })
+    df = pd.DataFrame(rows)
+    print('\n--- Emission vs deposition lifetime comparison ---')
+    if df.empty:
+        print('  No overlapping load/flux data to compare.')
+        return df
+    n_emi = int(df['lifetime_emission_days'].notna().sum())
+    n_dep = int(df['lifetime_deposition_days'].notna().sum())
+    n_both = int(
+        (df['lifetime_emission_days'].notna() & df['lifetime_deposition_days'].notna()).sum()
+    )
+    print(f'  Rows: {len(df)} (model×region)')
+    print(f'  Available emission-based:    {n_emi}')
+    print(f'  Available deposition-based:  {n_dep}')
+    print(f'  Available both methods:      {n_both}')
+    if n_both:
+        both = df.dropna(subset=['lifetime_emission_days', 'lifetime_deposition_days'])
+        print(f'  Mean τ_emi={both["lifetime_emission_days"].mean():.3f} d, '
+              f'τ_dep={both["lifetime_deposition_days"].mean():.3f} d, '
+              f'mean(dep−emi)={both["dep_minus_emi_days"].mean():.3f} d')
+    # Per-region model counts
+    for region in regions:
+        sub = df[df['region'] == region]
+        if sub.empty:
+            continue
+        print(f'  {region}: emi={sub["lifetime_emission_days"].notna().sum()}, '
+              f'dep={sub["lifetime_deposition_days"].notna().sum()}, '
+              f'both={(sub["lifetime_emission_days"].notna() & sub["lifetime_deposition_days"].notna()).sum()}')
+    missing_dep_models = sorted(
+        df.loc[df['lifetime_deposition_days'].isna() & df['lifetime_emission_days'].notna(), 'model']
+        .unique()
+        .tolist()
+    )
+    if missing_dep_models:
+        print(f'  Models with emission but no deposition lifetime (any region): '
+              f'{missing_dep_models}')
+    if out_csv is not None:
+        Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out_csv, index=False)
+        print(f'  Saved: {out_csv}')
+    return df
 
 
 def short_model_name(model):
@@ -136,8 +303,9 @@ def filter_lifetime_after_agg(monthly_dict, seasonal_dict, max_days=None, min_da
         return
     # Preserve unfiltered BC+OA lifetimes for diagnostics / decomp fallback.
     global lifetime_BC_OA_raw
-    lifetime_BC_OA_raw = {region: {} for region in REGIONS}
-    for region in REGIONS:
+    regions = list(seasonal_dict.keys()) if seasonal_dict else list(REGIONS)
+    lifetime_BC_OA_raw = {region: {} for region in regions}
+    for region in regions:
         for model, val in (seasonal_dict.get(region, {}).get('lifetime_BC_OA') or {}).items():
             try:
                 v = float(val) if not hasattr(val, 'values') else float(val.values)
@@ -146,7 +314,7 @@ def filter_lifetime_after_agg(monthly_dict, seasonal_dict, max_days=None, min_da
             lifetime_BC_OA_raw[region][model] = v
     for var in ['lifetime', 'lifetime_BC_OA']:
         for agg in (monthly_dict, seasonal_dict):
-            for region in REGIONS:
+            for region in agg:
                 if var not in agg[region]:
                     continue
                 for model, val in list(agg[region][var].items()):
@@ -157,7 +325,6 @@ def filter_lifetime_after_agg(monthly_dict, seasonal_dict, max_days=None, min_da
                     if (not np.isfinite(v)
                             or (max_days is not None and v > max_days)
                             or (min_days is not None and v < min_days)):
-                        
                         agg[region][var][model] = np.nan
 
 
@@ -246,6 +413,31 @@ def sum_datasets(model_data, keys, out_name, require_all=True):
     if not dsets:
         return None
     arrays = [d[list(d.data_vars)[0]] for d in dsets]
+    total = arrays[0].copy()
+    for a in arrays[1:]:
+        total = total + a
+    return total.to_dataset(name=out_name)
+
+
+def positive_deposition(da):
+    """Return deposition as a positive mass sink (handles signed fluxes)."""
+    return da.where(da > 0, -da)
+
+
+def sum_deposition_datasets(model_data, keys, out_name, require_all=True):
+    """Sum deposition species into a positive-sink Dataset.
+
+    Same require_all semantics as ``sum_datasets``: if any required species is
+    missing, return None so lifetime is skipped for that model (no partial sums).
+    Each component is converted to a positive sink before summing.
+    """
+    missing = [k for k in keys if model_data.get(k) is None]
+    if require_all and missing:
+        return None
+    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
+    if not dsets:
+        return None
+    arrays = [positive_deposition(d[list(d.data_vars)[0]]) for d in dsets]
     total = arrays[0].copy()
     for a in arrays[1:]:
         total = total + a
