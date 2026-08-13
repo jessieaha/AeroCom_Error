@@ -63,6 +63,7 @@ if str(py_dir) not in sys.path:
 import functions
 import cameo_toolbox as ct
 import aerocom_data
+import notebook_setup as setup
 
 print(f'Project root: {project_root}', flush=True)
 print(f'Python dir:   {py_dir}', flush=True)
@@ -93,6 +94,12 @@ if 'lifetime' in DERIVED_VAR_AFTER_AGG:
     LIFETIME_MIN_DAYS = None
     LIFETIME_MAX_DAYS = None
 
+# Post-aggregation lifetime filtering (box-budget outliers).
+POST_AGG_LIFETIME_MAX_DAYS = 15.0
+POST_AGG_LIFETIME_MIN_DAYS = 0.3
+# True: τ = load / deposition; False: τ = load / emission
+USE_DEPOSITION_FOR_LIFETIME = False
+
 INTERCEPT_0 = False
 POLDER_HOMOGENIZE = True
 MONTHLY_OUTPUT_MODELS = []
@@ -101,6 +108,10 @@ AMAZON_SOA_FRACTION = 0.52
 SAVE_FIGURE = True
 SAVE_CSV = True
 GAP_THRESHOLD_PCT = 20.0
+FIGURE_DIR = project_root / 'figure'
+TABLE_DIR = project_root / 'tables'
+FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+TABLE_DIR.mkdir(parents=True, exist_ok=True)
 
 SOURCE_REGIONS = ['africa', 'amazon', 'se_asia', 'boreal_na', 'eastern_siberia']
 OUTFLOW_REGION = 'outflow_af'
@@ -144,6 +155,11 @@ print(f'  INTERCEPT_0          = {INTERCEPT_0}', flush=True)
 print(f'  POLDER_HOMOGENIZE    = {POLDER_HOMOGENIZE}', flush=True)
 print(f'  INCLUDE_AMAZON_SOA   = {INCLUDE_AMAZON_SOA}', flush=True)
 print(f'  DERIVED_VAR_AFTER_AGG= {DERIVED_VAR_AFTER_AGG}', flush=True)
+print(f'  POST_AGG_LIFETIME    = [{POST_AGG_LIFETIME_MIN_DAYS}, {POST_AGG_LIFETIME_MAX_DAYS}] days',
+      flush=True)
+print(f'  USE_DEPOSITION_FOR_LIFETIME = {USE_DEPOSITION_FOR_LIFETIME}  '
+      f"({'load/deposition' if USE_DEPOSITION_FOR_LIFETIME else 'load/emission'})",
+      flush=True)
 print(f'  GAP_THRESHOLD_PCT    = {GAP_THRESHOLD_PCT}', flush=True)
 
 VARIABLES = [
@@ -178,13 +194,15 @@ print(f'Ensembles: full={len(models)}, paper={len(paper_models)}', flush=True)
 
 LOAD_VARS = ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss']
 EMI_VARS = ['emibc', 'emidust', 'emioa', 'emiso2', 'emiss']
+DEP_TOTAL_VARS = ['depbc', 'depdust', 'depoa', 'depso4', 'depss']
 BCOA_LOAD_VARS = ['loadbc', 'loadoa']
 BCOA_EMI_VARS = ['emibc', 'emioa']
+BCOA_DEP_VARS = ['depbc', 'depoa']
 LIFETIME_VARS = {'lifetime', 'lifetime_BC_OA'}
 
 variables_to_aggregate = [
     'MEC', 'AE', 'lifetime', 'lifetime_BC_OA', 'MAC', 'SSA',
-    'load_total', 'emi_total', 'load_BC_OA', 'emi_BC_OA',
+    'load_total', 'emi_total', 'dep_total', 'load_BC_OA', 'emi_BC_OA', 'dep_BC_OA',
     'emibc', 'emioa', 'precip', 'od550aer',
 ]
 
@@ -345,13 +363,31 @@ for m in models:
         except Exception as e:
             print(f'  Failed to normalise {m}/{var}: {e}', flush=True)
             normalized[var] = None
-    normalized['load_total'] = sum_datasets(normalized, LOAD_VARS, 'load_total')
-    normalized['emi_total'] = sum_datasets(normalized, EMI_VARS, 'emi_total')
-    normalized['load_BC_OA'] = sum_datasets(normalized, BCOA_LOAD_VARS, 'load_BC_OA')
-    normalized['emi_BC_OA'] = sum_datasets(normalized, BCOA_EMI_VARS, 'emi_BC_OA')
+    normalized['load_total'] = setup.sum_datasets(normalized, LOAD_VARS, 'load_total')
+    normalized['emi_total'] = setup.sum_datasets(normalized, EMI_VARS, 'emi_total')
+    normalized['load_BC_OA'] = setup.sum_datasets(
+        normalized, BCOA_LOAD_VARS, 'load_BC_OA', require_all=True
+    )
+    normalized['emi_BC_OA'] = setup.sum_datasets(
+        normalized, BCOA_EMI_VARS, 'emi_BC_OA', require_all=True
+    )
+    normalized['dep_total'] = setup.sum_deposition_datasets(
+        normalized, DEP_TOTAL_VARS, 'dep_total', require_all=True
+    )
+    normalized['dep_BC_OA'] = setup.sum_deposition_datasets(
+        normalized, BCOA_DEP_VARS, 'dep_BC_OA', require_all=True
+    )
+    if normalized['dep_BC_OA'] is None:
+        miss = [k for k in BCOA_DEP_VARS if normalized.get(k) is None]
+        print(f'  {m}: incomplete BC+OA deposition (missing {miss}); '
+              f'dep_BC_OA=None', flush=True)
     if normalized.get('precip') is not None:
         normalized['precip'] = normalize_precipitation_units(normalized['precip'])
     data[m] = normalized
+n_dep_bcoa = sum(1 for m in models if data[m].get('dep_BC_OA') is not None)
+n_dep_tot = sum(1 for m in models if data[m].get('dep_total') is not None)
+print(f'  dep_BC_OA available: {n_dep_bcoa}/{len(models)}', flush=True)
+print(f'  dep_total available: {n_dep_tot}/{len(models)}', flush=True)
 
 # -------------------------------------------------------------------------------
 # 3. Calculate derived variables (MEC, lifetime, AE, MAC, SSA)
@@ -478,36 +514,22 @@ model_seasonal = {
 
 
 def compute_derived_after_aggregation(monthly_dict, seasonal_dict):
-    """Paper Methods: tau = load/E and MEC = AOD/load after regional aggregation."""
+    """Paper Methods: tau = load/(E|dep) and MEC = AOD/load after regional aggregation."""
     def _safe_div(num, den, scale=1.0):
         try:
             return num / (den * scale)
         except Exception:
             return None
 
-    for agg in (monthly_dict, seasonal_dict):
-        for region in REGIONS:
-            if 'lifetime' in DERIVED_VAR_AFTER_AGG:
-                load = agg[region].get('load_total', {})
-                emi = agg[region].get('emi_total', {})
-                out = {}
-                for model in set(load) & set(emi):
-                    val = _safe_div(load[model], emi[model], 86400.0)
-                    if val is not None:
-                        out[model] = val
-                if out:
-                    agg[region]['lifetime'] = out
-            if 'lifetime_BC_OA' in DERIVED_VAR_AFTER_AGG or 'lifetime' in DERIVED_VAR_AFTER_AGG:
-                load = agg[region].get('load_BC_OA', {})
-                emi = agg[region].get('emi_BC_OA', {})
-                out = {}
-                for model in set(load) & set(emi):
-                    val = _safe_div(load[model], emi[model], 86400.0)
-                    if val is not None:
-                        out[model] = val
-                if out:
-                    agg[region]['lifetime_BC_OA'] = out
-            if 'MEC' in DERIVED_VAR_AFTER_AGG:
+    # Lifetimes via shared helper (respects USE_DEPOSITION_FOR_LIFETIME).
+    setup.compute_derived_after_aggregation(
+        monthly_dict, seasonal_dict, DERIVED_VAR_AFTER_AGG,
+        use_deposition_for_lifetime=USE_DEPOSITION_FOR_LIFETIME,
+    )
+
+    if 'MEC' in DERIVED_VAR_AFTER_AGG:
+        for agg in (monthly_dict, seasonal_dict):
+            for region in REGIONS:
                 aod = agg[region].get('od550aer', {})
                 load = agg[region].get('load_total', {})
                 out = {}
@@ -524,12 +546,19 @@ compute_derived_after_aggregation(model_monthly, model_seasonal)
 
 
 def apply_amazon_soa_aod(monthly_dict, seasonal_dict):
-    """Inflate Amazon OA emissions so SOA is AMAZON_SOA_FRACTION of total OA."""
+    """Inflate Amazon OA emissions so SOA is AMAZON_SOA_FRACTION of total OA.
+
+    When deposition-based lifetime is active, only emissions are adjusted;
+    lifetimes are not overwritten with an emission-based recompute.
+    """
     if not INCLUDE_AMAZON_SOA:
         print('\nAmazon SOA: SKIPPED', flush=True)
         return
     f = AMAZON_SOA_FRACTION
     print('\n--- Amazon SOA adjustment ---', flush=True)
+    if USE_DEPOSITION_FOR_LIFETIME:
+        print('  USE_DEPOSITION_FOR_LIFETIME=True: emissions adjusted, '
+              'deposition-based lifetime NOT overwritten.', flush=True)
     for agg in (monthly_dict, seasonal_dict):
         region = 'amazon'
         emibc = agg[region].get('emibc', {})
@@ -551,24 +580,51 @@ def apply_amazon_soa_aod(monthly_dict, seasonal_dict):
                 print(f'  SOA adjust failed for {model}: {e}', flush=True)
         agg[region]['emi_total'] = emi_total
         agg[region]['emi_BC_OA'] = emi_bcoa
-        for lt_name, load_name, emi_name in [
-            ('lifetime', 'load_total', 'emi_total'),
-            ('lifetime_BC_OA', 'load_BC_OA', 'emi_BC_OA'),
-        ]:
-            load = agg[region].get(load_name, {})
-            emi = agg[region].get(emi_name, {})
-            lt = {}
-            for model in set(load) & set(emi):
-                try:
-                    lt[model] = load[model] / (emi[model] * 3600 * 24)
-                except Exception:
-                    continue
-            if lt:
-                agg[region][lt_name] = {**agg[region].get(lt_name, {}), **lt}
+        if not USE_DEPOSITION_FOR_LIFETIME:
+            for lt_name, load_name, emi_name in [
+                ('lifetime', 'load_total', 'emi_total'),
+                ('lifetime_BC_OA', 'load_BC_OA', 'emi_BC_OA'),
+            ]:
+                load = agg[region].get(load_name, {})
+                emi = agg[region].get(emi_name, {})
+                lt = {}
+                for model in set(load) & set(emi):
+                    try:
+                        lt[model] = load[model] / (emi[model] * 3600 * 24)
+                    except Exception:
+                        continue
+                if lt:
+                    agg[region][lt_name] = {**agg[region].get(lt_name, {}), **lt}
         print(f'  Adjusted Amazon emissions for {n} models', flush=True)
 
 
 apply_amazon_soa_aod(model_monthly, model_seasonal)
+setup.filter_lifetime_after_agg(
+    model_monthly, model_seasonal,
+    POST_AGG_LIFETIME_MAX_DAYS, POST_AGG_LIFETIME_MIN_DAYS,
+)
+_method_label = 'load/deposition' if USE_DEPOSITION_FOR_LIFETIME else 'load/emission'
+if 'lifetime' in DERIVED_VAR_AFTER_AGG:
+    setup.print_global_lifetimes(
+        model_seasonal, var='lifetime',
+        method_label=f'lifetime total ({_method_label}, post-filter)',
+    )
+if 'lifetime_BC_OA' in DERIVED_VAR_AFTER_AGG or 'lifetime' in DERIVED_VAR_AFTER_AGG:
+    setup.print_global_lifetimes(
+        model_seasonal, var='lifetime_BC_OA',
+        method_label=f'lifetime_BC_OA ({_method_label}, post-filter)',
+    )
+
+# Diagnostic: emission vs deposition lifetimes (always both methods).
+_compare_regions = [r for r in (['global'] + SOURCE_REGIONS + [OUTFLOW_REGION]) if r in model_seasonal]
+lifetime_method_df = setup.compare_emission_vs_deposition_lifetimes(
+    model_seasonal,
+    regions=_compare_regions,
+    load_key='load_BC_OA',
+    emi_key='emi_BC_OA',
+    dep_key='dep_BC_OA',
+    out_csv=TABLE_DIR / 'AOD_lifetime_emission_vs_deposition_BC_OA.csv',
+)
 
 plot_regions = [r for r in REGIONS if r != 'global']
 
