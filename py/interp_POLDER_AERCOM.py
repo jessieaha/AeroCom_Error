@@ -40,7 +40,7 @@ model_dir = f'{project_root}/Data/AP3_processed_3hourly/'
 output_folder = f'{project_root}/Data/AP3_POLDER_Collocated'
 os.makedirs(output_folder, exist_ok=True)
 if spatial_temp_resample:
-    output_parquet = f'{output_folder}/POLDER_GRASP_coloc_{ROUND_TIME}_AP3_{YEAR}_lon0_{spatial_res_lon*10}_lat0_{spatial_res_lat*10}.parquet'
+    output_parquet = f'{output_folder}/POLDER_GRASP_coloc_{ROUND_TIME}_AP3_{YEAR}_lon{spatial_res_lon}_lat{spatial_res_lat}.parquet'
 else:
     output_parquet = f'{output_folder}/POLDER_GRASP_coloc_{YEAR}.parquet'
 # Mapping input NetCDF variables to final DataFrame columns
@@ -190,11 +190,11 @@ print(f"\n=> Total unique models found for collocation: {len(all_discovered_mode
 # =============================================================================
 # EXPORT MODEL NAMES TO A TEXT FILE
 # =============================================================================
-models_txt_path = os.path.join(polder_dir, f"discovered_models_{YEAR}.txt")
+models_txt_path = os.path.join(output_folder, f"discovered_models_{YEAR}.txt")
 with open(models_txt_path, "w") as f:
     for m in all_discovered_models:
         f.write(f"{m}\n")
-print(f"📝 Exported discovered model names to text file: {models_txt_path}")
+print(f"Exported discovered model names to text file: {models_txt_path}")
 
 if os.path.exists(output_parquet):
     os.remove(output_parquet)
