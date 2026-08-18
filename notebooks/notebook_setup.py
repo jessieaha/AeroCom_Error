@@ -19,6 +19,7 @@ if str(py_dir) not in sys.path:
     sys.path.insert(0, str(py_dir))
 sys.path.append(py_dir)
 import cameo_toolbox as ct
+import functions
 # ==============================================================================
 # GLOBAL CONFIGURATIONS
 # ==============================================================================
@@ -35,8 +36,9 @@ REGIONS = {
         'surface_type': 'land', 'lon_range': (287, 317), 'lat_range': (-17, -3),
         'time_slice': ('2010-07-01', '2010-10-31'), 'edge_weighted': False,
     },
+    # Nature / AOD paper box (Zhong et al.); same as cameo_toolbox._REGION_DEFINITIONS.
     'outflow_af': {
-        'surface_type': 'ocean', 'lon_range': (350, 15), 'lat_range': (-15, 0),
+        'surface_type': 'ocean', 'lon_range': (350, 8), 'lat_range': (-15, 3),
         'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': True,
     },
     'se_asia': {
@@ -65,6 +67,31 @@ REGIONS = {
         'time_slice': ('2010-08-01', '2010-11-15'), 'edge_weighted': False,
     }
 }
+
+
+def create_analysis_masks(template, region_names, surface_type=None):
+    """Build region masks for ``region_names`` using ``REGIONS`` lon/lat boxes.
+
+    Passes explicit ``lon_range``/``lat_range`` so regions absent from
+    ``cameo_toolbox._REGION_DEFINITIONS`` (e.g. se_asia, boreal_na) still work.
+    """
+    masks = {}
+    for name in region_names:
+        if name not in REGIONS:
+            raise KeyError(f'Region {name!r} not in notebook_setup.REGIONS')
+        cfg = REGIONS[name]
+        masks[name] = ct.create_region_mask(
+            template,
+            name=name,
+            lon_range=cfg['lon_range'],
+            lat_range=cfg['lat_range'],
+            surface_type=(
+                surface_type if surface_type is not None
+                else cfg.get('surface_type', 'all')
+            ),
+            mask_registry=masks,
+        )
+    return masks
 
 
 def aggregate_region(model_dict, var_name, region_name, masks, return_time_series=False, skipna=False):
@@ -139,6 +166,20 @@ def compute_derived_after_aggregation(
                 agg[region]['lifetime'] = _lifetime_from_load_flux(
                     load, flux, 'lifetime', region
                 )
+
+    # AOD notebook: post-aggregation mass extinction = AOD / load_total.
+    if 'MEC' in DERIVED_VAR_AFTER_AGG:
+        for agg in (monthly_dict, seasonal_dict):
+            for region in agg:
+                aod = agg[region].get('od550aer', {})
+                load = agg[region].get('load_total', {})
+                out = {}
+                for model in set(aod) & set(load):
+                    try:
+                        out[model] = aod[model] / load[model]
+                    except Exception as e:
+                        print(f'  Failed post-aggregation MEC for {model} {region}: {e}')
+                agg[region]['MEC'] = out
 
 
 def _scalarize_lifetime(val):

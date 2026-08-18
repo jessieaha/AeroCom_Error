@@ -95,7 +95,7 @@ if 'lifetime' in DERIVED_VAR_AFTER_AGG:
     LIFETIME_MAX_DAYS = None
 
 # Post-aggregation lifetime filtering (box-budget outliers).
-POST_AGG_LIFETIME_MAX_DAYS = 15.0
+POST_AGG_LIFETIME_MAX_DAYS = 30.0
 POST_AGG_LIFETIME_MIN_DAYS = 0.3
 # True: τ = load / deposition; False: τ = load / emission
 USE_DEPOSITION_FOR_LIFETIME = False
@@ -142,15 +142,8 @@ REGION_COLORS = {
 PAPER_LOO_R = {'MEC': 0.72, 'inv_lifetime': 0.78}
 
 
-def short_model_name(model):
-    """Compact tick label: strip common AeroCom CTRL suffixes."""
-    name = str(model)
-    for suffix in (
-        '_AP3-CTRL2016-PD', '_AP3-CTRL2016', '_AP3-CTRL-2010',
-        '_AP3-CTRL2019', '_AP3-CTRL', '-met2010',
-    ):
-        name = name.replace(suffix, '')
-    return name
+# Shared helpers (regions, aggregation, lifetime, labels) live in notebook_setup.
+short_model_name = setup.short_model_name
 
 
 print(f'  INTERCEPT_0          = {INTERCEPT_0}', flush=True)
@@ -209,133 +202,12 @@ variables_to_aggregate = [
     'emibc', 'emioa', 'precip', 'od550aer',
 ]
 
-REGIONS = {
-    'global': {
-        'surface_type': 'all', 'lon_range': (0, 360), 'lat_range': (-90, 90),
-        'time_slice': ('2010-01-01', '2010-12-31'), 'edge_weighted': False,
-    },
-    'africa': {
-        'surface_type': 'land', 'lon_range': (15, 37), 'lat_range': (-15, 0),
-        'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': False,
-    },
-    'amazon': {
-        'surface_type': 'land', 'lon_range': (287, 317), 'lat_range': (-17, -3),
-        'time_slice': ('2010-07-01', '2010-10-31'), 'edge_weighted': False,
-    },
-    'outflow_af': {
-        'surface_type': 'ocean', 'lon_range': (350, 8), 'lat_range': (-15, 3),
-        'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': True,
-    },
-    'se_asia': {
-        'surface_type': 'land', 'lon_range': (95, 125), 'lat_range': (-5, 15),
-        'time_slice': ('2010-03-01', '2010-03-31'), 'edge_weighted': False,
-    },
-    'boreal_na': {
-        'surface_type': 'land', 'lon_range': (242, 258), 'lat_range': (52, 63),
-        'time_slice': ('2010-06-01', '2010-08-31'), 'edge_weighted': False,
-    },
-    'eastern_siberia': {
-        'surface_type': 'land', 'lon_range': (120, 170), 'lat_range': (50, 65),
-        'time_slice': ('2010-07-01', '2010-07-31'), 'edge_weighted': False,
-    },
-    'west_russia': {
-        'surface_type': 'land', 'lon_range': (33, 52), 'lat_range': (51, 60),
-        'time_slice': ('2010-07-15', '2010-09-10'), 'edge_weighted': False,
-    },
-    'boreal_na_west': {
-        'surface_type': 'land', 'lon_range': (242, 258), 'lat_range': (52, 63),
-        'time_slice': ('2010-06-15', '2010-08-31'), 'edge_weighted': False,
-    },
-}
+# Region definitions shared with AAOD (notebook_setup.REGIONS).
+# Prefer setup.REGIONS everywhere; REGIONS alias kept for local cfg lookups.
+REGIONS = setup.REGIONS
 
 
-def normalize_dataset_time(ds, var_hint=None):
-    """Normalise the time coordinate of a dataset to first-of-month."""
-    if ds is None:
-        return None
-    if not list(ds.data_vars):
-        return None
-    var_name = list(ds.data_vars)[0]
-    da = ds[var_name]
-    if 'time' not in da.dims or len(da.time) == 0:
-        return ds
-    if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
-        try:
-            if hasattr(da.indexes['time'], 'to_datetimeindex'):
-                try:
-                    new_times = da.indexes['time'].to_datetimeindex().values
-                except OverflowError:
-                    new_times = np.array([
-                        np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
-                        for t in da.indexes['time']
-                    ])
-            else:
-                new_times = pd.to_datetime([str(t) for t in da.time.values]).values
-            da = da.assign_coords(time=new_times)
-        except Exception as e:
-            print(f'  Warning: cftime conversion failed for {var_hint}: {e}', flush=True)
-            return ds
-    da = functions.normalize_monthly_time(da)
-    return da.to_dataset(name=var_name)
-
-
-def sum_datasets(model_data, keys, out_name):
-    """Sum a list of variables (Datasets) into a new Dataset, skipping missing ones."""
-    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
-    if not dsets:
-        return None
-    arrays = [d[list(d.data_vars)[0]] for d in dsets]
-    total = arrays[0].copy()
-    for a in arrays[1:]:
-        total = total + a
-    return total.to_dataset(name=out_name)
-
-
-def normalize_precipitation_units(precip_ds):
-    """Convert model precipitation to mm day-1."""
-    if precip_ds is None:
-        return None
-    var_name = list(precip_ds.data_vars)[0]
-    da = precip_ds[var_name]
-    units = da.attrs.get('units', 'kg m-2 s-1').lower().replace(' ', '')
-    if units in ('kgm-2s-1', 'kgm^-2s^-1', 'kg/m2/s', 'kgm-2s-1'):
-        factor = 86400.0
-    elif units in ('gm-2s-1', 'gm^-2s^-1', 'g/m2/s', 'gm-2s-1'):
-        factor = 86.4
-    elif units in ('mmday-1', 'mm/day', 'mmday^-1', 'mmd-1'):
-        factor = 1.0
-    elif units in ('ms-1', 'm/s', 'm s-1'):
-        factor = 86400.0 * 1000.0
-    else:
-        factor = 86400.0
-    da = da * factor
-    try:
-        global_mean = float(da.mean().values)
-    except Exception:
-        global_mean = np.nan
-    if not np.isnan(global_mean) and global_mean > 100.0:
-        da = da / 1000.0
-    da.attrs['units'] = 'mm day-1'
-    return da.to_dataset(name=var_name)
-
-
-def filter_lifetime(da, model_name, var_name, max_days=None, min_days=None):
-    """Mask unrealistic lifetime values and return statistics."""
-    if da is None:
-        return None, {'n_total': 0, 'n_excluded': 0}
-    if max_days is None and min_days is None:
-        return da, {'n_total': int(da.size), 'n_excluded': 0}
-    bad = np.isnan(da) | np.isinf(da)
-    if max_days is not None:
-        bad = bad | (da > max_days)
-    if min_days is not None:
-        bad = bad | (da < min_days)
-    n_excluded = int(bad.sum())
-    if n_excluded:
-        print(f'  Lifetime filter: {model_name} {var_name} excluded {n_excluded:,} / {da.size:,} values',
-              flush=True)
-    return da.where(~bad), {'n_total': int(da.size), 'n_excluded': n_excluded}
-
+# Time / precip / lifetime filters: setup.normalize_* / setup.filter_lifetime
 
 def recompute_ae_440(model_data):
     """Recompute AE from od440/od550 when od440aer is present."""
@@ -362,7 +234,7 @@ for m in models:
         if raw_data[m].get(var) is None:
             continue
         try:
-            normalized[var] = normalize_dataset_time(raw_data[m][var], var_hint=f'{m}/{var}')
+            normalized[var] = setup.normalize_dataset_time(raw_data[m][var], var_hint=f'{m}/{var}')
         except Exception as e:
             print(f'  Failed to normalise {m}/{var}: {e}', flush=True)
             normalized[var] = None
@@ -385,7 +257,7 @@ for m in models:
         print(f'  {m}: incomplete BC+OA deposition (missing {miss}); '
               f'dep_BC_OA=None', flush=True)
     if normalized.get('precip') is not None:
-        normalized['precip'] = normalize_precipitation_units(normalized['precip'])
+        normalized['precip'] = setup.normalize_precipitation_units(normalized['precip'])
     data[m] = normalized
 n_dep_bcoa = sum(1 for m in models if data[m].get('dep_BC_OA') is not None)
 n_dep_tot = sum(1 for m in models if data[m].get('dep_total') is not None)
@@ -420,23 +292,30 @@ for m in models:
         ae_ds = aerocom_data.calculate_derived_var(data[m], m, 'AE')
         derived[m]['AE'] = None if ae_ds is None else ae_ds[list(ae_ds.data_vars)[0]]
 
-    if data[m].get('load_total') is not None and data[m].get('emi_total') is not None:
-        load_da = data[m]['load_total']['load_total']
-        emi_da = data[m]['emi_total']['emi_total']
-        lt = load_da / (emi_da * 3600 * 24)
-        lt, lt_stats = filter_lifetime(lt, m, 'lifetime', LIFETIME_MAX_DAYS, LIFETIME_MIN_DAYS)
-        derived[m]['lifetime'] = lt
-        lifetime_filter_stats.append({'model': m, 'var': 'lifetime', **lt_stats})
+    # Pre-aggregation lifetimes only when not deferred to post-agg (DERIVED_VAR_AFTER_AGG).
+    if 'lifetime' not in DERIVED_VAR_AFTER_AGG:
+        if data[m].get('load_total') is not None and data[m].get('emi_total') is not None:
+            load_da = data[m]['load_total']['load_total']
+            emi_da = data[m]['emi_total']['emi_total']
+            lt = load_da / (emi_da * 3600 * 24)
+            lt, lt_stats = setup.filter_lifetime(lt, m, 'lifetime', LIFETIME_MAX_DAYS, LIFETIME_MIN_DAYS)
+            derived[m]['lifetime'] = lt
+            lifetime_filter_stats.append({'model': m, 'var': 'lifetime', **lt_stats})
+        else:
+            derived[m]['lifetime'] = None
     else:
         derived[m]['lifetime'] = None
 
-    if data[m].get('load_BC_OA') is not None and data[m].get('emi_BC_OA') is not None:
-        load_da = data[m]['load_BC_OA']['load_BC_OA']
-        emi_da = data[m]['emi_BC_OA']['emi_BC_OA']
-        lt = load_da / (emi_da * 3600 * 24)
-        lt, lt_stats = filter_lifetime(lt, m, 'lifetime_BC_OA', LIFETIME_MAX_DAYS, LIFETIME_MIN_DAYS)
-        derived[m]['lifetime_BC_OA'] = lt
-        lifetime_filter_stats.append({'model': m, 'var': 'lifetime_BC_OA', **lt_stats})
+    if 'lifetime_BC_OA' not in DERIVED_VAR_AFTER_AGG and 'lifetime' not in DERIVED_VAR_AFTER_AGG:
+        if data[m].get('load_BC_OA') is not None and data[m].get('emi_BC_OA') is not None:
+            load_da = data[m]['load_BC_OA']['load_BC_OA']
+            emi_da = data[m]['emi_BC_OA']['emi_BC_OA']
+            lt = load_da / (emi_da * 3600 * 24)
+            lt, lt_stats = setup.filter_lifetime(lt, m, 'lifetime_BC_OA', LIFETIME_MAX_DAYS, LIFETIME_MIN_DAYS)
+            derived[m]['lifetime_BC_OA'] = lt
+            lifetime_filter_stats.append({'model': m, 'var': 'lifetime_BC_OA', **lt_stats})
+        else:
+            derived[m]['lifetime_BC_OA'] = None
     else:
         derived[m]['lifetime_BC_OA'] = None
 
@@ -465,88 +344,39 @@ template = data[sample_model]['od550aer'].isel(time=0)
 print(f'Template grid from {sample_model}: {template.dims}', flush=True)
 
 SURFACE_TYPE = None
-masks = {}
-for name in ANALYSIS_REGIONS:
-    cfg = REGIONS[name]
-    masks[name] = ct.create_region_mask(
-        template, name=name,
-        lon_range=cfg['lon_range'], lat_range=cfg['lat_range'],
-        surface_type=SURFACE_TYPE if SURFACE_TYPE is not None else cfg.get('surface_type', 'all'),
-        mask_registry=masks,
-    )
+masks = setup.create_analysis_masks(template, ANALYSIS_REGIONS, surface_type=SURFACE_TYPE)
 print('Regions created (ANALYSIS_REGIONS):', list(masks.keys()), flush=True)
 
-
-def aggregate_region(model_dict, var_name, region_name, return_time_series=False, skipna=False):
-    """Spatially aggregate var_name for every model."""
-    cfg = REGIONS[region_name]
-    result = {}
-    for model, model_data in model_dict.items():
-        if var_name not in model_data or model_data[var_name] is None:
-            continue
-        try:
-            val = ct.regional_aggregate(
-                model_data[var_name], masks[region_name],
-                spatial='mean', edge_weighted=cfg['edge_weighted'],
-                time_slice=cfg['time_slice'], temporal='mean',
-                return_time_series=return_time_series,
-                skipna=skipna,
-            )
-            result[model] = val
-        except Exception as e:
-            print(f'  Aggregation failed for {var_name} {model} {region_name}: {e}', flush=True)
-    return result
-
+# Exclude post-aggregation-only derived vars from the spatial aggregate loop.
+_vars_to_agg = [v for v in variables_to_aggregate if v not in DERIVED_VAR_AFTER_AGG]
 
 model_monthly = {
     region: {
-        var: aggregate_region(data_derived, var, region, return_time_series=True,
-                              skipna=(var in LIFETIME_VARS))
-        for var in variables_to_aggregate
+        var: setup.aggregate_region(
+            data_derived, var, region, masks, return_time_series=True,
+            skipna=(var in LIFETIME_VARS),
+        )
+        for var in _vars_to_agg
     }
     for region in ANALYSIS_REGIONS
 }
 
 model_seasonal = {
     region: {
-        var: aggregate_region(data_derived, var, region, return_time_series=False,
-                              skipna=(var in LIFETIME_VARS))
-        for var in variables_to_aggregate
+        var: setup.aggregate_region(
+            data_derived, var, region, masks, return_time_series=False,
+            skipna=(var in LIFETIME_VARS),
+        )
+        for var in _vars_to_agg
     }
     for region in ANALYSIS_REGIONS
 }
 
-
-def compute_derived_after_aggregation(monthly_dict, seasonal_dict):
-    """Paper Methods: tau = load/(E|dep) and MEC = AOD/load after regional aggregation."""
-    def _safe_div(num, den, scale=1.0):
-        try:
-            return num / (den * scale)
-        except Exception:
-            return None
-
-    # Lifetimes via shared helper (respects USE_DEPOSITION_FOR_LIFETIME).
-    setup.compute_derived_after_aggregation(
-        monthly_dict, seasonal_dict, DERIVED_VAR_AFTER_AGG,
-        use_deposition_for_lifetime=USE_DEPOSITION_FOR_LIFETIME,
-    )
-
-    if 'MEC' in DERIVED_VAR_AFTER_AGG:
-        for agg in (monthly_dict, seasonal_dict):
-            for region in agg:
-                aod = agg[region].get('od550aer', {})
-                load = agg[region].get('load_total', {})
-                out = {}
-                for model in set(aod) & set(load):
-                    val = _safe_div(aod[model], load[model], 1.0)
-                    if val is not None:
-                        out[model] = val
-                if out:
-                    agg[region]['MEC'] = out
-    print(f'\nPost-aggregation derived vars applied: {DERIVED_VAR_AFTER_AGG}', flush=True)
-
-
-compute_derived_after_aggregation(model_monthly, model_seasonal)
+setup.compute_derived_after_aggregation(
+    model_monthly, model_seasonal, DERIVED_VAR_AFTER_AGG,
+    use_deposition_for_lifetime=USE_DEPOSITION_FOR_LIFETIME,
+)
+print(f'\nPost-aggregation derived vars applied: {DERIVED_VAR_AFTER_AGG}', flush=True)
 
 
 def apply_amazon_soa_aod(monthly_dict, seasonal_dict):
@@ -886,24 +716,45 @@ def get_obs_constraints(model_seasonal_dict, ens_models):
 
 
 def build_reg_df(model_list):
-    """Build regression dataframe for a model subset."""
+    """Build regression dataframe for a model subset.
+
+    Rows are kept whenever lifetime + precip are finite so precip–1/τ plots
+    are not limited by missing MEC/AE/AOD. Optics fields may be NaN; MEC and
+    precip+AE fits use dropna on their own predictors.
+    """
     rows = []
     for region in ANALYSIS_REGIONS:
         for model in model_list:
-            mec = model_seasonal[region]['MEC'].get(model)
-            ae = model_seasonal[region]['AE'].get(model)
             lt = model_seasonal[region]['lifetime'].get(model)
             precip = model_seasonal[region]['precip'].get(model)
-            aod = model_seasonal[region]['od550aer'].get(model)
-            if not all(v is not None for v in [mec, ae, lt, precip, aod]):
+            if lt is None or precip is None:
                 continue
             if not np.isfinite(float(lt)):
                 continue
+            try:
+                precip_f = float(precip)
+            except Exception:
+                continue
+            if not np.isfinite(precip_f):
+                continue
+
+            def _opt_float(v):
+                if v is None:
+                    return np.nan
+                try:
+                    x = float(v)
+                    return x if np.isfinite(x) else np.nan
+                except Exception:
+                    return np.nan
+
+            mec = _opt_float(model_seasonal[region]['MEC'].get(model))
+            ae = _opt_float(model_seasonal[region]['AE'].get(model))
+            aod = _opt_float(model_seasonal[region]['od550aer'].get(model))
             rows.append({
                 'region': region, 'model': model,
-                'MEC': float(mec), 'AE': float(ae),
+                'MEC': mec, 'AE': ae,
                 'lifetime': float(lt), 'inv_lifetime': 1.0 / float(lt),
-                'precip': float(precip), 'AOD': float(aod),
+                'precip': precip_f, 'AOD': aod,
             })
     return pd.DataFrame(rows)
 
