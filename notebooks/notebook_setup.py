@@ -38,7 +38,7 @@ REGIONS = {
     },
     # Nature / AOD paper box (Zhong et al.); same as cameo_toolbox._REGION_DEFINITIONS.
     'outflow_af': {
-        'surface_type': 'ocean', 'lon_range': (350, 8), 'lat_range': (-15, 3),
+        'surface_type': 'ocean', 'lon_range': (350, 15), 'lat_range': (-15, 0),
         'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': True,
     },
     'se_asia': {
@@ -60,7 +60,7 @@ REGIONS = {
     'boreal_na_west': {
         'surface_type': 'land', 'lon_range': (242, 258), 'lat_range': (52, 63),
         'time_slice': ('2010-06-15', '2010-08-31'), 'edge_weighted': False,
-    },
+    },  
     'indonesia_peatland': {
         'surface_type': 'land',
         'lon_range': (98, 118), 'lat_range': (-5, 5),
@@ -342,7 +342,7 @@ def filter_lifetime_after_agg(monthly_dict, seasonal_dict, max_days=None, min_da
     """Mask unphysical after-aggregation lifetime values with NaN."""
     if max_days is None and min_days is None:
         return
-    # Preserve unfiltered BC+OA lifetimes for diagnostics / decomp fallback.
+    # Preserve unfiltered BC+OA lifetimes for diagnostics / sensitivity.
     global lifetime_BC_OA_raw
     regions = list(seasonal_dict.keys()) if seasonal_dict else list(REGIONS)
     lifetime_BC_OA_raw = {region: {} for region in regions}

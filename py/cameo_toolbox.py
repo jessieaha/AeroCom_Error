@@ -227,6 +227,33 @@ from cartopy.mpl.geoaxes import GeoAxes
 from typing import List, Optional, Union, Tuple, Literal
 from mpl_toolkits.axes_grid1 import ImageGrid
 
+
+def _monotonic_lon(lon):
+    """Unwrap a 1-D longitude vector that was concatenated across Greenwich (0–360)."""
+    lon = np.asarray(lon, dtype=float)
+    if lon.ndim != 1 or lon.size < 2:
+        return lon
+    jumps = np.where(np.diff(lon) < -180.0)[0]
+    if not jumps.size:
+        return lon
+    lon = lon.copy()
+    lon[jumps[0] + 1:] += 360.0
+    if np.nanmin(lon) > 180.0:
+        lon -= 360.0
+    return lon
+
+
+def _da_lon_lat(obj):
+    """Return (lon, lat) arrays from an xarray object, or (None, None)."""
+    if obj is None or not hasattr(obj, 'coords'):
+        return None, None
+    lon_c = obj.coords.get('lon', obj.coords.get('longitude'))
+    lat_c = obj.coords.get('lat', obj.coords.get('latitude'))
+    lon = None if lon_c is None else np.asarray(lon_c.values)
+    lat = None if lat_c is None else np.asarray(lat_c.values)
+    return lon, lat
+
+
 def uba_map_flex(
     data: Optional[Union[xr.Dataset, xr.DataArray, dict]] = None, # Added dict support
     lon: Optional[np.ndarray] = None, 
@@ -264,22 +291,30 @@ def uba_map_flex(
 ):
     # --- 1. Robust Data Extraction ---
     data_list = []
+    lon_list = []
+    lat_list = []
     
     # Handle Dictionary Input
     if isinstance(data, dict):
         keys = list(data.keys())
         first_val = data[keys[0]]
         
-        # Pull coordinates from first item if it's an xarray object
-        if lon is None or lat is None:
-            if hasattr(first_val, 'coords'):
-                lon = first_val.coords.get('lon', first_val.coords.get('longitude')).values
-                lat = first_val.coords.get('lat', first_val.coords.get('latitude')).values
+        # Pull default coordinates from first item if it's an xarray object
+        default_lon, default_lat = lon, lat
+        if default_lon is None or default_lat is None:
+            flon, flat = _da_lon_lat(first_val)
+            if default_lon is None:
+                default_lon = flon
+            if default_lat is None:
+                default_lat = flat
         
-        # Convert all dict values to numpy
+        # Convert all dict values to numpy; keep per-panel lon/lat when present.
         for k in keys:
             val = data[k]
             data_list.append(val.values if hasattr(val, 'values') else np.asarray(val))
+            lon_i, lat_i = _da_lon_lat(val)
+            lon_list.append(default_lon if lon_i is None else lon_i)
+            lat_list.append(default_lat if lat_i is None else lat_i)
         
         # Use keys as titles if no title provided
         if not title:
@@ -309,6 +344,10 @@ def uba_map_flex(
             data_list = [np.asarray(a) for a in c_array]
         else:
             data_list = [np.asarray(c_array)]
+
+    if not lon_list:
+        lon_list = [lon] * len(data_list)
+        lat_list = [lat] * len(data_list)
 
     # --- 2. Color Scaling Logic ---
     # Filter for finite numbers to avoid the TypeError
@@ -358,12 +397,37 @@ def uba_map_flex(
 
     ncols = min(3, num_panels)
     nrows = int(np.ceil(num_panels / ncols))
+
+    # Different regional subsets have different lon/lat lengths; sharing axes
+    # would force one panel's limits (and historically one panel's coords) onto all.
+    grid_shapes = [(np.shape(lo) if lo is not None else None,
+                    np.shape(la) if la is not None else None)
+                   for lo, la in zip(lon_list, lat_list)]
+    distinct_grids = len(grid_shapes) > 1 and any(s != grid_shapes[0] for s in grid_shapes[1:])
+    share_axes = not (isinstance(extent, dict) or distinct_grids)
     
+    # Leave figure margins for lat/lon tick labels and the colorbar so panels
+    # are not pushed left/clipped in notebook output (esp. with gridline=True).
+    # right_m is intentionally larger than a bare edge margin because the
+    # colorbar lives *inside* the rect; this keeps the map columns visually
+    # centred relative to the y-axis label space on the left.
+    left_m  = 0.12 if gridline else 0.05
+    bottom_m = 0.10 if gridline else 0.07
+    right_m  = 0.04  # colorbar is inside rect; this is just the figure-edge gap
+    top_m    = 0.06
+    width  = max(0.60, 1.0 - left_m - right_m)
+    height = max(0.60, 1.0 - bottom_m - top_m)
+    rect = [left_m, bottom_m, width, height]
+    axes_pad = (1.0, 0.50) if (gridline and num_panels > 1) else 0.45
+
     fig = plt.figure(figsize=(figsize_per_panel[0] * ncols, figsize_per_panel[1] * nrows))
-    grid = ImageGrid(fig, 111, nrows_ncols=(nrows, ncols), axes_pad=0.5,
+    # aspect=False: GeoAxes + ImageGrid aspect=True often shrinks/shifts the map
+    # left so only the colorbar remains visible in notebook / tight saves.
+    grid = ImageGrid(fig, rect, nrows_ncols=(nrows, ncols), axes_pad=axes_pad,
                      cbar_mode=cbar_mode if num_panels > 1 else "single",
                      cbar_location="right" if cbar_orientation == "vertical" else "bottom",
-                     cbar_size=cbar_size, cbar_pad=cbar_pad, share_all=True,
+                     cbar_size=cbar_size, cbar_pad=cbar_pad, share_all=share_axes,
+                     aspect=False,
                      axes_class=(GeoAxes, dict(projection=proj)))
 
     # --- 4. Plotting Loop ---
@@ -374,7 +438,10 @@ def uba_map_flex(
 
     for i, data_val in enumerate(data_list):
         ax = grid[i]
-        mesh = ax.pcolormesh(lon, lat, data_val, transform=ccrs.PlateCarree(), 
+        lon_i = _monotonic_lon(lon_list[i] if lon_list[i] is not None else lon)
+        lat_i = np.asarray(lat_list[i] if lat_list[i] is not None else lat)
+        mesh = ax.pcolormesh(lon_i, lat_i, np.squeeze(np.asarray(data_val)),
+                             transform=ccrs.PlateCarree(),
                              cmap=cmap, norm=norm, shading='auto')
 
         try:
@@ -417,7 +484,10 @@ def uba_map_flex(
         if panel_extent == 'global':
             ax.set_global()
         elif panel_extent == 'data':
-            ax.set_extent([np.nanmin(lon), np.nanmax(lon), np.nanmin(lat), np.nanmax(lat)], crs=ccrs.PlateCarree())
+            ax.set_extent(
+                [np.nanmin(lon_i), np.nanmax(lon_i), np.nanmin(lat_i), np.nanmax(lat_i)],
+                crs=ccrs.PlateCarree(),
+            )
         else:
             ext = list(panel_extent)
             # Cartopy expects monotonic longitudes; unwrap dateline-crossing windows.
@@ -425,23 +495,70 @@ def uba_map_flex(
                 ext[0] -= 360
             ax.set_extent(ext, crs=ccrs.PlateCarree())
 
+        # Centre the map within its ImageGrid cell.  When aspect=False is set on
+        # the grid but GeoAxes still enforces its own aspect ratio, any leftover
+        # space defaults to a west/left anchor, shifting the visible map left.
+        ax.set_anchor('C')
+
         ax.set_title(titles[i], fontsize=title_fontsize)
 
-        # --- NEW: axis labels (optional) ---
-        # `labels` can be a string (applies to both x and y for quick annotation),
-        # or a tuple/list like (xlabel, ylabel).
-        if labels:
+        # Lat/lon gridlines with degree labels (PlateCarree coords).
+        # Only draw axis labels on edge panels: latitude labels on the leftmost
+        # column and longitude labels on the bottom row.  Drawing labels on
+        # every panel crowds the axes_pad gaps and forces ImageGrid to shift the
+        # map axes left to make room.
+        if gridline:
+            col_idx = i % ncols
+            row_idx = i // ncols
+            try:
+                gl = ax.gridlines(
+                    draw_labels=True,
+                    linewidth=0.4,
+                    alpha=0.5,
+                    linestyle='--',
+                    x_inline=False,
+                    y_inline=False,
+                )
+                gl.top_labels = False
+                gl.right_labels = False
+                gl.left_labels = (col_idx == 0)
+                gl.bottom_labels = (row_idx == nrows - 1)
+                try:
+                    gl.xlabel_style = {'size': max(label_fontsize - 1, 7)}
+                    gl.ylabel_style = {'size': max(label_fontsize - 1, 7)}
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # Axis labels (optional). When gridlines already draw degree labels,
+        # skip set_xlabel/set_ylabel — they shrink Cartopy axes and shove the
+        # map toward the left edge of the figure.
+        if labels and not gridline:
             if isinstance(labels, (tuple, list)) and len(labels) == 2:
                 ax.set_xlabel(labels[0], fontsize=label_fontsize)
                 ax.set_ylabel(labels[1], fontsize=label_fontsize)
-            elif isinstance(labels, str):
+            elif isinstance(labels, str) and labels.strip():
                 ax.set_xlabel(labels, fontsize=label_fontsize)
                 ax.set_ylabel(labels, fontsize=label_fontsize)
 
         # colorbar
         if cbar_mode == "each" or (cbar_mode == "single" and i == num_panels - 1):
             cb_ax = grid.cbar_axes[i]
-            ext_type = cbar_extend if cbar_extend != 'auto' else 'both'
+            # True auto-extend from data vs plot limits when requested.
+            if cbar_extend == 'auto':
+                below = bool(np.nanmin(data_val) < plot_vmin - 1e-15) if np.size(data_val) else False
+                above = bool(np.nanmax(data_val) > plot_vmax + 1e-15) if np.size(data_val) else False
+                if below and above:
+                    ext_type = 'both'
+                elif below:
+                    ext_type = 'min'
+                elif above:
+                    ext_type = 'max'
+                else:
+                    ext_type = 'neither'
+            else:
+                ext_type = cbar_extend
             cb = plt.colorbar(mesh, cax=cb_ax, orientation=cbar_orientation, extend=ext_type)
 
             # --- NEW: colorbar label/title ---
@@ -459,20 +576,21 @@ def uba_map_flex(
                     cb.ax.xaxis.set_major_formatter(formatter)
                 else:
                     cb.ax.yaxis.set_major_formatter(formatter)
-
+su
             if boundaries is not None and cbar_tick_mode == "bounds":
                 cb.set_ticks(boundaries)
 
-        # if cbar_mode == "each" or (cbar_mode == "single" and i == num_panels - 1):
-        #     cb_ax = grid.cbar_axes[i]
-        #     ext_type = cbar_extend if cbar_extend != 'auto' else 'both'
-        #     cb = plt.colorbar(mesh, cax=cb_ax, orientation=cbar_orientation, extend=ext_type)
-        #     if cbar_tick_format:
-        #         cb.ax.yaxis.set_major_formatter(mticker.FormatStrFormatter(f'%{cbar_tick_format}'))
-        #     if boundaries is not None and cbar_tick_mode == "bounds":
-        #         cb.set_ticks(boundaries)
+    # Hide unused grid slots (when num_panels doesn't fill the last row).
+    # Visible empty cells on the right make the filled panels look left-shifted.
+    for j in range(num_panels, nrows * ncols):
+        grid[j].set_visible(False)
+        if j < len(grid.cbar_axes):
+            grid.cbar_axes[j].set_visible(False)
 
-    if savefile: plt.savefig(savefile, bbox_inches='tight', dpi=300)
+    # Avoid bbox_inches='tight' here — Cartopy projections + gridline labels
+    # confuse the tight bbox and often crop the map, leaving only the colorbar.
+    if savefile:
+        plt.savefig(savefile, dpi=300)
     if show:
         plt.show()
         return None
