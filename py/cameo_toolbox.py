@@ -576,7 +576,6 @@ def uba_map_flex(
                     cb.ax.xaxis.set_major_formatter(formatter)
                 else:
                     cb.ax.yaxis.set_major_formatter(formatter)
-su
             if boundaries is not None and cbar_tick_mode == "bounds":
                 cb.set_ticks(boundaries)
 
