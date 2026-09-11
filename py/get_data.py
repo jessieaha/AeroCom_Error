@@ -105,11 +105,12 @@ if temporal == 'monthly':
     dir_secondary = f"{project_root}/Data/AEROCOM_III"
 
     VARIABLES = (
-        "abs550aer", "depbc", "depdust", "depoa", "depso2", "depso4", "depss",
-        "emibc", "emidust", "emioa", "emiso2", "emiss", "loadbc", "loaddust",
-        "loadoa", "loadso2", "loadso4", "loadss", "od440aer", "od550aer",
-        "od870aer", "od865aer", "od550bc", "od550dust", "od550oa", "od550so4", "od550ss",
-        "precip"
+        # "abs550aer", "depbc", "depdust", "depoa", "depso2", "depso4", "depss",
+        # "emibc", "emidust", "emioa", "emiso2", "emiss", "loadbc", "loaddust",
+        # "loadoa", "loadso2", "loadso4", "loadss", "od440aer", "od550aer",
+        # "od870aer", "od865aer", "od550bc", "od550dust", "od550oa", "od550so4", "od550ss",
+        # "precip"
+        "dryss","wetss","dryso4","wetso4"
     )
 
     # -------------------------------------------------------------------------

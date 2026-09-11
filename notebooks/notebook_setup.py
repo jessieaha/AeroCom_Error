@@ -6,6 +6,7 @@ import glob
 
 import warnings
 from pathlib import Path
+from typing import Any, Dict, Mapping, Tuple
 
 import numpy as np
 import pandas as pd
@@ -69,7 +70,189 @@ REGIONS = {
 }
 
 
-def create_analysis_masks(template, region_names, surface_type=None):
+def _is_agg_frame(obj):
+    return isinstance(obj, pd.DataFrame) and {'region', 'model'}.issubset(set(obj.columns))
+
+
+def _as_scalar(value):
+    if value is None:
+        return np.nan
+    try:
+        if hasattr(value, 'values') and not isinstance(value, (pd.Series, pd.DataFrame)):
+            arr = np.asarray(value.values)
+            if arr.size == 0:
+                return np.nan
+            return float(np.nanmean(arr))
+        return float(value)
+    except Exception:
+        return np.nan
+
+
+def _series_from_monthly_value(value):
+    """Normalize monthly aggregated values to a pandas Series indexed by month."""
+    if value is None:
+        return pd.Series(dtype=float)
+
+    if isinstance(value, xr.Dataset):
+        if not value.data_vars:
+            return pd.Series(dtype=float)
+        value = value[list(value.data_vars)[0]]
+
+    if isinstance(value, xr.DataArray):
+        if 'time' not in value.dims:
+            v = _as_scalar(value)
+            return pd.Series(dtype=float) if not np.isfinite(v) else pd.Series([v])
+        da = value
+        if da.ndim > 1:
+            non_time_dims = [d for d in da.dims if d != 'time']
+            if non_time_dims:
+                da = da.mean(dim=non_time_dims, skipna=True)
+        vals = np.asarray(da.values).reshape(-1)
+        times = pd.to_datetime(np.asarray(da['time'].values), errors='coerce')
+        idx = pd.PeriodIndex(times, freq='M')
+        return pd.Series(vals, index=idx, dtype=float)
+
+    if isinstance(value, pd.Series):
+        s = pd.to_numeric(value, errors='coerce')
+        if isinstance(s.index, pd.PeriodIndex):
+            if s.index.freq is None:
+                s.index = pd.PeriodIndex(s.index.astype(str), freq='M')
+            return s.astype(float)
+        dt = pd.to_datetime(s.index, errors='coerce')
+        return pd.Series(s.values, index=pd.PeriodIndex(dt, freq='M'), dtype=float)
+
+    if isinstance(value, Mapping):
+        if not value:
+            return pd.Series(dtype=float)
+        idx = pd.PeriodIndex(pd.to_datetime(list(value.keys()), errors='coerce'), freq='M')
+        vals = pd.to_numeric(list(value.values()), errors='coerce')
+        return pd.Series(vals, index=idx, dtype=float)
+
+    v = _as_scalar(value)
+    return pd.Series(dtype=float) if not np.isfinite(v) else pd.Series([v])
+
+
+def seasonal_dict_to_dataframe(model_seasonal):
+    """
+    Convert dict[region][variable][model] -> DataFrame with columns:
+    region, model, <all variables>.
+    """
+    rows = {}
+    for region, var_map in (model_seasonal or {}).items():
+        for var, model_map in (var_map or {}).items():
+            for model, value in (model_map or {}).items():
+                key = (str(region), str(model))
+                if key not in rows:
+                    rows[key] = {'region': str(region), 'model': str(model)}
+                rows[key][str(var)] = _as_scalar(value)
+    if not rows:
+        return pd.DataFrame(columns=['region', 'model'])
+    df = pd.DataFrame(rows.values())
+    return df.sort_values(['region', 'model']).reset_index(drop=True)
+
+
+def seasonal_dataframe_to_dict(df):
+    """Convert seasonal DataFrame back to dict[region][variable][model]."""
+    if df is None or df.empty:
+        return {}
+    required = {'region', 'model'}
+    if not required.issubset(df.columns):
+        raise ValueError("Seasonal DataFrame must include 'region' and 'model' columns.")
+    value_cols = [c for c in df.columns if c not in ('region', 'model')]
+    out = {}
+    for _, row in df.iterrows():
+        region = str(row['region'])
+        model = str(row['model'])
+        out.setdefault(region, {})
+        for var in value_cols:
+            out[region].setdefault(var, {})
+            out[region][var][model] = row[var]
+    return out
+
+
+def monthly_dict_to_dataframe(model_monthly, month_col='month'):
+    """
+    Convert dict[region][variable][model->timeseries] -> DataFrame with columns:
+    region, model, month, <all variables>.
+    """
+    rows = []
+    for region, var_map in (model_monthly or {}).items():
+        reg_model_month = {}
+        for var, model_map in (var_map or {}).items():
+            for model, value in (model_map or {}).items():
+                s = _series_from_monthly_value(value)
+                if s.empty:
+                    continue
+                for period, v in s.items():
+                    key = (str(region), str(model), str(period))
+                    if key not in reg_model_month:
+                        reg_model_month[key] = {
+                            'region': str(region),
+                            'model': str(model),
+                            month_col: str(period),
+                        }
+                    reg_model_month[key][str(var)] = _as_scalar(v)
+        rows.extend(reg_model_month.values())
+    if not rows:
+        return pd.DataFrame(columns=['region', 'model', month_col])
+    df = pd.DataFrame(rows)
+    if month_col in df.columns:
+        df[month_col] = pd.PeriodIndex(df[month_col].astype(str), freq='M')
+    return df.sort_values(['region', 'model', month_col]).reset_index(drop=True)
+
+
+def monthly_dataframe_to_dict(df, month_col='month'):
+    """Convert monthly DataFrame back to dict[region][variable][model->pd.Series]."""
+    if df is None or df.empty:
+        return {}
+    required = {'region', 'model', month_col}
+    if not required.issubset(df.columns):
+        raise ValueError(
+            f"Monthly DataFrame must include 'region', 'model', and '{month_col}' columns."
+        )
+    value_cols = [c for c in df.columns if c not in ('region', 'model', month_col)]
+    out = {}
+    work = df.copy()
+    if not isinstance(work[month_col].dtype, pd.PeriodDtype):
+        work[month_col] = pd.PeriodIndex(pd.to_datetime(work[month_col], errors='coerce'), freq='M')
+    for (region, model), g in work.groupby(['region', 'model'], sort=False):
+        g = g.sort_values(month_col)
+        idx = pd.PeriodIndex(g[month_col].astype(str), freq='M')
+        for var in value_cols:
+            vals = pd.to_numeric(g[var], errors='coerce').to_numpy(dtype=float)
+            out.setdefault(str(region), {}).setdefault(var, {})[str(model)] = pd.Series(vals, index=idx)
+    return out
+
+
+def convert_aggregation_to_dataframes(model_monthly, model_seasonal, month_col='month'):
+    """Return (monthly_df, seasonal_df) from standard nested dict aggregations."""
+    return (
+        monthly_dict_to_dataframe(model_monthly, month_col=month_col),
+        seasonal_dict_to_dataframe(model_seasonal),
+    )
+
+
+def _coerce_agg_pair(monthly_obj, seasonal_obj, month_col='month'):
+    """
+    Coerce monthly/seasonal objects to dict form for internal calculations.
+    Returns (monthly_dict, seasonal_dict, monthly_was_df, seasonal_was_df).
+    """
+    monthly_was_df = _is_agg_frame(monthly_obj)
+    seasonal_was_df = _is_agg_frame(seasonal_obj)
+    monthly_dict = monthly_dataframe_to_dict(monthly_obj, month_col=month_col) if monthly_was_df else monthly_obj
+    seasonal_dict = seasonal_dataframe_to_dict(seasonal_obj) if seasonal_was_df else seasonal_obj
+    return monthly_dict, seasonal_dict, monthly_was_df, seasonal_was_df
+
+
+def _restore_agg_object(obj_dict, was_df, is_monthly, month_col='month'):
+    if not was_df:
+        return obj_dict
+    if is_monthly:
+        return monthly_dict_to_dataframe(obj_dict, month_col=month_col)
+    return seasonal_dict_to_dataframe(obj_dict)
+
+
+def create_analysis_masks(template, region_names, region = REGIONS , surface_type=None):
     """Build region masks for ``region_names`` using ``REGIONS`` lon/lat boxes.
 
     Passes explicit ``lon_range``/``lat_range`` so regions absent from
@@ -77,9 +260,9 @@ def create_analysis_masks(template, region_names, surface_type=None):
     """
     masks = {}
     for name in region_names:
-        if name not in REGIONS:
+        if name not in region:
             raise KeyError(f'Region {name!r} not in notebook_setup.REGIONS')
-        cfg = REGIONS[name]
+        cfg = region[name]
         masks[name] = ct.create_region_mask(
             template,
             name=name,
@@ -94,9 +277,10 @@ def create_analysis_masks(template, region_names, surface_type=None):
     return masks
 
 
-def aggregate_region(model_dict, var_name, region_name, masks, return_time_series=False, skipna=False):
+
+def aggregate_region(model_dict, var_name, region_name, masks, region = REGIONS ,return_time_series=False, skipna=False):
     """Spatially aggregate `var_name` for every model."""
-    cfg = REGIONS[region_name]
+    cfg = region[region_name]
     result = {}
     for model, model_data in model_dict.items():
         if var_name not in model_data or model_data[var_name] is None:
@@ -131,6 +315,7 @@ def compute_derived_after_aggregation(
     seasonal_dict,
     DERIVED_VAR_AFTER_AGG,
     use_deposition_for_lifetime=False,
+    month_col='month',
 ):
     """Compute lifetime-like variables from aggregated load/(emission|deposition).
 
@@ -141,6 +326,10 @@ def compute_derived_after_aggregation(
     Regions are taken from the aggregation dict keys so callers with a local
     REGIONS map (e.g. AOD notebook) are not forced onto ``setup.REGIONS``.
     """
+    monthly_dict, seasonal_dict, monthly_was_df, seasonal_was_df = _coerce_agg_pair(
+        monthly_dict, seasonal_dict, month_col=month_col
+    )
+
     lifetime_after_agg = 'lifetime' in DERIVED_VAR_AFTER_AGG
     lifetime_bcoa_after_agg = lifetime_after_agg or 'lifetime_BC_OA' in DERIVED_VAR_AFTER_AGG
     method = 'deposition' if use_deposition_for_lifetime else 'emission'
@@ -181,6 +370,16 @@ def compute_derived_after_aggregation(
                         print(f'  Failed post-aggregation MEC for {model} {region}: {e}')
                 agg[region]['MEC'] = out
 
+    monthly_out = _restore_agg_object(
+        monthly_dict, monthly_was_df, is_monthly=True, month_col=month_col
+    )
+    seasonal_out = _restore_agg_object(
+        seasonal_dict, seasonal_was_df, is_monthly=False, month_col=month_col
+    )
+
+    if monthly_was_df or seasonal_was_df:
+        return monthly_out, seasonal_out
+
 
 def _scalarize_lifetime(val):
     """Convert aggregated lifetime entry to a finite float, or None."""
@@ -193,6 +392,9 @@ def _scalarize_lifetime(val):
 
 def print_global_lifetimes(seasonal_dict, var='lifetime_BC_OA', method_label=None):
     """Print seasonal/regional lifetime for the global box (or spatial-mean fallback)."""
+    if _is_agg_frame(seasonal_dict):
+        seasonal_dict = seasonal_dataframe_to_dict(seasonal_dict)
+
     label = method_label or var
     global_map = (seasonal_dict.get('global') or {}).get(var) or {}
     print(f'\n--- Global lifetime ({label}) ---')
@@ -250,6 +452,9 @@ def compare_emission_vs_deposition_lifetimes(
     Models missing any required flux for a method get NaN for that method (same
     require_all semantics as the upstream summed products).
     """
+    if _is_agg_frame(seasonal_dict):
+        seasonal_dict = seasonal_dataframe_to_dict(seasonal_dict)
+
     if regions is None:
         regions = [r for r in REGIONS if r in seasonal_dict]
     rows = []
@@ -338,9 +543,18 @@ def short_model_name(model):
         name = name.replace(suffix, '')
     return name
 
-def filter_lifetime_after_agg(monthly_dict, seasonal_dict, max_days=None, min_days=None):
+def filter_lifetime_after_agg(monthly_dict, seasonal_dict, max_days=None, min_days=None, month_col='month'):
     """Mask unphysical after-aggregation lifetime values with NaN."""
+    monthly_dict, seasonal_dict, monthly_was_df, seasonal_was_df = _coerce_agg_pair(
+        monthly_dict, seasonal_dict, month_col=month_col
+    )
+
     if max_days is None and min_days is None:
+        if monthly_was_df or seasonal_was_df:
+            return (
+                _restore_agg_object(monthly_dict, monthly_was_df, is_monthly=True, month_col=month_col),
+                _restore_agg_object(seasonal_dict, seasonal_was_df, is_monthly=False, month_col=month_col),
+            )
         return
     # Preserve unfiltered BC+OA lifetimes for diagnostics / sensitivity.
     global lifetime_BC_OA_raw
@@ -367,6 +581,12 @@ def filter_lifetime_after_agg(monthly_dict, seasonal_dict, max_days=None, min_da
                             or (max_days is not None and v > max_days)
                             or (min_days is not None and v < min_days)):
                         agg[region][var][model] = np.nan
+
+    if monthly_was_df or seasonal_was_df:
+        return (
+            _restore_agg_object(monthly_dict, monthly_was_df, is_monthly=True, month_col=month_col),
+            _restore_agg_object(seasonal_dict, seasonal_was_df, is_monthly=False, month_col=month_col),
+        )
 
 
 # ==============================================================================
