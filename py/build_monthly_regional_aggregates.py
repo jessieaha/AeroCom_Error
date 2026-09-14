@@ -123,6 +123,70 @@ def _first_da(ds_or_da):
     return ds_or_da
 
 
+def apply_aerosol_quality_filter(aod, aaod=None, ssa=None, 
+                                  min_aod=0.05, min_aaod=0.001,
+                                  max_aaod_fraction=0.95, 
+                                  min_ssa=0.5, max_ssa=1.0):
+    """Apply consistent quality filtering to aerosol optical properties.
+    
+    All variables are filtered with the SAME mask to maintain consistency.
+    Invalid values are set to NaN.
+    
+    Parameters
+    ----------
+    aod : xarray.DataArray
+        Aerosol optical depth (required)
+    aaod : xarray.DataArray, optional
+        Absorption AOD (if provided, will be filtered)
+    ssa : xarray.DataArray, optional
+        Single scattering albedo (if provided, will be filtered)
+    min_aod : float, default 0.05
+        Minimum AOD threshold (filter low-AOD scenes with high uncertainty)
+    min_aaod : float, default 0.001
+        Minimum AAOD threshold
+    max_aaod_fraction : float, default 0.95
+        Maximum AAOD/AOD ratio (AAOD shouldn't exceed this fraction of AOD)
+    min_ssa : float, default 0.5
+        Physical minimum SSA
+    max_ssa : float, default 1.0
+        Physical maximum SSA
+    
+    Returns
+    -------
+    filtered_aod : xarray.DataArray
+        AOD with invalid values set to NaN
+    filtered_aaod : xarray.DataArray or None
+        AAOD with invalid values set to NaN (if provided)
+    filtered_ssa : xarray.DataArray or None
+        SSA with invalid values set to NaN (if provided)
+    """
+    import numpy as np
+    
+    # Build quality mask based on all provided variables
+    quality_mask = (aod > min_aod) & np.isfinite(aod)
+    
+    if aaod is not None:
+        quality_mask = quality_mask & (
+            (aaod > min_aaod) &
+            (aaod < aod * max_aaod_fraction) &
+            np.isfinite(aaod)
+        )
+    
+    if ssa is not None:
+        quality_mask = quality_mask & (
+            (ssa >= min_ssa) &
+            (ssa <= max_ssa) &
+            np.isfinite(ssa)
+        )
+    
+    # Apply mask using xarray .where() for NaN assignment
+    filtered_aod = aod.where(quality_mask)
+    filtered_aaod = aaod.where(quality_mask) if aaod is not None else None
+    filtered_ssa = ssa.where(quality_mask) if ssa is not None else None
+    
+    return filtered_aod, filtered_aaod, filtered_ssa
+
+
 def discover_models(variables: Optional[List[str]] = None, exclude_models: Optional[List[str]] = None) -> List[str]:
     """Discover available models from the od550aer/abs550aer/loadbc file listings."""
     exclude_models = set(exclude_models or EXCLUDE_MODELS_DEFAULT)
@@ -160,17 +224,42 @@ def _load_one_model_netcdf(model: str, variables: List[str]) -> dict:
 
 
 def _derive_pre_agg(normalized: dict, model: str) -> Dict[str, Optional[xr.DataArray]]:
-    """Compute MEC, MEC_ss, SSA, MAC, AE.
+    """Compute MEC, MEC_ss, SSA, MAC, AE with quality filtering.
 
+    Applies quality filter to AOD/AAOD FIRST, then uses filtered values for all
+    derived parameters (MEC, MAC, SSA, AE) to ensure consistency.
+    
     Inlined to match exactly the notebook's pre-aggregation derived-variable
     cell (od550aer / total_load / od550ss / loadss / abs550aer based ratios),
     since ``aerocom_data.calculate_derived_var`` does not support MEC_ss.
     """
     aerocom_data.align_model_grids(normalized, ref_var='od550aer', model_hint=model)
 
-    aod550 = aerocom_data._get_dataarray(normalized.get('od550aer'), 'od550aer')
-    if aod550 is None:
+    aod550_raw = aerocom_data._get_dataarray(normalized.get('od550aer'), 'od550aer')
+    if aod550_raw is None:
         return {}
+    
+    # ================================================================
+    # Apply quality filter FIRST to AOD/AAOD - then use filtered values
+    # for ALL derived parameters (MEC, MAC, SSA, AE)
+    # ================================================================
+    aaod_raw = aerocom_data._get_dataarray(normalized.get('abs550aer'), 'abs550aer')
+    
+    if aaod_raw is not None:
+        aaod_raw = aerocom_data._align_da_to_ref(aaod_raw, aod550_raw, model_hint=f'{model}/abs550aer')
+        ssa_raw = 1.0 - aaod_raw / aod550_raw
+        
+        # Apply quality filter to get filtered AOD/AAOD/SSA
+        aod550, aaod, ssa_filtered = apply_aerosol_quality_filter(
+            aod=aod550_raw, aaod=aaod_raw, ssa=ssa_raw,
+            min_aod=0.05, min_aaod=0.001, max_aaod_fraction=0.95,
+            min_ssa=0.5, max_ssa=1.0
+        )
+    else:
+        # No AAOD available - use raw AOD (no filtering possible)
+        aod550 = aod550_raw
+        aaod = None
+        ssa_filtered = None
 
     load_keys = ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss']
     loads = []
@@ -188,6 +277,7 @@ def _derive_pre_agg(normalized: dict, model: str) -> Dict[str, Optional[xr.DataA
 
     try:
         if total_load is not None:
+            # Use filtered AOD (already applied above)
             out['MEC'] = aod550 / (total_load * 1e3)
     except Exception as e:
         print(f'  [{model}] Could not calculate MEC: {e}')
@@ -201,16 +291,16 @@ def _derive_pre_agg(normalized: dict, model: str) -> Dict[str, Optional[xr.DataA
         print(f'  [{model}] Could not calculate MEC_ss: {e}')
 
     try:
-        if aaod is not None:
-            aaod_a = aerocom_data._align_da_to_ref(aaod, aod550, model_hint=f'{model}/abs550aer')
-            out['SSA'] = 1.0 - aaod_a / aod550
+        if ssa_filtered is not None:
+            # Use pre-filtered SSA (already calculated and filtered above)
+            out['SSA'] = ssa_filtered
     except Exception as e:
         print(f'  [{model}] Could not calculate SSA: {e}')
 
     try:
         if aaod is not None and total_load is not None:
-            aaod_a = aerocom_data._align_da_to_ref(aaod, aod550, model_hint=f'{model}/abs550aer')
-            out['MAC'] = aaod_a / (total_load * 1e3)
+            # Use filtered AAOD (already aligned and filtered above)
+            out['MAC'] = aaod / (total_load * 1e3)
     except Exception as e:
         print(f'  [{model}] Could not calculate MAC: {e}')
 
@@ -223,10 +313,11 @@ def _derive_pre_agg(normalized: dict, model: str) -> Dict[str, Optional[xr.DataA
     try:
         if aod_other is not None:
             aod_other_a = aerocom_data._align_da_to_ref(aod_other, aod550, model_hint=f'{model}/spectral_aod')
+            # Use filtered AOD550 (already applied above) for AE calculation
             out['AE'] = -np.log(aod550 / aod_other_a) / np.log(550.0 / other_wavelength)
     except Exception as e:
         print(f'  [{model}] Could not calculate AE: {e}')
-
+    
     return out
 
 
