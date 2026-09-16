@@ -46,7 +46,7 @@ temporal = 'monthly' #3hourly monthly
 # --- Output options ---
 # RENEW=False: skip processed NetCDFs that already exist and are at least as new
 #              as the source file (mtime). RENEW=True: overwrite all outputs.
-RENEW = False
+RENEW = True
 # SAVE_PICKLE controls whether the master monthly dictionary is written to
 # Data/var_files/original/monthly/monthly_aerocom_data.pickle.
 # It is kept for backward compatibility; the default is now False because
@@ -109,8 +109,8 @@ if temporal == 'monthly':
         # "emibc", "emidust", "emioa", "emiso2", "emiss", "loadbc", "loaddust",
         # "loadoa", "loadso2", "loadso4", "loadss", "od440aer", "od550aer",
         # "od870aer", "od865aer", "od550bc", "od550dust", "od550oa", "od550so4", "od550ss",
-        # "precip"
-        "dryss","wetss","dryso4","wetso4"
+        # "precip", "wetss","dryso4","wetso4"
+        "dryss",
     )
 
     # -------------------------------------------------------------------------

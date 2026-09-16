@@ -489,15 +489,27 @@ def find_variable_file(base_dir, model, var, temporal):
 
     patterns = []
     for vn in var_names:
+        # ── AeroCom-3 convention ────────────────────────────────────────────
+        # Format: aerocom3_{Model}_{var}_{Level}_{Year}_{temporal}.nc
+        # Use *_{vn}_* (leading underscore) so that searching for 'dryss'
+        # does NOT match filenames containing 'od550dryss' as a false positive.
         patterns.extend([
-            os.path.join(model_dir, f"*{vn}_*Column*2010*{temporal}*.nc"),
-            os.path.join(model_dir, f"*{vn}_*Surface*2010*{temporal}*.nc"),
-            os.path.join(model_dir, f"*{vn}_*ModelLevel*2010*{temporal}*.nc"),
-            os.path.join(model_dir, f"*{vn}_*2010*{temporal}*.nc"),
-            os.path.join(base_dir, f"*{model}*{vn}_*Column*2010*{temporal}*.nc"),
-            os.path.join(base_dir, f"*{model}*{vn}_*Surface*2010*{temporal}*.nc"),
-            os.path.join(base_dir, f"*{model}*{vn}_*ModelLevel*2010*{temporal}*.nc"),
-            os.path.join(base_dir, f"*{model}*{vn}_*2010*{temporal}*.nc"),
+            os.path.join(model_dir, f"*_{vn}_*Column*2010*{temporal}*.nc"),
+            os.path.join(model_dir, f"*_{vn}_*Surface*2010*{temporal}*.nc"),
+            os.path.join(model_dir, f"*_{vn}_*ModelLevel*2010*{temporal}*.nc"),
+            os.path.join(model_dir, f"*_{vn}_*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*_{vn}_*Column*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*_{vn}_*Surface*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*_{vn}_*ModelLevel*2010*{temporal}*.nc"),
+            os.path.join(base_dir, f"*{model}*_{vn}_*2010*{temporal}*.nc"),
+        ])
+        # ── EMEP / dot-separated convention ────────────────────────────────
+        # Format: aerocom.{Model}.{temporal}.{var}.{Year}.nc
+        # The variable is surrounded by dots, which naturally prevents false
+        # matches (e.g. '.dryss.' will never match 'od550dryss').
+        patterns.extend([
+            os.path.join(model_dir, f"aerocom.*.{temporal}.{vn}.2010.nc"),
+            os.path.join(model_dir, f"aerocom.*.{vn}.2010.nc"),
         ])
 
     for pattern in patterns:
@@ -616,6 +628,14 @@ def process_and_save_model_data(
                         logging.info(f"  3h2month fallback for {model}/{var}: {filepath}")
 
                 if filepath is None or not os.path.exists(filepath):
+                    summary['missing'] += 1
+                    continue
+
+                # H-A fix: skip 0-byte source files — they cannot be opened by
+                # netCDF4 and would cause [Errno -51] Unknown file format errors.
+                # Treat them as missing rather than as processing errors.
+                if os.path.getsize(filepath) == 0:
+                    logging.warning(f"  Skipping empty (0-byte) source file for {model}/{var}: {filepath}")
                     summary['missing'] += 1
                     continue
 
