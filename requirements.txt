@@ -1,0 +1,17 @@
+# AeroCom analysis dependencies (development environment)
+# Python 3.7+ (tested on 3.12)
+numpy
+pandas
+xarray
+matplotlib
+scipy
+scikit-learn
+cftime
+netCDF4
+mycolorpy
+# Notebook execution
+jupyter
+nbconvert
+ipykernel
+# Optional: land/sea masking in functions.create_region_mask(surface='land'/'sea')
+regionmask
