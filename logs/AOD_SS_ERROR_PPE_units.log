@@ -1,0 +1,71 @@
+Project root: /gpfs/home4/jzhang1/AeroCom_Error
+--- Active configuration ---
+  PPE_DIR              = /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_processed_monthly
+  ANALYSIS_REGIONS     = ['NPO_JF', 'ANTAO_JFM', 'SAO_SOND']
+  DERIVED_VAR_AFTER_AGG= {'lifetime_ss', 'lifetime'}
+  BURDEN_MASS_SCALE    = 1000.0
+  SPEXONE_HOMOGENIZE   = True
+  SAVE_FIGURE          = True
+  FIGURE_DIR           = /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS
+  EXCLUDE_MEMBERS      = []
+Loading PPE monthly ensembles from /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_processed_monthly ...
+Ensemble members: 251
+  first=Control  last=250
+Target members with od550aer+od550ss+loadss+emiss: 251
+Applied BURDEN_MASS_SCALE=1000.0 to ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss']
+Grid-aligned 251 members onto od550aer.
+Regions created: ['NPO_JF', 'ANTAO_JFM', 'SAO_SOND']
+  monthly/NPO_JF: lifetime_ss=251, lifetime=251
+  monthly/ANTAO_JFM: lifetime_ss=251, lifetime=251
+  monthly/SAO_SOND: lifetime_ss=251, lifetime=251
+  seasonal/NPO_JF: lifetime_ss=251, lifetime=251
+  seasonal/ANTAO_JFM: lifetime_ss=251, lifetime=251
+  seasonal/SAO_SOND: lifetime_ss=251, lifetime=251
+Wrote /gpfs/home4/jzhang1/AeroCom_Error/tables/seasalt_ppe_monthly_NPO_JF_ANTAO_JFM_SAO_SOND.parquet
+Wrote /gpfs/home4/jzhang1/AeroCom_Error/tables/seasalt_ppe_seasonal_NPO_JF_ANTAO_JFM_SAO_SOND.parquet
+
+Seasonal availability:
+           MEC_ss  MAC  SSA   AE  lifetime_ss  lifetime  precip  abs550aer
+region                                                                    
+ANTAO_JFM     251  251  251  251          251       251     251        251
+NPO_JF        251  251  251  251          251       251     251        251
+SAO_SOND      251  251  251  251          251       251     251        251
+      region model       MEC  ...  abs550aer  lifetime_ss   lifetime
+0  ANTAO_JFM     1  1.890690  ...   0.000134     1.714385  35.424183
+1  ANTAO_JFM    10  3.525473  ...   0.000174     1.631768  14.922342
+2  ANTAO_JFM   100  5.301873  ...   0.000629     1.794219   3.645529
+3  ANTAO_JFM   101  3.681416  ...   0.000043     1.495090   6.736448
+4  ANTAO_JFM   102  4.810101  ...   0.000530     1.896384   5.286407
+
+[5 rows x 21 columns]
+
+--- Derived-variable range check (seasonal) ---
+  MEC_ss: median=0.6983  q05=0.3937  q95=1.201  n=753
+    fraction in [0.0, 15.0]: 99.7%
+  MEC: median=2.656  q05=0.8042  q95=5.412  n=753
+    fraction in [0.0, 15.0]: 100.0%
+  lifetime_ss: median=3.236  q05=1.454  q95=3.939  n=753
+    1/lifetime_ss: median=0.3091  q05=0.2539  q95=0.688  (expect ~0.1–1 day^-1)
+  lifetime: median=10.73  q05=4.117  q95=51.23  n=753
+    1/lifetime: median=0.09323  q05=0.01952  q95=0.2429  (expect ~0.1–1 day^-1)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_SSA_vs_MEC.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_1SSA_vs_MEC.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_1SSA_vs_MAC.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_SSA_vs_MEC_ss.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_1SSA_vs_MEC_ss.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_inv_lifetime_ss_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_inv_lifetime_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_inv_lifetime_ss_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_inv_lifetime_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_precip_vs_inv_lifetime_ss_colored_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_precip_vs_inv_lifetime_colored_AE.png
+
+--- SPEXone ---
+Loading 12 SPEXone monthly files ...
+SPEXone rows: 567,701  valid AOD+AAOD+SSA: 567,659
+  NPO_JF: n=7607  AOD=0.1282  SSA=0.9519
+  ANTAO_JFM: n=2841  AOD=0.1011  SSA=0.9858
+  SAO_SOND: n=10881  AOD=0.1501  SSA=0.9534
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_SS/ppe_spexone_regional_maps.png
+
+--- SPEXone homogenization (AOD) ---
