@@ -5,7 +5,7 @@
 # Observations use SPEXone (2024-08 … 2025-07), not POLDER.
 # Emission-based lifetimes only (wet/dry/dep streams are not in the PPE extract).
 #
-# Run: `.venv/bin/python notebooks/AOD_SS_ERROR_PPE.py`
+# Run: `.venv-1/bin/python notebooks/AOD_SS_ERROR_PPE.py`
 # Or:  `sbatch jobs/run_notebook_or_py.sbatch notebooks/AOD_SS_ERROR_PPE.py`
 
 # %%
