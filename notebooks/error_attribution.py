@@ -18,7 +18,7 @@
 # - `POLDER_HOMOGENIZE = True` — Zhong et al. regional AAOD homogenization
 # - Amazon SOA always included via paper ~52% fraction of total OA
 #
-# Run: `.venv/bin/python notebooks/error_attribution.py`
+# Run: `.venv-1/bin/python notebooks/error_attribution.py`
 
 # %%
 import sys

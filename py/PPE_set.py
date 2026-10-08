@@ -154,3 +154,42 @@ ENS_CHUNK = {"ens": 32, "time": 12, "lat": 96, "lon": 192}
 
 # Control member numeric id for the ``ens`` coordinate.
 CONTROL_ENS_ID = -1
+
+# ---------------------------------------------------------------------------
+# AAOD analysis regions (AAOD_error_attribution_PPE.py, PPE_precip_vs_GPCP.py)
+# Fire-season boxes from notebook_setup.REGIONS; month-of-year keeps the
+# AeroCom seasons while the PPE archive spans Aug 2024 – Jul 2025.
+# ---------------------------------------------------------------------------
+PPE_TIME = ("2024-08-01", "2025-07-31")
+PPE_YEAR_MONTHS = [(2024, m) for m in range(8, 13)] + [(2025, m) for m in range(1, 8)]
+AAOD_REGIONS = {
+    "africa": {
+        "surface_type": "land",
+        "lon_range": (15, 37),
+        "lat_range": (-15, 0),
+        "time_slice": PPE_TIME,
+        "season_months": (6, 7, 8, 9),  # Jun–Sep
+        "edge_weighted": False,
+    },
+    "amazon": {
+        "surface_type": "land",
+        "lon_range": (287, 317),
+        "lat_range": (-17, -3),
+        "time_slice": PPE_TIME,
+        "season_months": (7, 8, 9, 10),  # Jul–Oct
+        "edge_weighted": False,
+    },
+    "outflow_af": {
+        "surface_type": "ocean",
+        "lon_range": (350, 15),
+        "lat_range": (-15, 0),
+        "time_slice": PPE_TIME,
+        "season_months": (6, 7, 8, 9),
+        "edge_weighted": True,
+    },
+}
+AAOD_REGION_COLORS = {
+    "africa": "#d62728",
+    "amazon": "#2ca02c",
+    "outflow_af": "#1f77b4",
+}

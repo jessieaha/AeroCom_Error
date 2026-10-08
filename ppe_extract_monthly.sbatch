@@ -13,12 +13,12 @@
 # PPE monthly ensemble extract for AOD_SS_ERROR inputs.
 # Source tree under PPE_Experiments is read-only.
 # Do NOT module load 2025 here: EasyBuild HDF5 on LD_LIBRARY_PATH can
-# clash with the netCDF4 / h5py wheels in the project .venv.
+# clash with the netCDF4 / h5py wheels in the project .venv-1.
 
 set -euo pipefail
 
 PROJECT_ROOT="/home/jzhang1/AeroCom_Error"
-VENV="${PROJECT_ROOT}/.venv"
+VENV="${PROJECT_ROOT}/.venv-1"
 SCRATCH="/scratch-shared/jzhang1/PPE_monthly"
 
 mkdir -p "${SCRATCH}/members" "${SCRATCH}/logs" \

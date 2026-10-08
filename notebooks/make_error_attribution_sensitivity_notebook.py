@@ -7,7 +7,7 @@ The companion script uses `# %%` comments as code-cell separators. Running
 this generator produces a runnable notebook with the same logic split into
 cells (setup + one cell per sensitivity test + summary).
 
-Run with the project `.venv`:
+Run with the project `.venv-1`:
 
     python notebooks/make_error_attribution_sensitivity_notebook.py
 

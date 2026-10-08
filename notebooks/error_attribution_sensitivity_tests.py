@@ -8,7 +8,7 @@ methodology and tests a series of literature recommendations one at a time.
 For each test it prints the resulting mean decomposition percentages, the
 regression coefficients, and the constrained values.
 
-Run with the project `.venv`:
+Run with the project `.venv-1`:
 
     python notebooks/error_attribution_sensitivity_tests.py
 

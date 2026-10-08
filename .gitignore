@@ -4,3 +4,5 @@ Data/
 .claude/agents
 figure/
 tables/
+.venv-1/
+.venv/

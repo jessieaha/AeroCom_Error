@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH -J aero_run
-#SBATCH -p rome
-#SBATCH -A vuc17235
+#SBATCH -p rome 
 #SBATCH -N 1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -23,7 +22,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="/home/jzhang1/AeroCom_Error"
-VENV="${PROJECT_ROOT}/.venv"
+VENV="${PROJECT_ROOT}/.venv-1"
 LOG_DIR="/scratch-shared/jzhang1/logs"
 mkdir -p "${LOG_DIR}"
 
@@ -79,7 +78,7 @@ case "${TARGET}" in
     ;;
   *.ipynb)
     if ! python -c "import nbconvert, jupyter_client" 2>/dev/null; then
-      echo "Installing nbconvert + ipykernel into .venv ..."
+      echo "Installing nbconvert + ipykernel into .venv-1 ..."
       pip install -q nbconvert ipykernel
     fi
     jupyter nbconvert --to notebook --execute --inplace \
