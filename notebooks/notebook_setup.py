@@ -722,5 +722,74 @@ def filter_lifetime(da, model_name, var_name, max_days=None, min_days=None):
               flush=True)
     return da.where(~bad), {'n_total': int(da.size), 'n_excluded': n_excluded}
 
+
+# ==============================================================================
+# DRY vs WET DEPOSITION FRACTION
+# ==============================================================================
+def drywet_fraction_table(model_seasonal, regions, dry_key, wet_key, species_label=''):
+    """Per-model, per-region dry deposition fraction = dry / (dry + wet).
+
+    ``model_seasonal[region][key]`` is a {model: scalar} dict of regional-mean
+    seasonal fluxes. Fluxes are used as magnitudes (sign conventions differ
+    between models). Returns a long DataFrame with dry, wet, dry_frac, wet_frac.
+    """
+    rows = []
+    for region in regions:
+        reg = model_seasonal.get(region, {})
+        dry_d, wet_d = reg.get(dry_key, {}), reg.get(wet_key, {})
+        for model in sorted(set(dry_d) & set(wet_d)):
+            try:
+                dry, wet = abs(_as_scalar(dry_d[model])), abs(_as_scalar(wet_d[model]))
+            except Exception:
+                continue
+            tot = dry + wet
+            if not np.isfinite(tot) or tot <= 0:
+                continue
+            rows.append({
+                'region': region, 'model': model, 'species': species_label,
+                'dry': dry, 'wet': wet,
+                'dry_frac': dry / tot, 'wet_frac': wet / tot,
+            })
+    return pd.DataFrame(rows, columns=['region', 'model', 'species', 'dry', 'wet', 'dry_frac', 'wet_frac'])
+
+
+def plot_drywet_fraction_bars(df, regions, title, save_path=None, region_colors=None, show=True):
+    """Bar plot of dry/(dry+wet) per model, one panel per region."""
+    import matplotlib.pyplot as plt
+
+    if df is None or df.empty:
+        print('No dry/wet fraction data to plot.')
+        return None
+    regions = [r for r in regions if r in set(df['region'])]
+    models = sorted(df['model'].unique())
+    labels = [short_model_name(m) for m in models]
+    x = np.arange(len(models))
+    fig, axes = plt.subplots(
+        len(regions), 1, figsize=(max(9, 0.55 * len(models) + 3), 3.6 * len(regions)),
+        squeeze=False, sharex=True,
+    )
+    for ax, region in zip(axes[:, 0], regions):
+        sub = df[df['region'] == region].set_index('model')['dry_frac'].reindex(models)
+        color = (region_colors or {}).get(region, 'tab:blue')
+        ax.bar(x, sub.values, color=color, edgecolor='k', linewidth=0.6)
+        med = np.nanmedian(sub.values)
+        if np.isfinite(med):
+            ax.axhline(med, color='k', ls='--', lw=1, label=f'multi-model median = {med:.2f}')
+            ax.legend(fontsize=8, frameon=False, loc='upper right')
+        ax.set_ylim(0, 1.05)
+        ax.set_ylabel('dry / (dry + wet)')
+        ax.set_title(f'{region} (n={int(sub.notna().sum())} models)', fontsize=11, fontweight='bold')
+        ax.grid(True, axis='y', alpha=0.3)
+    axes[-1, 0].set_xticks(x)
+    axes[-1, 0].set_xticklabels(labels, rotation=60, ha='right', fontsize=8)
+    fig.suptitle(title, fontsize=13, fontweight='bold')
+    fig.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f'Saved: {save_path}')
+    if show:
+        plt.show()
+    return fig
+
 ###################################
 ## 

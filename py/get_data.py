@@ -110,7 +110,8 @@ if temporal == 'monthly':
         # "loadoa", "loadso2", "loadso4", "loadss", "od440aer", "od550aer",
         # "od870aer", "od865aer", "od550bc", "od550dust", "od550oa", "od550so4", "od550ss",
         # "precip", "wetss","dryso4","wetso4"
-        "dryss",
+        'wetbc', 'wetoa','wetdu', 'wetno3','wetnh4'
+
     )
 
     # -------------------------------------------------------------------------

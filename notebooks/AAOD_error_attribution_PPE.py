@@ -83,7 +83,7 @@ INTERCEPT_0 = True
 BROWN_SSA_INTERCEPT = 0.969
 BROWN_SSA_SLOPE = -0.779
 
-SAVE_FIGURE = True
+SAVE_FIG = True  # True: save to FIGURE_DIR; False: display inline
 FIGURE_DIR = project_root / "figure" / "PPE_AAOD"
 TABLE_DIR = project_root / "Data" / "PPE_AAOD"
 _SCRATCH_CANDIDATES = [
@@ -243,12 +243,16 @@ def ens_label(ens_id: int) -> str:
     return "Control" if eid < 0 else str(eid)
 
 
-def save_fig(fig, name: str) -> Path:
+def finish_fig(fig, name: str, save_fig: bool = None) -> Path:
+    if save_fig is None:
+        save_fig = SAVE_FIG
     path = FIGURE_DIR / name
-    if SAVE_FIGURE:
+    if save_fig:
         fig.savefig(path, dpi=300, bbox_inches="tight")
         print(f"  Saved {path}")
-    plt.close(fig)
+        plt.close(fig)
+    else:
+        plt.show()
     return path
 
 
@@ -879,6 +883,7 @@ def plot_mac_vs_x(
     regions=None,
     filename: str = "ppe_MAC_vs_x.png",
     title: str = None,
+    save_fig: bool = None,
 ):
     regions = regions or PLOT_REGIONS
     if df.empty or "MAC" not in df.columns or "SSA" not in df.columns:
@@ -912,10 +917,11 @@ def plot_mac_vs_x(
         ax.grid(True, alpha=0.3)
     fig.suptitle(title or f"PPE: MAC vs {x_col}")
     fig.tight_layout()
-    save_fig(fig, filename)
+    finish_fig(fig, filename, save_fig=save_fig)
 
 
-def plot_ssa_vs_rbc(df: pd.DataFrame, regions=None, filename="ppe_SSA_vs_rBC.png"):
+def plot_ssa_vs_rbc(df: pd.DataFrame, title="PPE: SSA vs rBC (Brown line)", regions=None,
+                    filename="ppe_SSA_vs_rBC.png", save_fig: bool = None):
     regions = regions or PLOT_REGIONS
     if "rBC" not in df.columns or "SSA" not in df.columns:
         print("Skip SSA vs rBC: missing columns")
@@ -940,15 +946,15 @@ def plot_ssa_vs_rbc(df: pd.DataFrame, regions=None, filename="ppe_SSA_vs_rBC.png
     )
     ax.set_xlabel(_axis_label("rBC"))
     ax.set_ylabel(_axis_label("SSA"))
-    ax.set_title("PPE: SSA vs rBC (Brown line)")
+    ax.set_title(title)
     ax.legend(fontsize=8, loc="best")
     ax.grid(True, alpha=0.3)
-    save_fig(fig, filename)
+    finish_fig(fig, filename, save_fig=save_fig)
 
 
 def plot_tau_vs_x(
     df, lifetime_col="lifetime_BC_OA", x_var="precip",
-    regions=None, filename=None, title=None,
+    regions=None, filename=None, title=None, save_fig: bool = None,
 ):
     regions = regions or LIFETIME_REGIONS
     if lifetime_col not in df.columns or x_var not in df.columns:
@@ -983,10 +989,11 @@ def plot_tau_vs_x(
         ax.grid(True, alpha=0.3)
     fig.suptitle(title or f"PPE: 1/{lifetime_col} vs {x_var}")
     fig.tight_layout()
-    save_fig(fig, filename or f"ppe_inv_{lifetime_col}_vs_{x_var}.png")
+    finish_fig(fig, filename or f"ppe_inv_{lifetime_col}_vs_{x_var}.png", save_fig=save_fig)
 
 
-def plot_lifetime_definitions(df, regions=None, filename="ppe_lifetime_definitions.png"):
+def plot_lifetime_definitions(df, regions=None, filename="ppe_lifetime_definitions.png",
+                              save_fig: bool = None):
     regions = regions or LIFETIME_REGIONS
     cols = [c for c in LIFETIME_COLS if c in df.columns]
     if not cols:
@@ -1009,7 +1016,7 @@ def plot_lifetime_definitions(df, regions=None, filename="ppe_lifetime_definitio
     axes.ravel()[0].set_ylabel(r"Lifetime $\tau$ (day)")
     fig.suptitle("PPE emission-based lifetime definitions (fire-season, regional)")
     fig.tight_layout()
-    save_fig(fig, filename)
+    finish_fig(fig, filename, save_fig=save_fig)
 
 
 def plot_lifetime_ae_precip_3d(
@@ -1021,6 +1028,7 @@ def plot_lifetime_ae_precip_3d(
     inverse=True,
     filename=None,
     title=None,
+    save_fig: bool = None,
 ):
     regions = regions or LIFETIME_REGIONS
     need = ["region", "model", "AE", "precip", lifetime_col]
@@ -1082,28 +1090,41 @@ def plot_lifetime_ae_precip_3d(
         ax.view_init(elev=elev, azim=angle)
     fig.suptitle(title or f"PPE: {z_label} vs precip and AE (3D OLS)", y=1.02, fontsize=13)
     fig.tight_layout()
-    save_fig(fig, filename or "ppe_3d_inv_lifetime_bcoa_vs_precip_AE.png")
+    finish_fig(fig, filename or "ppe_3d_inv_lifetime_bcoa_vs_precip_AE.png", save_fig=save_fig)
     return plot_df
 
 
 MAP_MONTHS = sorted({m for cfg in REGIONS.values() for m in cfg["season_months"]})
 
 
-def plot_region_map(spex: pd.DataFrame, filename="ppe_aaod_region_map.png"):
+def plot_region_map(spex: pd.DataFrame, filename="ppe_aaod_region_map.png", save_fig: bool = None):
     """Study-region map in the AOD_error_attribution style (ct.fake_uba_map),
-    with fire-season mean SPEXone AOD550 on its 1° grid as background."""
+    with mean SPEXone AOD550 on its 1° grid as background."""
     if spex.empty:
         print("Skip region map: no SPEXone data")
         return
-    sub = spex.loc[spex["date"].dt.month.isin(MAP_MONTHS), ["lat_bin", "lon_bin", "AOD_550"]]
+    sub = spex.loc[:, ["lat_bin", "lon_bin", "AOD_550"]]
     grid = sub.pivot_table(index="lat_bin", columns="lon_bin", values="AOD_550", aggfunc="mean")
     grid = grid.reindex(index=np.arange(-89.5, 90.0, 1.0), columns=np.arange(-179.5, 180.0, 1.0))
-    pg.styled_map(
-        grid.columns.to_numpy(), grid.index.to_numpy(), grid.to_numpy(), REGIONS, save_fig,
-        filename, zmin=0.0, zmax=1.0, labels="SPEXone AOD 550 nm (1)",
-        title="Study regions (PPE AAOD)\nSPEXone AOD550, Jun–Oct 2024-25 mean",
+    boxes = pg.region_boxes_180(REGIONS)
+    fig_map = ct.fake_uba_map(
+        lon=grid.columns.to_numpy(),
+        lat=grid.index.to_numpy(),
+        c_array=grid.to_numpy(),
+        zmin=0.0,
+        zmax=1.0,
+        labels="SPEXone AOD 550 nm",
+        title="SPEXone AOD550,  202408-202508 mean",
+        region_boxes=boxes,
+        show_region_labels=False,
+        region_edgecolor="magenta",
+        region_linewidth=2.0,
+        cbar_orientation="vertical",
         cbar_extend="max",
+        show=False,
     )
+    pg.label_region_boxes(fig_map, boxes)
+    finish_fig(fig_map, filename, save_fig=save_fig)
 
 
 # %%
@@ -1326,6 +1347,7 @@ def homogenize_spexone_variable(
     model_var_key: str,
     var_label: str,
     data_derived_dict: dict,
+    save_fig: bool = None,
 ):
     homogenized = {}
     rows = []
@@ -1393,7 +1415,7 @@ def homogenize_spexone_variable(
         ax.set_title(f"{region} SPEXone homogenization ({var_label})")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
-        save_fig(fig, f"ppe_spexone_homog_{var_label}_{region}.png")
+        finish_fig(fig, f"ppe_spexone_homog_{var_label}_{region}.png", save_fig=save_fig)
 
     return homogenized, rows
 
@@ -1605,17 +1627,17 @@ if not model_seasonal_df.empty and gpcp_da is not None:
     _aer_precip = (aerocom_df[["region", "model", "precip"]] if "precip" in aerocom_df
                    else pd.DataFrame(columns=["region", "model", "precip"]))
     pg.plot_precip_seasonal_cycle(model_monthly_df, gpcp_rows, REGIONS, REGION_COLORS,
-                                  SPEXONE_YEARS_MONTHS, save_fig)
+                                  SPEXONE_YEARS_MONTHS, finish_fig)
     pg.plot_precip_season_box(model_seasonal_df, _aer_precip, gpcp_obs, aerocom_gpcp_2010,
-                              gpcp_matched_months, REGIONS, REGION_COLORS, save_fig)
+                              gpcp_matched_months, REGIONS, REGION_COLORS, finish_fig)
     if data_derived:
         _ppe_precip = xr.concat(
             [_get_dataarray(data_derived[m]["precip"], "precip") for m in target_models
              if data_derived[m].get("precip") is not None],
             dim="ens",
         )
-        pg.plot_precip_maps(_ppe_precip, gpcp_da, REGIONS, save_fig, MAP_MONTHS)
-        pg.plot_precip_scatter(_ppe_precip, gpcp_da, REGIONS, save_fig).to_csv(
+        pg.plot_precip_maps(_ppe_precip, gpcp_da, REGIONS, finish_fig, MAP_MONTHS)
+        pg.plot_precip_scatter(_ppe_precip, gpcp_da, REGIONS, finish_fig).to_csv(
             TABLE_DIR / "ppe_precip_ensmean_vs_gpcp_scatter_stats.csv", index=False
         )
         del _ppe_precip
@@ -1658,7 +1680,7 @@ def _xy(df, region, xcol, ycol, inverse_y=False):
 
 def plot_combined(xcol, ycol, regions, filename, title, inverse_y=False,
                   through_origin=False, obs_x=None, obs_y=None, ylabel=None,
-                  brown_line=False, aer_ycol=None, aer_obs_x=None):
+                  brown_line=False, aer_ycol=None, aer_obs_x=None, save_fig: bool = None):
     ppe = model_seasonal_df.copy()
     aer = aerocom_df.copy()
     for d in (ppe, aer):
@@ -1697,7 +1719,7 @@ def plot_combined(xcol, ycol, regions, filename, title, inverse_y=False,
         ax.legend(fontsize=7, loc="best")
     fig.suptitle(title)
     fig.tight_layout()
-    save_fig(fig, filename)
+    finish_fig(fig, filename, save_fig=save_fig)
 
 
 def _obs_x_gpcp(region):
@@ -1711,7 +1733,7 @@ def _obs_x_gpcp_2010(region):
 
 def plot_combined_3d(lifetime_col="lifetime_BC_OA", regions=None,
                      filename="combined_3d_inv_lifetime_bcoa_vs_precip_AE.png",
-                     aer_lifetime_col=None, title=None):
+                     aer_lifetime_col=None, title=None, save_fig: bool = None):
     regions = regions or LIFETIME_REGIONS
     fig = plt.figure(figsize=(6.5 * len(regions), 5.5))
     for idx, region in enumerate(regions):
@@ -1748,10 +1770,10 @@ def plot_combined_3d(lifetime_col="lifetime_BC_OA", regions=None,
         ax.legend(fontsize=7, loc="upper left")
     fig.suptitle(title or r"PPE + AeroCom: 1/$\tau_{\mathrm{BC+OA}}$ vs precipitation and AE")
     fig.tight_layout()
-    save_fig(fig, filename)
+    finish_fig(fig, filename, save_fig=save_fig)
 
 
-def plot_combined_outflow_meta(filename="combined_outflow_meta_model.png"):
+def plot_combined_outflow_meta(filename="combined_outflow_meta_model.png", save_fig: bool = None):
     fig, ax = plt.subplots(figsize=(5.5, 5.2))
     styles = {"PPE": dict(s=16, alpha=0.5, color=REGION_COLORS[OUTFLOW_REGION]),
               "AeroCom": dict(s=55, marker="D", facecolors="white", edgecolors=AEROCOM_COLOR)}
@@ -1774,7 +1796,7 @@ def plot_combined_outflow_meta(filename="combined_outflow_meta_model.png"):
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
-    save_fig(fig, filename)
+    finish_fig(fig, filename, save_fig=save_fig)
 
 
 if not model_seasonal_df.empty:
