@@ -16,58 +16,28 @@ try:
 except NameError:
     project_root = Path('/scistor/guest/gbb083/AeroCom')
 py_dir = project_root / 'py'
-if str(py_dir) not in sys.path:
-    sys.path.insert(0, str(py_dir))
-sys.path.append(py_dir)
+_py_dir_here = Path(__file__).resolve().parent.parent / 'py'
+for _p in (py_dir, _py_dir_here):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 import cameo_toolbox as ct
 import functions
+import regions as region_registry
 # ==============================================================================
 # GLOBAL CONFIGURATIONS
 # ==============================================================================
-REGIONS = {
-    'global': {
-        'surface_type': 'all', 'lon_range': (0, 360), 'lat_range': (-90, 90),
-        'time_slice': ('2010-01-01', '2010-12-31'), 'edge_weighted': False,
-    },
-    'africa': {
-        'surface_type': 'land', 'lon_range': (15, 37), 'lat_range': (-15, 0),
-        'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': False,
-    },
-    'amazon': {
-        'surface_type': 'land', 'lon_range': (287, 317), 'lat_range': (-17, -3),
-        'time_slice': ('2010-07-01', '2010-10-31'), 'edge_weighted': False,
-    },
-    # Nature / AOD paper box (Zhong et al.); same as cameo_toolbox._REGION_DEFINITIONS.
-    'outflow_af': {
-        'surface_type': 'ocean', 'lon_range': (350, 15), 'lat_range': (-15, 0),
-        'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': True,
-    },
-    'se_asia': {
-        'surface_type': 'land', 'lon_range': (95, 125), 'lat_range': (-5, 15),
-        'time_slice': ('2010-03-01', '2010-03-31'), 'edge_weighted': False,
-    },
-    'boreal_na': {
-        'surface_type': 'land', 'lon_range': (242, 258), 'lat_range': (52, 63),
-        'time_slice': ('2010-06-01', '2010-08-31'), 'edge_weighted': False,
-    },
-    'eastern_siberia': {
-        'surface_type': 'land', 'lon_range': (120, 170), 'lat_range': (50, 65),
-        'time_slice': ('2010-07-01', '2010-07-31'), 'edge_weighted': False,
-    },
-    'west_russia': {
-        'surface_type': 'land', 'lon_range': (33, 52), 'lat_range': (51, 60),
-        'time_slice': ('2010-07-15', '2010-09-10'), 'edge_weighted': False,
-    },
-    'boreal_na_west': {
-        'surface_type': 'land', 'lon_range': (242, 258), 'lat_range': (52, 63),
-        'time_slice': ('2010-06-15', '2010-08-31'), 'edge_weighted': False,
-    },  
-    'indonesia_peatland': {
-        'surface_type': 'land',
-        'lon_range': (98, 118), 'lat_range': (-5, 5),
-        'time_slice': ('2010-08-01', '2010-11-15'), 'edge_weighted': False,
-    }
-}
+# Boxes and seasons live in py/regions.py. REGIONS keeps the original AeroCom
+# 2010 biomass-burning set (notebooks loop over all of it); ALL_REGIONS adds
+# the sea-salt and dust boxes.
+BB_REGION_NAMES = tuple(
+    n for n in (
+        'global', 'africa', 'amazon', 'outflow_af', 'se_asia', 'boreal_na',
+        'eastern_siberia', 'west_russia', 'boreal_na_west', 'indonesia_peatland',
+    )
+    if n in region_registry.REGIONS
+)
+REGIONS = region_registry.aerocom_view(BB_REGION_NAMES, year=2010)
+ALL_REGIONS = region_registry.aerocom_view(year=2010)
 
 
 def _is_agg_frame(obj):
@@ -281,13 +251,18 @@ def create_analysis_masks(template, region_names, region = REGIONS , surface_typ
 def aggregate_region(model_dict, var_name, region_name, masks, region = REGIONS ,return_time_series=False, skipna=False):
     """Spatially aggregate `var_name` for every model."""
     cfg = region[region_name]
+    months = cfg.get('season_months')
     result = {}
     for model, model_data in model_dict.items():
         if var_name not in model_data or model_data[var_name] is None:
             continue
         try:
+            field = model_data[var_name]
+            # Monthly series keep every month; only the seasonal mean is month-filtered.
+            if months is not None and not return_time_series and 'time' in field.dims:
+                field = field.where(field['time'].dt.month.isin(list(months)), drop=True)
             result[model] = ct.regional_aggregate(
-                model_data[var_name], masks[region_name],
+                field, masks[region_name],
                 spatial='mean', edge_weighted=cfg['edge_weighted'],
                 time_slice=cfg['time_slice'], temporal='mean',
                 return_time_series=return_time_series, skipna=skipna,
@@ -537,8 +512,9 @@ def short_model_name(model):
     """Compact tick label: strip common AeroCom CTRL suffixes."""
     name = str(model)
     for suffix in (
-        '_AP3-CTRL2016-PD', '_AP3-CTRL2016', '_AP3-CTRL-2010',
-        '_AP3-CTRL2019', '_AP3-CTRL', '-met2010',
+        '_AP3-CTRL2016-PD', 
+        #  '_AP3-CTRL-2010','_AP3-CTRL2016','_AP3-CTRL2019'
+         '_AP3-CTRL', '-met2010',
     ):
         name = name.replace(suffix, '')
     return name
@@ -594,115 +570,30 @@ def filter_lifetime_after_agg(monthly_dict, seasonal_dict, max_days=None, min_da
 # ==============================================================================
 
 def normalize_precipitation_units(precip_ds):
-    """Convert model precipitation to mm day^-1.
-
-    Handles kg/m2/s, g/m2/s, and the typo 'km m-2 s-1' seen in ECHAM6.3-HAM2.3.
-    Also applies a sanity check: if the global mean is > 100 mm/day after the
-    stated-unit conversion, the file is likely in g/m2/s despite the label.
-    """
-    if precip_ds is None:
-        return None
-    var_name = list(precip_ds.data_vars)[0]
-    da = precip_ds[var_name]
-    units = da.attrs.get('units', 'kg m-2 s-1').lower().replace(' ', '')
-    # Common variants
-    if units in ('kgm-2s-1', 'kgm^-2s^-1', 'kg/m2/s', 'kgm-2s-1'):
-        factor = 86400.0  # kg m^-2 s^-1 -> mm day^-1
-    elif units in ('gm-2s-1', 'gm^-2s^-1', 'g/m2/s', 'gm-2s-1'):
-        factor = 86.4  # g m^-2 s^-1 -> mm day^-1
-    elif units in ('mmday-1', 'mm/day', 'mmday^-1', 'mmd-1'):
-        factor = 1.0
-    elif units in ('ms-1', 'm/s', 'm s-1'):
-        factor = 86400.0 * 1000.0  # m s^-1 -> mm day^-1 (water density ~1000 kg/m3)
-    else:
-        # 'km m-2 s-1' is treated as a typo for kg m^-2 s^-1
-        factor = 86400.0
-    da = da * factor
-    # Sanity check: global mean should be ~2-3 mm/day. If > 100 mm/day, divide by 1000
-    # because the file was probably in g m^-2 s^-1 despite the label.
-    try:
-        global_mean = float(da.mean().values)
-    except Exception:
-        global_mean = np.nan
-    if not np.isnan(global_mean) and global_mean > 100.0:
-        da = da / 1000.0
-    da.attrs['units'] = 'mm day-1'
-    return da.to_dataset(name=var_name)
+    import aerocom_data
+    return aerocom_data.normalize_precipitation_units(precip_ds)
 
 
 def normalize_dataset_time(ds, var_hint=None):
-    """Normalise the time coordinate of a dataset to first-of-month."""
-    if ds is None:
-        return None
-    if not list(ds.data_vars):
-        return None
-    var_name = list(ds.data_vars)[0]
-    da = ds[var_name]
-    if 'time' not in da.dims or len(da.time) == 0:
-        return ds
-    if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
-        try:
-            if hasattr(da.indexes['time'], 'to_datetimeindex'):
-                try:
-                    new_times = da.indexes['time'].to_datetimeindex().values
-                except OverflowError:
-                    new_times = np.array([
-                        np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
-                        for t in da.indexes['time']
-                    ])
-            else:
-                new_times = pd.to_datetime([str(t) for t in da.time.values]).values
-            da = da.assign_coords(time=new_times)
-        except Exception as e:
-            print(f'  Warning: cftime conversion failed for {var_hint}: {e}', flush=True)
-            return ds
-    da = functions.normalize_monthly_time(da)
-    return da.to_dataset(name=var_name)
+    import aerocom_data
+    year = locals()["year"] if "year" in locals() else None
+    return aerocom_data.normalize_dataset_time(ds, var_hint=var_hint, year=year)
 
 
 def sum_datasets(model_data, keys, out_name, require_all=True):
-    """Sum variables into a Dataset.
-
-    If require_all=True, return None unless every key in `keys` is present
-    (avoids e.g. emi_BC_OA = emibc alone when emioa file is missing).
-    Otherwise missing components are skipped (legacy behaviour for totals).
-    """
-    missing = [k for k in keys if model_data.get(k) is None]
-    if require_all and missing:
-        return None
-    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
-    if not dsets:
-        return None
-    arrays = [d[list(d.data_vars)[0]] for d in dsets]
-    total = arrays[0].copy()
-    for a in arrays[1:]:
-        total = total + a
-    return total.to_dataset(name=out_name)
+    import aerocom_data
+    req = require_all if "require_all" in locals() else False
+    return aerocom_data.sum_datasets(model_data, keys, out_name, require_all=req)
 
 
 def positive_deposition(da):
-    """Return deposition as a positive mass sink (handles signed fluxes)."""
-    return da.where(da > 0, -da)
+    import aerocom_data
+    return aerocom_data.positive_deposition(da)
 
 
 def sum_deposition_datasets(model_data, keys, out_name, require_all=True):
-    """Sum deposition species into a positive-sink Dataset.
-
-    Same require_all semantics as ``sum_datasets``: if any required species is
-    missing, return None so lifetime is skipped for that model (no partial sums).
-    Each component is converted to a positive sink before summing.
-    """
-    missing = [k for k in keys if model_data.get(k) is None]
-    if require_all and missing:
-        return None
-    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
-    if not dsets:
-        return None
-    arrays = [positive_deposition(d[list(d.data_vars)[0]]) for d in dsets]
-    total = arrays[0].copy()
-    for a in arrays[1:]:
-        total = total + a
-    return total.to_dataset(name=out_name)
+    import aerocom_data
+    return aerocom_data.sum_deposition_datasets(model_data, keys, out_name, require_all=require_all)
 
 
 def filter_lifetime(da, model_name, var_name, max_days=None, min_days=None):

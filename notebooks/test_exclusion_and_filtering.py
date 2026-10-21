@@ -47,36 +47,15 @@ print('PASS: excluded models are absent from model list')
 
 
 def normalize_dataset_time(ds, var_hint=None):
-    if ds is None:
-        return None
-    if not list(ds.data_vars):
-        return None
-    var_name = list(ds.data_vars)[0]
-    da = ds[var_name]
-    if 'time' not in da.dims or len(da.time) == 0:
-        return ds
-    if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
-        try:
-            if hasattr(da.indexes['time'], 'to_datetimeindex'):
-                new_times = da.indexes['time'].to_datetimeindex().values
-            else:
-                new_times = pd.to_datetime([str(t) for t in da.time.values]).values
-            da = da.assign_coords(time=new_times)
-        except Exception:
-            return ds
-    da = functions.normalize_monthly_time(da)
-    return da.to_dataset(name=var_name)
+    import aerocom_data
+    year = locals()["year"] if "year" in locals() else None
+    return aerocom_data.normalize_dataset_time(ds, var_hint=var_hint, year=year)
 
 
 def sum_datasets(model_data, keys, out_name):
-    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
-    if not dsets:
-        return None
-    arrays = [d[list(d.data_vars)[0]] for d in dsets]
-    total = arrays[0].copy()
-    for a in arrays[1:]:
-        total = total + a
-    return total.to_dataset(name=out_name)
+    import aerocom_data
+    req = require_all if "require_all" in locals() else False
+    return aerocom_data.sum_datasets(model_data, keys, out_name, require_all=req)
 
 
 LOAD_VARS = ['loadbc', 'loaddust', 'loadoa', 'loadso2', 'loadso4', 'loadss']
@@ -137,16 +116,8 @@ for m in models:
 print('PASS: no finite lifetime_BC_OA values outside filter bounds')
 
 # Build regional means and regression data (only africa/amazon, seasonal)
-REGIONS = {
-    'africa': {
-        'lon_range': (15, 37), 'lat_range': (-15, 0),
-        'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': False,
-    },
-    'amazon': {
-        'lon_range': (287, 317), 'lat_range': (-17, -3),
-        'time_slice': ('2010-07-01', '2010-10-31'), 'edge_weighted': False,
-    },
-}
+import regions as _region_registry
+REGIONS = _region_registry.aerocom_view([n for n in ['africa', 'amazon'] if n in _region_registry.REGIONS], year=2010)
 
 data_derived = {}
 for m in models:
@@ -172,22 +143,12 @@ for name, cfg in REGIONS.items():
 
 
 def aggregate_region(model_dict, var_name, region_name, skipna=False):
-    cfg = REGIONS[region_name]
-    result = {}
-    for model, model_data in model_dict.items():
-        if var_name not in model_data or model_data[var_name] is None:
-            continue
-        try:
-            val = ct.regional_aggregate(
-                model_data[var_name], masks[region_name],
-                spatial='mean', edge_weighted=cfg['edge_weighted'],
-                time_slice=cfg['time_slice'], temporal='mean',
-                skipna=skipna,
-            )
-            result[model] = val
-        except Exception as e:
-            print(f'  Aggregation failed for {var_name} {model} {region_name}: {e}')
-    return result
+    import notebook_setup as _setup
+    rts = return_time_series if "return_time_series" in locals() else False
+    return _setup.aggregate_region(
+        model_dict, var_name, region_name, masks, region=REGIONS,
+        return_time_series=rts, skipna=skipna,
+    )
 
 
 model_seasonal = {}

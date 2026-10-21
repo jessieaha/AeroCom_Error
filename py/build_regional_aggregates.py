@@ -17,7 +17,11 @@ grids. Writes ``tables/regional_seasonal_aggregates.parquet`` with columns:
 Usage
 -----
     python py/build_regional_aggregates.py
-    python py/build_regional_aggregates.py --out tables/regional_seasonal_aggregates.parquet
+        # shared wide table via regional_aggregates.build_regional
+        # (tables/aerocom_regional_seasonal.parquet)
+    python py/build_regional_aggregates.py --legacy
+        # previous long homogenized table
+    python py/build_regional_aggregates.py --legacy --species du
 
 Import helpers
 --------------
@@ -51,6 +55,7 @@ sys.path.insert(0, str(PROJECT_ROOT / 'notebooks'))
 import aerocom_data  # noqa: E402
 import cameo_toolbox as ct  # noqa: E402
 import notebook_setup as setup  # noqa: E402
+import regions as region_registry  # noqa: E402
 
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -73,6 +78,15 @@ ALL_VARIABLES = [
     'loadbc', 'loadoa', 'loaddust', 'loadso2', 'loadso4', 'loadss',
     'precip',
 ]
+# Dust build: dust budget + the column optics needed for SSA / AE / MEC.
+DUST_VARIABLES = [
+    'abs550aer', 'od440aer', 'od550aer', 'od870aer', 'od865aer', 'od550dust',
+    'loaddust', 'emidust', 'depdust', 'wetdu', 'precip',
+]
+SPECIES_OUT = {
+    'bb': PROJECT_ROOT / 'tables' / 'regional_seasonal_aggregates.parquet',
+    'du': PROJECT_ROOT / 'tables' / 'regional_seasonal_aggregates_du.parquet',
+}
 
 EXCLUDE_MODELS_DEFAULT = [
     # 'GEOS-i33p2-met2010_AP3-CTRL-2010',
@@ -90,6 +104,26 @@ BC_OA_EMI = ['emibc', 'emioa']
 BC_OA_DEP = ['depbc', 'depoa']
 
 DERIVED_PRE = ['MEC', 'MAC', 'SSA', 'AE']
+
+# Per-species sums carried as 'derived', the lifetime budget keys
+# (load, emission, deposition, output name) and homogenized obs pairs.
+SUM_VARS_BY_SPECIES = {
+    'bb': ('load_total', 'emi_total', 'dep_total', 'load_BC_OA', 'emi_BC_OA', 'dep_BC_OA'),
+    'du': ('load_total', 'emi_total', 'dep_total', 'load_du', 'emi_du', 'dep_du', 'wet_du'),
+}
+LIFETIME_KEYS = {
+    'bb': ('load_BC_OA', 'emi_BC_OA', 'dep_BC_OA', 'lifetime_BC_OA'),
+    'du': ('load_du', 'emi_du', 'dep_du', 'lifetime_du'),
+}
+HOMOG_KEYS = {
+    'bb': (('aaod', 'abs550aer'), ('ssa', 'SSA')),
+    'du': (('aaod', 'abs550aer'), ('ssa', 'SSA'), ('aod', 'od550aer')),
+}
+HOMOG_OBS = {
+    'aaod': ('AAOD_550', 'AAOD_550'),
+    'ssa': ('SSA', 'SSA'),
+    'aod': ('AOD_550', 'AOD_550'),
+}
 DERIVED_AFTER = ['lifetime_BC_OA']
 AGGREGATED_RAW = list(ALL_VARIABLES)  # raw fields after normalize
 DERIVED_COMBINED = [
@@ -127,8 +161,42 @@ for _k in (
     UNIT_BY_VAR[_k] = 'kg m-2 s-1'
 
 
+for _k in ('load_du',):
+    UNIT_BY_VAR[_k] = 'kg m-2'
+for _k in ('emi_du', 'dep_du', 'wet_du', 'wetdu'):
+    UNIT_BY_VAR[_k] = 'kg m-2 s-1'
+for _k in ('lifetime_du', 'lifetime_du_emission', 'lifetime_du_raw'):
+    UNIT_BY_VAR[_k] = 'days'
+UNIT_BY_VAR['MEC_du'] = 'm2 g-1'
+
+
 def _unit(var: str) -> str:
     return UNIT_BY_VAR.get(var, '1')
+
+
+def _region_cfg(region: str) -> dict:
+    """AeroCom 2010 view of any registered region (BB, SS or dust)."""
+    return setup.ALL_REGIONS[region]
+
+
+def _in_season(region: str, times: pd.Series) -> pd.Series:
+    """Time-slice + optional month-of-year filter for observation rows."""
+    cfg = _region_cfg(region)
+    t0, t1 = cfg['time_slice']
+    ok = (times >= t0) & (times <= pd.Timestamp(t1) + pd.Timedelta(days=1))
+    months = cfg.get('season_months')
+    if months is not None:
+        ok &= times.dt.month.isin(list(months))
+    return ok
+
+
+def _season_da(da: xr.DataArray, region: str) -> xr.DataArray:
+    cfg = _region_cfg(region)
+    da = da.sel(time=slice(*cfg['time_slice']))
+    months = cfg.get('season_months')
+    if months is not None:
+        da = da.where(da['time'].dt.month.isin(list(months)), drop=True)
+    return da
 
 
 def _first_da(ds_or_da):
@@ -140,7 +208,7 @@ def _first_da(ds_or_da):
 
 
 def _region_meta(region: str) -> dict:
-    cfg = setup.REGIONS[region]
+    cfg = _region_cfg(region)
     lon_min, lon_max = cfg['lon_range']
     lat_min, lat_max = cfg['lat_range']
     t0, t1 = cfg['time_slice']
@@ -224,6 +292,10 @@ def _normalize_model(raw_model: dict, model: str) -> dict:
     normalized['dep_BC_OA'] = setup.sum_deposition_datasets(
         normalized, BC_OA_DEP, 'dep_BC_OA', require_all=True
     )
+    normalized['load_du'] = setup.sum_datasets(normalized, ['loaddust'], 'load_du')
+    normalized['emi_du'] = setup.sum_datasets(normalized, ['emidust'], 'emi_du')
+    normalized['dep_du'] = setup.sum_deposition_datasets(normalized, ['depdust'], 'dep_du')
+    normalized['wet_du'] = setup.sum_deposition_datasets(normalized, ['wetdu'], 'wet_du')
     if normalized.get('precip') is not None:
         normalized['precip'] = setup.normalize_precipitation_units(normalized['precip'])
     return normalized
@@ -235,11 +307,20 @@ def _derive_pre_agg(normalized: dict, model: str) -> dict:
     for dv in DERIVED_PRE:
         ds = aerocom_data.calculate_derived_var(normalized, model, dv)
         out[dv] = None if ds is None else ds[list(ds.data_vars)[0]]
+    # Dust mass extinction per cell (m2 g-1), as MEC_du in the PPE tables.
+    od_du = _first_da(normalized.get('od550dust'))
+    load_du = _first_da(normalized.get('loaddust'))
+    if od_du is not None and load_du is not None:
+        try:
+            load_du = aerocom_data._align_da_to_ref(load_du, od_du, model_hint=f'{model}/loaddust')
+            out['MEC_du'] = (od_du / (load_du * 1e3)).where(load_du > 0)
+        except Exception as e:
+            print(f'  MEC_du failed for {model}: {e}')
     return out
 
 
 def _build_masks(template, region_names: Iterable[str]):
-    return setup.create_analysis_masks(template, list(region_names))
+    return setup.create_analysis_masks(template, list(region_names), region=setup.ALL_REGIONS)
 
 
 def _aggregate_one(
@@ -248,8 +329,10 @@ def _aggregate_one(
     region: str,
     return_time_series: bool = False,
 ) -> Optional[float]:
-    cfg = setup.REGIONS[region]
+    cfg = _region_cfg(region)
     try:
+        if cfg.get('season_months') is not None and 'time' in da.dims:
+            da = da.where(da['time'].dt.month.isin(list(cfg['season_months'])), drop=True)
         return ct.regional_aggregate(
             da, mask,
             spatial='mean',
@@ -321,11 +404,10 @@ def load_polder_df() -> pd.DataFrame:
 def polder_seasonal_rows(polder_df: pd.DataFrame, region_names: List[str]) -> List[dict]:
     rows = []
     for region in region_names:
-        cfg = setup.REGIONS[region]
+        cfg = _region_cfg(region)
         mask = _polder_region_mask(polder_df, cfg['lon_range'], cfg['lat_range'])
         sub = polder_df[mask].copy()
-        t0, t1 = cfg['time_slice']
-        sub = sub[(sub['time'] >= t0) & (sub['time'] <= t1)]
+        sub = sub[_in_season(region, sub['time'])]
         if sub.empty:
             continue
         w = np.cos(np.deg2rad(sub['latitude'].values))
@@ -384,11 +466,10 @@ def _polder_subs_by_region(
     """Pre-filter POLDER to each region's box + fire season once."""
     out = {}
     for region in region_names:
-        cfg = setup.REGIONS[region]
+        cfg = _region_cfg(region)
         mask = _polder_region_mask(polder_df, cfg['lon_range'], cfg['lat_range'])
         sub = polder_df.loc[mask].copy()
-        t0, t1 = cfg['time_slice']
-        sub = sub[(sub['time'] >= t0) & (sub['time'] <= t1)]
+        sub = sub[_in_season(region, sub['time'])]
         out[region] = sub
         print(f'  POLDER {region}: {len(sub)} points in season', flush=True)
     return out
@@ -399,6 +480,7 @@ def process_one_model(
     region_names: List[str],
     variables: List[str],
     polder_subs: Optional[Dict[str, pd.DataFrame]] = None,
+    species: str = 'bb',
 ) -> Tuple[List[dict], dict]:
     """Load → normalize → derive → aggregate one model. Returns (rows, sample_pairs).
 
@@ -434,19 +516,18 @@ def process_one_model(
     fields: Dict[str, Optional[xr.DataArray]] = {}
     for var in variables:
         fields[var] = _first_da(normalized.get(var))
-    for var in (
-        'load_total', 'emi_total', 'dep_total',
-        'load_BC_OA', 'emi_BC_OA', 'dep_BC_OA',
-    ):
+    sum_vars = SUM_VARS_BY_SPECIES[species]
+    for var in sum_vars:
         fields[var] = _first_da(normalized.get(var))
-    for var in DERIVED_PRE:
+    for var in DERIVED_PRE + (['MEC_du'] if species == 'du' else []):
         fields[var] = derived.get(var)
+    load_key, emi_key, dep_key, lt_key = LIFETIME_KEYS[species]
 
     rows: List[dict] = []
     sample_pairs: Dict[str, dict] = {}
 
     for region in region_names:
-        cfg = setup.REGIONS[region]
+        cfg = _region_cfg(region)
         mask = masks[region]
         # Area from any available field
         area = np.nan
@@ -464,18 +545,15 @@ def process_one_model(
             if val is None or not np.isfinite(_scalar(val)):
                 continue
             source = 'aggregated'
-            if var in (
-                'load_total', 'emi_total', 'dep_total',
-                'load_BC_OA', 'emi_BC_OA', 'dep_BC_OA',
-            ) or var in DERIVED_PRE:
+            if var in sum_vars or var in DERIVED_PRE or var == 'MEC_du':
                 source = 'derived'
             rows.append(_row(region, model, var, source, val, area))
             seasonal_vals[var] = _scalar(val)
 
         # Post-agg lifetimes
-        load = seasonal_vals.get('load_BC_OA')
-        emi = seasonal_vals.get('emi_BC_OA')
-        dep = seasonal_vals.get('dep_BC_OA')
+        load = seasonal_vals.get(load_key)
+        emi = seasonal_vals.get(emi_key)
+        dep = seasonal_vals.get(dep_key)
         lt_emi = lt_dep = np.nan
         if load is not None and emi is not None and emi != 0:
             lt_emi = load / (emi * 86400.0)
@@ -485,7 +563,7 @@ def process_one_model(
         lt_active = lt_dep if USE_DEPOSITION_FOR_LIFETIME else lt_emi
         if np.isfinite(lt_active):
             rows.append(_row(
-                region, model, 'lifetime_BC_OA_raw', 'derived', lt_active, area
+                region, model, f'{lt_key}_raw', 'derived', lt_active, area
             ))
             lt_filt = lt_active
             if (
@@ -494,24 +572,23 @@ def process_one_model(
             ):
                 lt_filt = np.nan
             rows.append(_row(
-                region, model, 'lifetime_BC_OA', 'derived', lt_filt, area
+                region, model, lt_key, 'derived', lt_filt, area
             ))
         if np.isfinite(lt_emi):
             rows.append(_row(
-                region, model, 'lifetime_BC_OA_emission', 'derived', lt_emi, area
+                region, model, f'{lt_key}_emission', 'derived', lt_emi, area
             ))
 
         # Model sampled at POLDER (for homogenization only)
         if polder_subs is not None:
             sample_pairs[region] = {}
             psub = polder_subs.get(region)
-            t0, t1 = cfg['time_slice']
-            for obs_key, model_key in (('aaod', 'abs550aer'), ('ssa', 'SSA')):
+            for obs_key, model_key in HOMOG_KEYS[species]:
                 regional = seasonal_vals.get(model_key)
                 da = fields.get(model_key)
                 if da is not None:
                     try:
-                        da_seas = da.sel(time=slice(t0, t1))
+                        da_seas = _season_da(da, region)
                     except Exception:
                         da_seas = da
                 else:
@@ -534,14 +611,13 @@ def homogenize_from_pairs(
     all_pairs: Dict[str, Dict[str, List[Tuple[float, float]]]],
     polder_sampled: Dict[str, Dict[str, float]],
     source_regions: List[str],
+    pair_keys: Iterable[str] = ('aaod', 'ssa'),
 ) -> List[dict]:
     """Zhong-style homogenization: sampled = a * regional + b → obs_h = (obs_s - b) / a."""
     rows = []
     for region in source_regions:
-        for obs_var, pair_key, polder_col in (
-            ('AAOD_550', 'aaod', 'AAOD_550'),
-            ('SSA', 'ssa', 'SSA'),
-        ):
+        for pair_key in pair_keys:
+            obs_var, polder_col = HOMOG_OBS[pair_key]
             pairs = all_pairs.get(region, {}).get(pair_key, [])
             pairs = [(r, s) for r, s in pairs if np.isfinite(r) and np.isfinite(s)]
             obs_s = polder_sampled.get(region, {}).get(polder_col, np.nan)
@@ -573,7 +649,7 @@ def gpcp_seasonal_rows(region_names: List[str]) -> List[dict]:
     precip = gpcp['sat_gauge_precip']
     rows = []
     for region in region_names:
-        cfg = setup.REGIONS[region]
+        cfg = _region_cfg(region)
         lon_min, lon_max = cfg['lon_range']
         lat_min, lat_max = cfg['lat_range']
         if lon_min > lon_max:
@@ -584,7 +660,7 @@ def gpcp_seasonal_rows(region_names: List[str]) -> List[dict]:
         else:
             sub = precip.sel(lon=slice(lon_min, lon_max))
         sub = sub.sel(lat=slice(lat_max, lat_min))
-        sub = sub.sel(time=slice(*cfg['time_slice']))
+        sub = _season_da(sub, region)
         if sub.size == 0:
             continue
         coslat = np.cos(np.deg2rad(sub.lat))
@@ -713,8 +789,11 @@ def build(
     region_names: Optional[List[str]] = None,
     model_names: Optional[List[str]] = None,
     do_homogenize: bool = True,
+    species: str = 'bb',
 ) -> pd.DataFrame:
-    variables = list(variables or ALL_VARIABLES)
+    if species not in LIFETIME_KEYS:
+        raise ValueError(f'species must be one of {sorted(LIFETIME_KEYS)}')
+    variables = list(variables or (DUST_VARIABLES if species == 'du' else ALL_VARIABLES))
     # Only keep variables that exist on disk
     available = {
         p.name for p in MONTHLY_DIR.iterdir()
@@ -724,12 +803,15 @@ def build(
     print(f'Variables to load ({len(variables)}): {variables}')
 
     exclude_models = list(exclude_models or EXCLUDE_MODELS_DEFAULT)
-    region_names = list(region_names or setup.REGIONS.keys())
-    print(f'Regions ({len(region_names)}): {region_names}')
+    if region_names is None:
+        region_names = (['global'] + region_registry.regions_for_species('du')
+                        if species == 'du' else list(setup.REGIONS.keys()))
+    region_names = list(region_names)
+    print(f'Species {species}; regions ({len(region_names)}): {region_names}')
 
-    # Discover models from abs550aer or od550aer dir
+    # Discover models from abs550aer or od550aer dir (dust: models with dust optics)
     model_set = set()
-    for var in ('od550aer', 'abs550aer', 'loadbc'):
+    for var in (('od550dust', 'loaddust') if species == 'du' else ('od550aer', 'abs550aer', 'loadbc')):
         vdir = MONTHLY_DIR / var
         if not vdir.exists():
             continue
@@ -758,18 +840,19 @@ def build(
 
     all_rows: List[dict] = []
     # Collect homogenization pairs: region -> key -> list[(regional, sampled)]
+    pair_keys = [k for k, _ in HOMOG_KEYS[species]]
     homog_pairs: Dict[str, Dict[str, List[Tuple[float, float]]]] = {
-        r: {'aaod': [], 'ssa': []} for r in region_names
+        r: {k: [] for k in pair_keys} for r in region_names
     }
 
     for i, model in enumerate(models, 1):
         print(f'\n[{i}/{len(models)}] {model}', flush=True)
         rows, pairs = process_one_model(
-            model, region_names, variables, polder_subs=polder_subs
+            model, region_names, variables, polder_subs=polder_subs, species=species
         )
         all_rows.extend(rows)
         for region, d in pairs.items():
-            for key in ('aaod', 'ssa'):
+            for key in pair_keys:
                 if key in d:
                     homog_pairs[region][key].append(d[key])
         print(f'  rows so far: {len(all_rows)}')
@@ -785,14 +868,17 @@ def build(
 
     if do_homogenize:
         print('\n--- Homogenization (source regions) ---')
-        source_regions = [r for r in ('africa', 'amazon') if r in region_names]
+        default_sources = ('africa', 'amazon') if species == 'bb' else \
+            tuple(region_registry.source_regions(species))
+        source_regions = [r for r in default_sources if r in region_names]
         # Outflow: copy sampled into homogenized for AAOD/SSA consistency
-        homog_rows = homogenize_from_pairs(homog_pairs, polder_sampled, source_regions)
+        homog_rows = homogenize_from_pairs(homog_pairs, polder_sampled, source_regions,
+                                           pair_keys=pair_keys)
         all_rows.extend(homog_rows)
         for region in region_names:
             if region in source_regions:
                 continue
-            for var in ('AAOD_550', 'SSA'):
+            for var in [HOMOG_OBS[k][0] for k in pair_keys]:
                 if var in polder_sampled.get(region, {}):
                     all_rows.append(_row(
                         region, 'POLDER', var, 'homogenized',
@@ -804,7 +890,8 @@ def build(
 
     df = pd.DataFrame(all_rows)
     # Drop non-finite values except lifetime NaNs (filtered)
-    keep_nan_vars = {'lifetime_BC_OA', 'lifetime', 'lifetime_BC_OA_raw'}
+    lt_key = LIFETIME_KEYS[species][3]
+    keep_nan_vars = {lt_key, 'lifetime', f'{lt_key}_raw'}
     mask_ok = df['value'].notna() | df['var'].isin(keep_nan_vars)
     df = df.loc[mask_ok].reset_index(drop=True)
 
@@ -819,12 +906,14 @@ def build(
         'n_models': len(models),
         'models': models,
         'variables': variables,
+        'species': species,
         'regions': {name: {
-            'lon_range': list(setup.REGIONS[name]['lon_range']),
-            'lat_range': list(setup.REGIONS[name]['lat_range']),
-            'time_slice': list(setup.REGIONS[name]['time_slice']),
-            'surface_type': setup.REGIONS[name].get('surface_type', 'all'),
-            'edge_weighted': setup.REGIONS[name].get('edge_weighted', False),
+            'lon_range': list(_region_cfg(name)['lon_range']),
+            'lat_range': list(_region_cfg(name)['lat_range']),
+            'time_slice': list(_region_cfg(name)['time_slice']),
+            'season_months': list(_region_cfg(name).get('season_months') or []),
+            'surface_type': _region_cfg(name).get('surface_type', 'all'),
+            'edge_weighted': _region_cfg(name).get('edge_weighted', False),
         } for name in region_names},
         'use_deposition_for_lifetime': USE_DEPOSITION_FOR_LIFETIME,
         'post_agg_lifetime_days': [POST_AGG_LIFETIME_MIN_DAYS, POST_AGG_LIFETIME_MAX_DAYS],
@@ -838,21 +927,42 @@ def build(
 
 
 def main(argv=None):
+    """Shared wide table by default. ``--legacy`` keeps the long homogenized file."""
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--out', type=Path, default=DEFAULT_OUT)
-    p.add_argument('--meta', type=Path, default=DEFAULT_META)
+    p.add_argument('--species', default='bb', choices=sorted(LIFETIME_KEYS),
+                   help='bb: BC+OA budget on the AeroCom BB regions (default); '
+                        'du: dust budget on the dust regions of py/regions.py')
+    p.add_argument('--out', type=Path, default=None)
+    p.add_argument('--meta', type=Path, default=None)
     p.add_argument('--no-homogenize', action='store_true')
     p.add_argument('--regions', nargs='*', default=None,
-                   help='Subset of setup.REGIONS (default: all)')
+                   help='Subset of setup.ALL_REGIONS (default: species regions)')
     p.add_argument('--models', nargs='*', default=None,
                    help='Subset of AeroCom models (default: all non-excluded)')
+    p.add_argument('--legacy', action='store_true',
+                   help='Write the long homogenized seasonal table (previous builder)')
+    p.add_argument('--quality', default=None, choices=('ppe', 'aerocom'))
     args = p.parse_args(argv)
-    build(
+    if args.legacy:
+        out = args.out or SPECIES_OUT[args.species]
+        meta = args.meta or out.with_name(out.stem + '_meta.json')
+        build(
+            out_path=out,
+            meta_path=meta,
+            region_names=args.regions,
+            model_names=args.models,
+            do_homogenize=not args.no_homogenize,
+            species=args.species,
+        )
+        return
+    from regional_aggregates import build_regional
+    build_regional(
+        source='aerocom',
+        regions=args.regions,
+        species=args.species,
+        models=args.models,
+        quality=args.quality,
         out_path=args.out,
-        meta_path=args.meta,
-        region_names=args.regions,
-        model_names=args.models,
-        do_homogenize=not args.no_homogenize,
     )
 
 

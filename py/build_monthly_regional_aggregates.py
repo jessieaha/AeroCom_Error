@@ -531,6 +531,11 @@ def build_monthly(
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--legacy', action='store_true',
+                   help='Write the previous wide monthly cache (dask per model)')
+    p.add_argument('--quality', default=None, choices=('ppe', 'aerocom'),
+                   help='Shared builder filter (legacy path keeps its own 0.05 filter)')
+    p.add_argument('--species', default='ss', choices=('ss', 'bb', 'du'))
     p.add_argument('--out', type=Path, default=DEFAULT_OUT)
     p.add_argument('--meta', type=Path, default=DEFAULT_META)
     p.add_argument('--regions', nargs='*', default=None,
@@ -548,6 +553,22 @@ def main(argv=None):
     p.add_argument('--slurm-jobs', type=int, default=4)
     p.add_argument('--slurm-walltime', type=str, default='02:00:00')
     args = p.parse_args(argv)
+
+    if not args.legacy:
+        from regional_aggregates import build_regional
+        # Do not overwrite the legacy monthly cache unless --out is explicit
+        # together with --legacy. The shared table is seasonal.
+        out = None if args.out == DEFAULT_OUT else args.out
+        build_regional(
+            source='aerocom',
+            regions=args.regions,
+            species=args.species,
+            models=args.models,
+            quality=args.quality or 'aerocom',
+            out_path=out,
+            seasonal=True,
+        )
+        return
 
     slurm_kwargs = None
     if args.slurm:

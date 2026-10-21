@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Stream monthly PPE fields into ensemble NetCDFs (AOD_SS_ERROR inputs).
+"""Stream monthly PPE fields into ensemble NetCDFs for one registered PPE run.
 
-Read-only over the Pace PPE experiment tree. Per-member temps land on
-scratch; durable products are written under Data/PPE_processed_monthly/.
+Read-only over the Pace PPE experiment tree. Per-member extracts and the
+ensemble group NetCDFs land on scratch under
+``/scratch-shared/jzhang1/PPE/<ppe_id>/`` (see ``PPE_set.run_dirs``).
 Never writes into the source directory. No pickle.
+
+    python py/ppe_extract_monthly.py --ppe pd2010 --workers 8
 """
 
 from __future__ import annotations
@@ -11,9 +14,9 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
-import os
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -37,6 +40,17 @@ log = logging.getLogger("ppe_extract")
 
 ENS_DIR_RE = re.compile(r"^PPE_ENS_(.+)$")
 
+PROVENANCE_FIELDS = [
+    "ppe_id",
+    "experiment",
+    "ens_id",
+    "aerocom_name",
+    "ham_name",
+    "source_file",
+    "status",
+    "units",
+]
+
 
 # ---------------------------------------------------------------------------
 # Discovery helpers
@@ -58,15 +72,19 @@ def experiment_label(name: str) -> str:
 
 
 def discover_ensembles(root: Path, only: Optional[Sequence[str]] = None) -> List[Path]:
-    dirs = [p for p in root.glob(cfg.PPE_PATTERN) if p.is_dir()]
+    dirs = []
+    for p in root.glob(cfg.PPE_PATTERN):
+        if not p.is_dir():
+            continue
+        try:
+            ens_id_from_name(p.name)
+        except ValueError:
+            continue
+        dirs.append(p)
 
     def sort_key(p: Path):
-        try:
-            eid = ens_id_from_name(p.name)
-        except ValueError:
-            return (1, p.name)
-        # Control last among negatives; numeric members ascending.
-        return (0, eid if eid >= 0 else 10**9, p.name)
+        eid = ens_id_from_name(p.name)
+        return (eid if eid >= 0 else 10**9, p.name)
 
     dirs = sorted(dirs, key=sort_key)
     if only:
@@ -83,11 +101,21 @@ def _is_excluded(path: Path) -> bool:
     return any(s in name for s in cfg.EXCLUDE_NAME_SUBSTR)
 
 
-def find_source_file(ens_dir: Path, group: str) -> Optional[Path]:
-    """Return the first matching NetCDF for a source group, or None."""
-    pattern = cfg.FILE_GLOBS[group]
+def find_source_file(ens_dir: Path, group: str, globs: Dict[str, str],
+                     group_roots: Optional[Dict[str, Path]] = None) -> Optional[Path]:
+    """Return the first matching NetCDF for a source group, or None.
+
+    ``group_roots`` maps a group to another experiments root holding the
+    same PPE_ENS_* member directories (e.g. precip delivered separately).
+    """
+    pattern = globs.get(group)
+    if pattern is None:
+        return None
+    search_dir = ens_dir
+    if group_roots and group in group_roots:
+        search_dir = Path(group_roots[group]) / ens_dir.name
     matches = [
-        p for p in ens_dir.glob(pattern)
+        p for p in search_dir.glob(pattern)
         if p.is_file() and not _is_excluded(p) and p.stat().st_size > 0
     ]
     # Prefer non-symlink outputs when both exist (unlikely).
@@ -144,7 +172,11 @@ def standardize_coords(ds: xr.Dataset) -> xr.Dataset:
 
 
 def normalize_time_month_start(obj: xr.DataArray | xr.Dataset):
-    """Label each timestep by calendar month start so streams align."""
+    """Label each timestep by calendar month start so streams align.
+
+    Handles mid-month (emi, 2024 rad) and end-of-month (2010 burden/rad,
+    e.g. 2010-01-31T23:52) stamps alike.
+    """
     if "time" not in obj.coords:
         return obj
     times = pd.to_datetime(np.asarray(obj["time"].values))
@@ -160,15 +192,13 @@ def to_monthly_mean(ds: xr.Dataset) -> xr.Dataset:
     if n <= 12:
         return ds
     log.info("  Resampling %d timesteps -> monthly mean", n)
-    # Drop non-lat/lon/time extras that break resample (e.g. spectral).
     keep_dims = set()
     for v in ds.data_vars:
         keep_dims.update(ds[v].dims)
     drop_coords = [c for c in ds.coords if c not in ("time", "lat", "lon") and c not in keep_dims]
     if drop_coords:
         ds = ds.drop_vars([c for c in drop_coords if c in ds.variables], errors="ignore")
-    monthly = ds.resample(time="MS").mean(keep_attrs=True)
-    return monthly
+    return ds.resample(time="MS").mean(keep_attrs=True)
 
 
 def extract_var_from_file(
@@ -205,16 +235,20 @@ def extract_var_from_file(
 def resolve_variable(
     ens_dir: Path,
     aerocom_name: str,
+    ppe_id: str,
 ) -> Tuple[Optional[xr.DataArray], Optional[Path], str, str]:
     """Return (dataarray, source_path, status, ham_name).
 
     status is monthly | hifreq_resampled | missing.
     """
-    ham_name, preferred, _units = cfg.VAR_MAP[aerocom_name]
-    # Preferred first, then other groups.
+    run = cfg.get_run(ppe_id)
+    globs = run["file_globs"]
+    ham_name = cfg.VAR_MAP[aerocom_name][0]
+    preferred = cfg.preferred_group(ppe_id, aerocom_name)
     groups: List[str] = [preferred] + [g for g in cfg.SOURCE_FALLBACK if g != preferred]
+    groups = [g for g in groups if g in globs]
     for group in groups:
-        path = find_source_file(ens_dir, group)
+        path = find_source_file(ens_dir, group, globs, run.get("group_roots"))
         if path is None:
             continue
         allow_resample = group == "hifreq"
@@ -226,7 +260,20 @@ def resolve_variable(
     return None, None, "missing", ham_name
 
 
-def build_member_dataset(ens_dir: Path) -> Tuple[xr.Dataset, List[dict]]:
+def _prov_row(ppe_id, exp, eid, aerocom_name, ham_name, source_file, status, units) -> dict:
+    return {
+        "ppe_id": ppe_id,
+        "experiment": exp,
+        "ens_id": eid,
+        "aerocom_name": aerocom_name,
+        "ham_name": ham_name,
+        "source_file": source_file,
+        "status": status,
+        "units": units,
+    }
+
+
+def build_member_dataset(ens_dir: Path, ppe_id: str) -> Tuple[xr.Dataset, List[dict]]:
     """Extract all mapped variables for one ensemble member."""
     rows: List[dict] = []
     data_vars: Dict[str, xr.DataArray] = {}
@@ -234,18 +281,10 @@ def build_member_dataset(ens_dir: Path) -> Tuple[xr.Dataset, List[dict]]:
     eid = ens_id_from_name(ens_dir.name)
 
     for aerocom_name in cfg.VAR_MAP:
-        da, path, status, ham_name = resolve_variable(ens_dir, aerocom_name)
+        da, path, status, ham_name = resolve_variable(ens_dir, aerocom_name, ppe_id)
         units = cfg.VAR_MAP[aerocom_name][2]
-        row = {
-            "experiment": exp,
-            "ens_id": eid,
-            "aerocom_name": aerocom_name,
-            "ham_name": ham_name,
-            "source_file": str(path) if path else "",
-            "status": status,
-            "units": units,
-        }
-        rows.append(row)
+        rows.append(_prov_row(ppe_id, exp, eid, aerocom_name, ham_name,
+                              str(path) if path else "", status, units))
         if da is None:
             log.warning("  MISSING %s (%s) in %s", aerocom_name, ham_name, ens_dir.name)
             continue
@@ -258,19 +297,8 @@ def build_member_dataset(ens_dir: Path) -> Tuple[xr.Dataset, List[dict]]:
         da.attrs["source_file"] = path.name if path else ""
         data_vars[aerocom_name] = da
 
-    # Record explicitly-missing deposition / wet / dry names.
     for miss in cfg.MISSING_VARS:
-        rows.append(
-            {
-                "experiment": exp,
-                "ens_id": eid,
-                "aerocom_name": miss,
-                "ham_name": "",
-                "source_file": "",
-                "status": "missing",
-                "units": "",
-            }
-        )
+        rows.append(_prov_row(ppe_id, exp, eid, miss, "", "", "missing", ""))
 
     if not data_vars:
         raise RuntimeError(f"No variables extracted for {ens_dir.name}")
@@ -286,12 +314,8 @@ def build_member_dataset(ens_dir: Path) -> Tuple[xr.Dataset, List[dict]]:
         if "time" in da.dims:
             da = da.reindex(time=ref_time)
         aligned[name] = da
-    data_vars = aligned
+    ds = standardize_coords(xr.Dataset(aligned))
 
-    ds = xr.Dataset(data_vars)
-    ds = standardize_coords(ds)
-
-    # Derived precip mm day-1 from precip_na.
     if "precip_na" in ds:
         precip = (ds["precip_na"] * 86400.0).astype(np.float32)
         precip.name = "precip"
@@ -302,54 +326,58 @@ def build_member_dataset(ens_dir: Path) -> Tuple[xr.Dataset, List[dict]]:
             "conversion": "precip_na * 86400",
         }
         ds["precip"] = precip
-        rows.append(
-            {
-                "experiment": exp,
-                "ens_id": eid,
-                "aerocom_name": "precip",
-                "ham_name": "precip_na*86400",
-                "source_file": next(
-                    (r["source_file"] for r in rows if r["aerocom_name"] == "precip_na"),
-                    "",
-                ),
-                "status": "monthly",
-                "units": "mm day-1",
-            }
-        )
+        src = next((r["source_file"] for r in rows if r["aerocom_name"] == "precip_na"), "")
+        rows.append(_prov_row(ppe_id, exp, eid, "precip", "precip_na*86400", src,
+                              "monthly", "mm day-1"))
+    else:
+        rows.append(_prov_row(ppe_id, exp, eid, "precip", "", "", "missing", "mm day-1"))
 
     ds = ds.expand_dims(ens=[eid])
     ds = ds.assign_coords(experiment=("ens", np.array([exp], dtype="U64")))
-    ds.attrs["title"] = f"PPE monthly extract {ens_dir.name}"
+    ds.attrs["title"] = f"PPE monthly extract {ppe_id} {ens_dir.name}"
+    ds.attrs["ppe_id"] = ppe_id
     ds.attrs["source_dir"] = str(ens_dir)
     return ds, rows
 
 
-def member_out_path(ens_dir: Path) -> Path:
-    return cfg.SCRATCH_MEMBERS / f"{ens_dir.name}.nc"
+def member_out_path(ens_dir: Path, ppe_id: str) -> Path:
+    return cfg.run_dirs(ppe_id)["members"] / f"{ens_dir.name}.nc"
 
 
-def sources_for_member(ens_dir: Path) -> List[Path]:
+def sources_for_member(ens_dir: Path, globs: Dict[str, str]) -> List[Path]:
     paths = []
-    for group in cfg.FILE_GLOBS:
+    for group in globs:
         if group == "hifreq":
             continue  # do not gate renew on the 25 GB file
-        p = find_source_file(ens_dir, group)
+        p = find_source_file(ens_dir, group, globs)
         if p is not None:
             paths.append(p)
     return paths
 
 
-def member_is_fresh(ens_dir: Path, out: Path) -> bool:
-    if cfg.RENEW or not out.exists():
+def member_is_fresh(ens_dir: Path, out: Path, globs: Dict[str, str], renew: bool) -> bool:
+    if renew or not out.exists():
         return False
     try:
         out_m = out.stat().st_mtime
     except OSError:
         return False
-    srcs = sources_for_member(ens_dir)
+    srcs = sources_for_member(ens_dir, globs)
     if not srcs:
         return False
-    return out_m >= max(source_mtime(p) for p in srcs)
+    if out_m < max(source_mtime(p) for p in srcs):
+        return False
+    # Stale if the variable map grew since the member was written.
+    try:
+        with xr.open_dataset(out, engine=cfg.XR_WRITE_ENGINE) as ds:
+            have = set(ds.data_vars)
+    except Exception:
+        return False
+    missing_now = set(cfg.VAR_MAP) - have
+    # Precip vars are legitimately absent when the run has no precip stream.
+    if not any(g in globs for g in ("vphysc", "echam")):
+        missing_now -= set(cfg.PRECIP_VARS)
+    return not missing_now
 
 
 def netcdf_encoding(ds: xr.Dataset, with_ens_chunks: bool = True) -> dict:
@@ -370,13 +398,13 @@ def netcdf_encoding(ds: xr.Dataset, with_ens_chunks: bool = True) -> dict:
     return enc
 
 
-def provenance_from_existing_member(ens_dir: Path, out: Path) -> List[dict]:
+def provenance_from_existing_member(ens_dir: Path, out: Path, ppe_id: str) -> List[dict]:
     """Rebuild provenance rows from an existing scratch member file."""
     exp = experiment_label(ens_dir.name)
     eid = ens_id_from_name(ens_dir.name)
     rows: List[dict] = []
     try:
-        ds = xr.open_dataset(out, engine=getattr(cfg, "XR_WRITE_ENGINE", cfg.XR_ENGINE))
+        ds = xr.open_dataset(out, engine=cfg.XR_WRITE_ENGINE)
     except Exception as e:
         log.warning("Could not read existing %s for provenance: %s", out, e)
         return rows
@@ -384,72 +412,41 @@ def provenance_from_existing_member(ens_dir: Path, out: Path) -> List[dict]:
         for aerocom_name, (ham_name, _grp, units) in cfg.VAR_MAP.items():
             if aerocom_name in ds.data_vars:
                 da = ds[aerocom_name]
-                rows.append(
-                    {
-                        "experiment": exp,
-                        "ens_id": eid,
-                        "aerocom_name": aerocom_name,
-                        "ham_name": da.attrs.get("ham_name", ham_name),
-                        "source_file": da.attrs.get("source_file", ""),
-                        "status": "monthly",
-                        "units": da.attrs.get("units", units),
-                    }
-                )
+                rows.append(_prov_row(ppe_id, exp, eid, aerocom_name,
+                                      da.attrs.get("ham_name", ham_name),
+                                      da.attrs.get("source_file", ""), "monthly",
+                                      da.attrs.get("units", units)))
             else:
-                rows.append(
-                    {
-                        "experiment": exp,
-                        "ens_id": eid,
-                        "aerocom_name": aerocom_name,
-                        "ham_name": ham_name,
-                        "source_file": "",
-                        "status": "missing",
-                        "units": units,
-                    }
-                )
+                rows.append(_prov_row(ppe_id, exp, eid, aerocom_name, ham_name, "",
+                                      "missing", units))
         if "precip" in ds.data_vars:
-            rows.append(
-                {
-                    "experiment": exp,
-                    "ens_id": eid,
-                    "aerocom_name": "precip",
-                    "ham_name": "precip_na*86400",
-                    "source_file": ds["precip"].attrs.get("derived_from", "precip_na"),
-                    "status": "monthly",
-                    "units": "mm day-1",
-                }
-            )
+            rows.append(_prov_row(ppe_id, exp, eid, "precip", "precip_na*86400",
+                                  ds["precip"].attrs.get("derived_from", "precip_na"),
+                                  "monthly", "mm day-1"))
+        else:
+            rows.append(_prov_row(ppe_id, exp, eid, "precip", "", "", "missing", "mm day-1"))
         for miss in cfg.MISSING_VARS:
-            rows.append(
-                {
-                    "experiment": exp,
-                    "ens_id": eid,
-                    "aerocom_name": miss,
-                    "ham_name": "",
-                    "source_file": "",
-                    "status": "missing",
-                    "units": "",
-                }
-            )
+            rows.append(_prov_row(ppe_id, exp, eid, miss, "", "", "missing", ""))
     finally:
         ds.close()
     return rows
 
 
-def write_member(ens_dir: Path) -> Tuple[Path, List[dict]]:
-    out = member_out_path(ens_dir)
+def write_member(ens_dir: Path, ppe_id: str, renew: bool = False) -> Tuple[Path, List[dict]]:
+    globs = cfg.get_run(ppe_id)["file_globs"]
+    out = member_out_path(ens_dir, ppe_id)
     out.parent.mkdir(parents=True, exist_ok=True)
-    if member_is_fresh(ens_dir, out):
+    if member_is_fresh(ens_dir, out, globs, renew):
         log.info("Skip (fresh) %s", ens_dir.name)
-        return out, provenance_from_existing_member(ens_dir, out)
+        return out, provenance_from_existing_member(ens_dir, out, ppe_id)
 
-    log.info("Extracting %s ...", ens_dir.name)
-    ds, rows = build_member_dataset(ens_dir)
+    log.info("Extracting %s/%s ...", ppe_id, ens_dir.name)
+    ds, rows = build_member_dataset(ens_dir, ppe_id)
     tmp = out.with_suffix(".nc.tmp")
     try:
         ds.to_netcdf(
             tmp,
-            engine=getattr(cfg, "XR_WRITE_ENGINE", cfg.XR_ENGINE),
+            engine=cfg.XR_WRITE_ENGINE,
             encoding=netcdf_encoding(ds, with_ens_chunks=False),
         )
         tmp.replace(out)
@@ -467,16 +464,26 @@ def write_member(ens_dir: Path) -> Tuple[Path, List[dict]]:
 # ---------------------------------------------------------------------------
 # Ensemble concat
 # ---------------------------------------------------------------------------
-def write_group_ensemble(member_paths: Sequence[Path], group: str, var_names: Sequence[str]) -> Path:
-    """Concat member files along ens for one variable group."""
-    cfg.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = cfg.OUTPUT_DIR / f"{group}_monthly.nc"
-    log.info("Building %s from %d members ...", out.name, len(member_paths))
+def write_group_ensemble(
+    member_paths: Sequence[Path],
+    group: str,
+    var_names: Sequence[str],
+    ppe_id: str,
+    source_root: Path,
+) -> Optional[Path]:
+    """Concat member files along ens for one variable group.
+
+    Returns None (no file) when no member carries any variable of the group,
+    e.g. precip for a PPE without a precip stream.
+    """
+    out_dir = cfg.run_dirs(ppe_id)["ensemble"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{group}_monthly.nc"
+    log.info("Building %s/%s from %d members ...", ppe_id, out.name, len(member_paths))
 
     datasets = []
     for path in member_paths:
-        write_eng = getattr(cfg, "XR_WRITE_ENGINE", cfg.XR_ENGINE)
-        ds = xr.open_dataset(path, engine=write_eng)
+        ds = xr.open_dataset(path, engine=cfg.XR_WRITE_ENGINE)
         present = [v for v in var_names if v in ds.data_vars]
         if not present:
             ds.close()
@@ -488,19 +495,22 @@ def write_group_ensemble(member_paths: Sequence[Path], group: str, var_names: Se
         ds.close()
 
     if not datasets:
-        raise RuntimeError(f"No member data for group {group}")
+        log.warning("  No member data for group %s in %s; not written", group, ppe_id)
+        if out.exists():
+            out.unlink()
+        return None
 
     combined = xr.concat(datasets, dim="ens", combine_attrs="override")
     combined = combined.sortby("ens")
-    combined.attrs["title"] = f"PPE ensemble monthly {group}"
+    combined.attrs["title"] = f"PPE ensemble monthly {group} ({ppe_id})"
+    combined.attrs["ppe_id"] = ppe_id
     combined.attrs["n_ensemble"] = int(combined.sizes.get("ens", 0))
-    combined.attrs["source_root"] = str(cfg.PPE_ROOT)
+    combined.attrs["source_root"] = str(source_root)
 
     tmp = out.with_suffix(".nc.tmp")
-    write_eng = getattr(cfg, "XR_WRITE_ENGINE", cfg.XR_ENGINE)
     combined.to_netcdf(
         tmp,
-        engine=write_eng,
+        engine=cfg.XR_WRITE_ENGINE,
         encoding=netcdf_encoding(combined, with_ens_chunks=True),
     )
     combined.close()
@@ -509,39 +519,29 @@ def write_group_ensemble(member_paths: Sequence[Path], group: str, var_names: Se
     return out
 
 
-def append_provenance(rows: Iterable[dict], path: Path) -> None:
+def write_provenance(rows: Iterable[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    rows = list(rows)
-    if not rows:
-        return
-    fieldnames = [
-        "experiment",
-        "ens_id",
-        "aerocom_name",
-        "ham_name",
-        "source_file",
-        "status",
-        "units",
-    ]
-    write_header = not path.exists()
-    with path.open("a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if write_header:
-            writer.writeheader()
+    rows = sorted(rows, key=lambda r: (int(r["ens_id"]) if int(r["ens_id"]) >= 0 else 10**9,
+                                       r["aerocom_name"]))
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=PROVENANCE_FIELDS)
+        writer.writeheader()
         for row in rows:
-            writer.writerow({k: row.get(k, "") for k in fieldnames})
-
-
-def reset_provenance(path: Path) -> None:
-    if path.exists():
-        path.unlink()
+            writer.writerow({k: row.get(k, "") for k in PROVENANCE_FIELDS})
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument(
+        "--ppe",
+        default=cfg.DEFAULT_PPE,
+        choices=sorted(cfg.PPE_RUNS),
+        help="Registered PPE run (PPE_set.PPE_RUNS)",
+    )
     p.add_argument(
         "--only",
         nargs="+",
@@ -561,43 +561,65 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--ppe-root",
         type=Path,
-        default=cfg.PPE_ROOT,
-        help="Override PPE experiments root (read-only)",
+        default=None,
+        help="Override the run's experiments root (read-only)",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel member extracts (processes)",
     )
     return p.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    if args.renew:
-        cfg.RENEW = True
+    ppe_id = args.ppe
+    run = cfg.get_run(ppe_id)
+    renew = bool(args.renew or cfg.RENEW)
+    dirs = cfg.run_dirs(ppe_id)
+    for key in ("members", "ensemble", "logs"):
+        dirs[key].mkdir(parents=True, exist_ok=True)
 
-    cfg.SCRATCH_MEMBERS.mkdir(parents=True, exist_ok=True)
-    cfg.SCRATCH_LOGS.mkdir(parents=True, exist_ok=True)
-    cfg.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    root = args.ppe_root
+    root = args.ppe_root or run["root"]
     if not root.is_dir():
         log.error("PPE root not found: %s", root)
         return 1
 
     ensembles = discover_ensembles(root, only=args.only)
-    log.info("Found %d ensembles under %s", len(ensembles), root)
+    log.info("[%s] Found %d ensembles under %s", ppe_id, len(ensembles), root)
     if not ensembles:
         return 1
 
-    # Fresh provenance for this run (full or restricted).
-    reset_provenance(cfg.PROVENANCE_CSV)
-
     member_paths: List[Path] = []
-    for ens_dir in ensembles:
-        try:
-            path, rows = write_member(ens_dir)
-            member_paths.append(path)
-            append_provenance(rows, cfg.PROVENANCE_CSV)
-        except Exception as e:
-            log.exception("Failed %s: %s", ens_dir.name, e)
+    all_rows: List[dict] = []
+    failed: List[str] = []
+    if args.workers > 1:
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            futures = {pool.submit(write_member, d, ppe_id, renew): d for d in ensembles}
+            for fut in as_completed(futures):
+                d = futures[fut]
+                try:
+                    path, rows = fut.result()
+                    member_paths.append(path)
+                    all_rows.extend(rows)
+                except Exception as e:
+                    log.exception("Failed %s: %s", d.name, e)
+                    failed.append(d.name)
+    else:
+        for d in ensembles:
+            try:
+                path, rows = write_member(d, ppe_id, renew)
+                member_paths.append(path)
+                all_rows.extend(rows)
+            except Exception as e:
+                log.exception("Failed %s: %s", d.name, e)
+                failed.append(d.name)
 
+    write_provenance(all_rows, dirs["provenance"])
+    if failed:
+        log.warning("Failed members (%d): %s", len(failed), failed)
     if not member_paths:
         log.error("No member files produced")
         return 1
@@ -608,12 +630,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for group, var_names in cfg.GROUP_VARS.items():
         try:
-            write_group_ensemble(member_paths, group, var_names)
+            write_group_ensemble(sorted(member_paths), group, var_names, ppe_id, root)
         except Exception as e:
             log.exception("Failed group %s: %s", group, e)
             return 1
 
-    log.info("Done. Provenance: %s", cfg.PROVENANCE_CSV)
+    log.info("Done. Provenance: %s", dirs["provenance"])
     return 0
 
 

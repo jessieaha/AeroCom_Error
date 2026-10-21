@@ -165,105 +165,20 @@ else:
 
 # %%
 def normalize_dataset_time(ds, var_hint=None):
-    """Normalize time coordinate of a dataset to first-of-month."""
-    if ds is None or not list(ds.data_vars):
-        return None
-    var_name = list(ds.data_vars)[0]
-    da = ds[var_name]
-    if 'time' not in da.dims or len(da.time) == 0:
-        return ds
-
-    if var_hint and 'GEOS' in str(var_hint).upper():
-        try:
-            ds = xr.decode_cf(ds)
-            da = ds[var_name]
-        except Exception as e:
-            print(f'  Warning: GEOS decode_cf failed for {var_hint}: {e}')
-
-    def _to_month_start(values):
-        try:
-            return pd.to_datetime(values).to_period('M').to_timestamp().values
-        except Exception:
-            return np.array([
-                np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
-                for t in values
-            ])
-
-    if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
-        try:
-            raw = da.time.values
-            if raw.dtype.kind in 'iuf' and np.all(raw > 100000) and np.all(raw < 999999):
-                pass
-            elif 'units' in da.time.attrs:
-                try:
-                    new_times = decode_cf_datetime(
-                        da.time.values,
-                        da.time.attrs.get('units'),
-                        da.time.attrs.get('calendar', 'standard'),
-                    )
-                except Exception:
-                    new_times = pd.to_datetime([str(t) for t in da.time.values]).values
-                da = da.assign_coords(time=new_times)
-            elif hasattr(da.indexes.get('time', None), 'to_datetimeindex'):
-                try:
-                    new_times = da.indexes['time'].to_datetimeindex().values
-                except OverflowError:
-                    new_times = np.array([
-                        np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
-                        for t in da.indexes['time']
-                    ])
-                da = da.assign_coords(time=new_times)
-            else:
-                da = da.assign_coords(
-                    time=pd.to_datetime([str(t) for t in da.time.values]).values
-                )
-        except Exception as e:
-            print(f'  Warning: cftime conversion failed for {var_hint}: {e}')
-            return ds
-
-    da = functions.normalize_monthly_time(da)
-    da = da.assign_coords(time=_to_month_start(da.time.values))
-    return da.to_dataset(name=var_name)
+    import aerocom_data
+    year = locals()["year"] if "year" in locals() else None
+    return aerocom_data.normalize_dataset_time(ds, var_hint=var_hint, year=year)
 
 
 def sum_datasets(model_data, keys, out_name):
-    """Sum a list of variables (Datasets) into a new Dataset, skipping missing ones."""
-    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
-    if not dsets:
-        return None
-    arrays = [d[list(d.data_vars)[0]] for d in dsets]
-    total = arrays[0].copy()
-    for a in arrays[1:]:
-        total = total + a
-    return total.to_dataset(name=out_name)
+    import aerocom_data
+    req = require_all if "require_all" in locals() else False
+    return aerocom_data.sum_datasets(model_data, keys, out_name, require_all=req)
 
 
 def normalize_precipitation_units(precip_ds):
-    """Convert model precipitation to mm day^-1."""
-    if precip_ds is None:
-        return None
-    var_name = list(precip_ds.data_vars)[0]
-    da = precip_ds[var_name]
-    units = da.attrs.get('units', 'kg m-2 s-1').lower().replace(' ', '')
-    if units in ('kgm-2s-1', 'kgm^-2s^-1', 'kg/m2/s', 'kgm-2s-1'):
-        factor = 86400.0
-    elif units in ('gm-2s-1', 'gm^-2s^-1', 'g/m2/s', 'gm-2s-1'):
-        factor = 86.4
-    elif units in ('mmday-1', 'mm/day', 'mmday^-1', 'mmd-1'):
-        factor = 1.0
-    elif units in ('ms-1', 'm/s', 'm s-1'):
-        factor = 86400.0 * 1000.0
-    else:
-        factor = 86400.0  # treat 'km m-2 s-1' typo as kg
-    da = da * factor
-    try:
-        global_mean = float(da.mean().values)
-    except Exception:
-        global_mean = np.nan
-    if not np.isnan(global_mean) and global_mean > 100.0:
-        da = da / 1000.0
-    da.attrs['units'] = 'mm day-1'
-    return da.to_dataset(name=var_name)
+    import aerocom_data
+    return aerocom_data.normalize_precipitation_units(precip_ds)
 
 
 LOAD_VARS = ['loadbc', 'loaddust', 'loadoa', 'loadso4', 'loadss']
@@ -299,21 +214,8 @@ print('Time coordinates normalized; total/BC+OA load and primary emissions built
 
 # %%
 def filter_lifetime(da, model_name, var_name, max_days=None, min_days=None):
-    """Mask unrealistic lifetime values (NaN, inf, outside thresholds)."""
-    if da is None:
-        return None, {'n_total': 0, 'n_excluded': 0}
-    if max_days is None and min_days is None:
-        return da, {'n_total': int(da.size), 'n_excluded': 0}
-    bad = np.isnan(da) | np.isinf(da)
-    if max_days is not None:
-        bad = bad | (da > max_days)
-    if min_days is not None:
-        bad = bad | (da < min_days)
-    n_excluded = int(bad.sum())
-    if n_excluded:
-        print(f'  Lifetime filter: {model_name} {var_name} excluded {n_excluded:,} / {da.size:,} values '
-              f'({n_excluded / da.size * 100:.2f}%) outside [{min_days}, {max_days}] days')
-    return da.where(~bad), {'n_total': int(da.size), 'n_excluded': n_excluded}
+    import notebook_setup as _setup
+    return _setup.filter_lifetime(da, model_name, var_name, max_days=max_days, min_days=min_days)
 
 
 derived_vars_pre = [dv for dv in ['MEC', 'MAC', 'SSA', 'AE'] if dv not in DERIVED_VAR_AFTER_AGG]
@@ -380,28 +282,8 @@ for dv in ['MEC', 'MAC', 'SSA', 'AE', 'lifetime', 'lifetime_BC_OA']:
 # ## Regional masks and monthly aggregation
 
 # %%
-REGIONS = {
-    'global': {
-        'surface_type': 'all',
-        'lon_range': (0, 360), 'lat_range': (-90, 90),
-        'time_slice': ('2010-01-01', '2010-12-31'), 'edge_weighted': False,
-    },
-    'africa': {
-        'surface_type': 'land',
-        'lon_range': (15, 37), 'lat_range': (-15, 0),
-        'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': False,
-    },
-    'amazon': {
-        'surface_type': 'land',
-        'lon_range': (287, 317), 'lat_range': (-17, -3),
-        'time_slice': ('2010-07-01', '2010-10-31'), 'edge_weighted': False,
-    },
-    'outflow_af': {
-        'surface_type': 'ocean',
-        'lon_range': (350, 8), 'lat_range': (-15, 3),
-        'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': True,
-    },
-}
+import regions as _region_registry
+REGIONS = _region_registry.aerocom_view([n for n in ['global', 'africa', 'amazon', 'outflow_af'] if n in _region_registry.REGIONS], year=2010)
 
 sample_model = next((m for m in models if data[m].get('od550aer') is not None), None)
 template = data[sample_model]['od550aer'].isel(time=0)
@@ -419,22 +301,12 @@ print('Regions created:', list(masks.keys()))
 
 
 def aggregate_region(model_dict, var_name, region_name, return_time_series=False, skipna=False):
-    """Spatially aggregate `var_name` for every model."""
-    cfg = REGIONS[region_name]
-    result = {}
-    for model, model_data in model_dict.items():
-        if var_name not in model_data or model_data[var_name] is None:
-            continue
-        try:
-            result[model] = ct.regional_aggregate(
-                model_data[var_name], masks[region_name],
-                spatial='mean', edge_weighted=cfg['edge_weighted'],
-                time_slice=cfg['time_slice'], temporal='mean',
-                return_time_series=return_time_series, skipna=skipna,
-            )
-        except Exception as e:
-            print(f'  Aggregation failed for {var_name} {model} {region_name}: {e}')
-    return result
+    import notebook_setup as _setup
+    rts = return_time_series if "return_time_series" in locals() else False
+    return _setup.aggregate_region(
+        model_dict, var_name, region_name, masks, region=REGIONS,
+        return_time_series=rts, skipna=skipna,
+    )
 
 
 def compute_derived_after_aggregation(monthly_dict, seasonal_dict):
@@ -633,41 +505,13 @@ print(f'POLDER rows after filtering: {len(polder_df)}')
 
 
 def polder_region_mask(df, lon_range, lat_range):
-    lon_min, lon_max = lon_range
-    lat_min, lat_max = lat_range
-    if lon_min > lon_max:
-        mask_lon = (df['longitude'] >= lon_min) | (df['longitude'] <= lon_max)
-    else:
-        mask_lon = (df['longitude'] >= lon_min) & (df['longitude'] <= lon_max)
-    mask_lat = (df['latitude'] >= lat_min) & (df['latitude'] <= lat_max)
-    return mask_lon & mask_lat
+    import ppe_io
+    return ppe_io.polder_region_mask(df, lon_range, lat_range)
 
 
 def polder_monthly_means(df, region_name):
-    """Area-weighted monthly regional means from POLDER 3-hourly data."""
-    cfg = REGIONS[region_name]
-    mask = polder_region_mask(df, cfg['lon_range'], cfg['lat_range'])
-    sub = df[mask].copy()
-    t0, t1 = cfg['time_slice']
-    sub = sub[(sub['time'] >= t0) & (sub['time'] <= t1)]
-    if sub.empty:
-        return pd.DataFrame()
-    sub['coslat'] = np.cos(np.deg2rad(sub['latitude']))
-    rows = []
-    for month, g in sub.groupby('month'):
-        if len(g) < 3:
-            continue
-        w = g['coslat']
-        rows.append({
-            'month': month,
-            'time': pd.Timestamp(month.start_time),
-            'SSA': np.average(g['SSA'], weights=w),
-            'AE': np.average(g['AE'], weights=w),
-            'AAOD_550': np.average(g['AAOD_550'], weights=w),
-            'AOD_550': np.average(g['AOD_550'], weights=w),
-            'n': len(g),
-        })
-    return pd.DataFrame(rows)
+    import ppe_io
+    return ppe_io.polder_monthly_means(df, region_name, REGIONS)
 
 
 polder_monthly = {region: polder_monthly_means(polder_df, region) for region in REGIONS}
@@ -687,22 +531,16 @@ gpcp_precip = gpcp['sat_gauge_precip']
 
 
 def gpcp_region_mean(precip_da, region_name):
-    cfg = REGIONS[region_name]
-    lon_min, lon_max = cfg['lon_range']
-    lat_min, lat_max = cfg['lat_range']
-    if lon_min > lon_max:
-        sub = xr.concat([
-            precip_da.sel(lon=slice(lon_min, 360)),
-            precip_da.sel(lon=slice(0, lon_max)),
-        ], dim='lon')
-    else:
-        sub = precip_da.sel(lon=slice(lon_min, lon_max))
-    sub = sub.sel(lat=slice(lat_max, lat_min))
-    sub = sub.sel(time=slice(*cfg['time_slice']))
-    coslat = np.cos(np.deg2rad(sub.lat))
-    weights = coslat * xr.ones_like(sub.isel(time=0))
-    weights = weights / weights.sum()
-    return (sub * weights).sum(dim=['lat', 'lon'])
+    import ppe_io
+    apply = False
+    if "apply_surface_mask" in locals():
+        apply = bool(apply_surface_mask)
+    elif "apply_land_mask" in locals():
+        apply = bool(apply_land_mask)
+    mask = masks.get(region_name) if apply and "masks" in globals() else None
+    return ppe_io.gpcp_region_mean(
+        precip_da, region_name, REGIONS, surface_mask=mask, apply_surface_mask=apply,
+    )
 
 
 gpcp_region = {region: gpcp_region_mean(gpcp_precip, region) for region in REGIONS}

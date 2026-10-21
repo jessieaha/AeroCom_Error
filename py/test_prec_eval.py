@@ -62,44 +62,9 @@ OUTFLOW_REGION = 'outflow_af'
 OUTFLOW_SOURCE = 'africa'
 AAOD_EXTRA_REGIONS = ['west_russia', 'boreal_na_west']
 
-REGIONS = {
-    'global': {
-        'surface_type': 'all', 'lon_range': (0, 360), 'lat_range': (-90, 90),
-        'time_slice': ('2010-01-01', '2010-12-31'), 'edge_weighted': False,
-    },
-    'africa': {
-        'surface_type': 'land', 'lon_range': (15, 37), 'lat_range': (-15, 0),
-        'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': False,
-    },
-    'amazon': {
-        'surface_type': 'land', 'lon_range': (287, 317), 'lat_range': (-17, -3),
-        'time_slice': ('2010-07-01', '2010-10-31'), 'edge_weighted': False,
-    },
-    'outflow_af': {
-        'surface_type': 'ocean', 'lon_range': (350, 8), 'lat_range': (-15, 3),
-        'time_slice': ('2010-06-01', '2010-09-30'), 'edge_weighted': True,
-    },
-    'se_asia': {
-        'surface_type': 'land', 'lon_range': (95, 125), 'lat_range': (-5, 15),
-        'time_slice': ('2010-03-01', '2010-03-31'), 'edge_weighted': False,
-    },
-    'boreal_na': {
-        'surface_type': 'land', 'lon_range': (242, 258), 'lat_range': (52, 63),
-        'time_slice': ('2010-06-01', '2010-08-31'), 'edge_weighted': False,
-    },
-    'eastern_siberia': {
-        'surface_type': 'land', 'lon_range': (120, 170), 'lat_range': (50, 65),
-        'time_slice': ('2010-07-01', '2010-07-31'), 'edge_weighted': False,
-    },
-    'west_russia': {
-        'surface_type': 'land', 'lon_range': (33, 52), 'lat_range': (51, 60),
-        'time_slice': ('2010-07-15', '2010-09-10'), 'edge_weighted': False,
-    },
-    'boreal_na_west': {
-        'surface_type': 'land', 'lon_range': (242, 258), 'lat_range': (52, 63),
-        'time_slice': ('2010-06-15', '2010-08-31'), 'edge_weighted': False,
-    },
-}
+import regions as _region_registry
+REGIONS = _region_registry.aerocom_view([n for n in ['global', 'africa', 'amazon', 'outflow_af', 'se_asia', 'boreal_na', 'eastern_siberia', 'west_russia', 'boreal_na_west'] if n in _region_registry.REGIONS], year=2010)
+SOURCE_REGIONS = [r for r in SOURCE_REGIONS if r in REGIONS]
 
 # Zhong et al. 2022 Table 1 targets (approx.; constrained / reported).
 PAPER_TABLE1 = {
@@ -154,65 +119,20 @@ print(f'Models ({len(models)}): {models}')
 
 
 def normalize_dataset_time(ds, var_hint=None):
-    if ds is None or not list(ds.data_vars):
-        return None
-    var_name = list(ds.data_vars)[0]
-    da = ds[var_name]
-    if 'time' not in da.dims or len(da.time) == 0:
-        return ds
-    if not isinstance(da.time.values[0], (np.datetime64, pd.Timestamp)):
-        try:
-            if hasattr(da.indexes['time'], 'to_datetimeindex'):
-                try:
-                    new_times = da.indexes['time'].to_datetimeindex().values
-                except OverflowError:
-                    new_times = np.array([
-                        np.datetime64(f'{t.year:04d}-{t.month:02d}-01', 'ns')
-                        for t in da.indexes['time']
-                    ])
-            else:
-                new_times = pd.to_datetime([str(t) for t in da.time.values]).values
-            da = da.assign_coords(time=new_times)
-        except Exception as e:
-            print(f'  Warning: time convert failed {var_hint}: {e}')
-            return ds
-    da = functions.normalize_monthly_time(da)
-    return da.to_dataset(name=var_name)
+    import aerocom_data
+    year = locals()["year"] if "year" in locals() else None
+    return aerocom_data.normalize_dataset_time(ds, var_hint=var_hint, year=year)
 
 
 def sum_datasets(model_data, keys, out_name):
-    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
-    if not dsets:
-        return None
-    arrays = [d[list(d.data_vars)[0]] for d in dsets]
-    total = arrays[0].copy()
-    for a in arrays[1:]:
-        total = total + a
-    return total.to_dataset(name=out_name)
+    import aerocom_data
+    req = require_all if "require_all" in locals() else False
+    return aerocom_data.sum_datasets(model_data, keys, out_name, require_all=req)
 
 
 def normalize_precipitation_units(precip_ds):
-    if precip_ds is None:
-        return None
-    var_name = list(precip_ds.data_vars)[0]
-    da = precip_ds[var_name]
-    units = da.attrs.get('units', 'kg m-2 s-1').lower().replace(' ', '')
-    if units in ('mmday-1', 'mm/day', 'mmday^-1', 'mmd-1'):
-        factor = 1.0
-    elif units in ('gm-2s-1', 'gm^-2s^-1', 'g/m2/s'):
-        factor = 86.4
-    elif units in ('ms-1', 'm/s'):
-        factor = 86400.0 * 1000.0
-    else:
-        factor = 86400.0
-    da = da * factor
-    try:
-        if float(da.mean().values) > 100.0:
-            da = da / 1000.0
-    except Exception:
-        pass
-    da.attrs['units'] = 'mm day-1'
-    return da.to_dataset(name=var_name)
+    import aerocom_data
+    return aerocom_data.normalize_precipitation_units(precip_ds)
 
 
 data = {}
@@ -285,21 +205,12 @@ variables_to_aggregate = [
 
 
 def aggregate_region(model_dict, var_name, region_name, return_time_series=False, skipna=False):
-    cfg = REGIONS[region_name]
-    result = {}
-    for model, model_data in model_dict.items():
-        if var_name not in model_data or model_data[var_name] is None:
-            continue
-        try:
-            result[model] = ct.regional_aggregate(
-                model_data[var_name], masks[region_name],
-                spatial='mean', edge_weighted=cfg['edge_weighted'],
-                time_slice=cfg['time_slice'], temporal='mean',
-                return_time_series=return_time_series, skipna=skipna,
-            )
-        except Exception as e:
-            print(f'  Agg failed {var_name} {model} {region_name}: {e}')
-    return result
+    import notebook_setup as _setup
+    rts = return_time_series if "return_time_series" in locals() else False
+    return _setup.aggregate_region(
+        model_dict, var_name, region_name, masks, region=REGIONS,
+        return_time_series=rts, skipna=skipna,
+    )
 
 
 print('Aggregating (this can take a while)...')
@@ -379,36 +290,13 @@ print(f'POLDER rows: {len(polder_df)}')
 
 
 def polder_region_mask(df, lon_range, lat_range):
-    lon_min, lon_max = lon_range
-    lat_min, lat_max = lat_range
-    if lon_min > lon_max:
-        mask_lon = (df['longitude'] >= lon_min) | (df['longitude'] <= lon_max)
-    else:
-        mask_lon = (df['longitude'] >= lon_min) & (df['longitude'] <= lon_max)
-    mask_lat = (df['latitude'] >= lat_min) & (df['latitude'] <= lat_max)
-    return mask_lon & mask_lat
+    import ppe_io
+    return ppe_io.polder_region_mask(df, lon_range, lat_range)
 
 
 def polder_monthly_means(df, region_name):
-    cfg = REGIONS[region_name]
-    mask = polder_region_mask(df, cfg['lon_range'], cfg['lat_range'])
-    sub = df[mask].copy()
-    t0, t1 = cfg['time_slice']
-    sub = sub[(sub['time'] >= t0) & (sub['time'] <= t1)]
-    if sub.empty:
-        return pd.DataFrame()
-    sub['w'] = np.cos(np.deg2rad(sub['latitude']))
-    rows = []
-    for month, g in sub.groupby('month'):
-        w = g['w']
-        rows.append({
-            'month': month,
-            'AOD_550': np.average(g['AOD_550'], weights=w),
-            'AAOD_550': np.average(g['AAOD_550'], weights=w),
-            'AE': np.average(g['AE'], weights=w),
-            'SSA': np.average(g['SSA'], weights=w),
-        })
-    return pd.DataFrame(rows)
+    import ppe_io
+    return ppe_io.polder_monthly_means(df, region_name, REGIONS)
 
 
 polder_monthly = {r: polder_monthly_means(polder_df, r) for r in REGIONS}
@@ -420,38 +308,16 @@ print(f'GPCP: {gpcp_path}')
 
 
 def gpcp_region_mean(precip_da, region_name, apply_land_mask=True):
-    """Area-weighted GPCP mean; land BB regions use the same land mask as models."""
-    cfg = REGIONS[region_name]
-    lon_min, lon_max = cfg['lon_range']
-    lat_min, lat_max = cfg['lat_range']
-    if lon_min > lon_max:
-        sub = xr.concat([
-            precip_da.sel(lon=slice(lon_min, 360)),
-            precip_da.sel(lon=slice(0, lon_max)),
-        ], dim='lon')
-    else:
-        sub = precip_da.sel(lon=slice(lon_min, lon_max))
-    # GPCP lat may be ascending or descending.
-    if sub.lat.values[0] > sub.lat.values[-1]:
-        sub = sub.sel(lat=slice(lat_max, lat_min))
-    else:
-        sub = sub.sel(lat=slice(lat_min, lat_max))
-    sub = sub.sel(time=slice(*cfg['time_slice']))
-    if apply_land_mask and cfg.get('surface_type') in ('land', 'ocean'):
-        try:
-            mask = masks[region_name]
-            mask_on = mask.interp(lat=sub.lat, lon=sub.lon, method='nearest')
-            sub = sub.where(mask_on > 0)
-        except Exception as e:
-            print(f'  GPCP land mask skip {region_name}: {e}')
-    coslat = np.cos(np.deg2rad(sub.lat))
-    weights = coslat * xr.ones_like(sub.isel(time=0))
-    weights = weights.where(np.isfinite(sub.isel(time=0)))
-    wsum = weights.sum()
-    if float(wsum) == 0:
-        return sub.mean(dim=['lat', 'lon'])
-    weights = weights / wsum
-    return (sub * weights).sum(dim=['lat', 'lon'])
+    import ppe_io
+    apply = False
+    if "apply_surface_mask" in locals():
+        apply = bool(apply_surface_mask)
+    elif "apply_land_mask" in locals():
+        apply = bool(apply_land_mask)
+    mask = masks.get(region_name) if apply and "masks" in globals() else None
+    return ppe_io.gpcp_region_mean(
+        precip_da, region_name, REGIONS, surface_mask=mask, apply_surface_mask=apply,
+    )
 
 
 gpcp_region = {r: gpcp_region_mean(gpcp_precip, r, apply_land_mask=True) for r in REGIONS}

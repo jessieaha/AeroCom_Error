@@ -1,7 +1,10 @@
 data/
 __pycache__/
 Data/
-.claude/agents
+.claude/
+.cursor/
+.nb_tools/
+.pdf_lib/
 figure/
 tables/
 .venv-1/

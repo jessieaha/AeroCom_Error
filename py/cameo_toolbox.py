@@ -47,8 +47,9 @@ def fake_uba_map(
     # Show cartopy data dir (as in your version)
     print(cartopy.config['data_dir'])
     cartopy_dir = '/uhome/zhangj1/.local/share/cartopy'
-    os.environ['CARTOPY_USER_BACKGROUNDS'] = cartopy_dir
-    os.environ['CARTOPY_SHAPEDIR'] = cartopy_dir
+    if os.path.isdir(cartopy_dir):
+        os.environ['CARTOPY_USER_BACKGROUNDS'] = cartopy_dir
+        os.environ['CARTOPY_SHAPEDIR'] = cartopy_dir
 
     # Ensure arrays
     lon = np.asarray(lon)
@@ -216,6 +217,115 @@ def fake_uba_map(
         plt.show()
         return None
     return fig
+
+
+def plot_boxed_field(
+    field,
+    boxes=None,
+    title="",
+    cbar_label="",
+    savefile=None,
+    show=False,
+    extent=None,
+    central_longitude=None,
+    zmin=None,
+    zmax=None,
+):
+    """Ensemble or model field with ``fake_uba_map``, plus one outline per box.
+
+    ``boxes`` items may set ``lon_range``, ``lat_range``, ``color``, ``lw``,
+    ``ls`` and ``label``. Boxes stay on Plate Carree; a curved projection
+    cannot draw the rectangles. Use ``uba_map_flex`` when there is no box.
+    """
+    import matplotlib.patheffects as _pe
+    from matplotlib.patches import Rectangle as _Rectangle
+
+    lon = np.asarray(field.lon.values, dtype=float)
+    lat = np.asarray(field.lat.values, dtype=float)
+    data = np.asarray(field.values, dtype=float)
+    if central_longitude is not None:
+        lon = (lon - central_longitude + 180.0) % 360.0 - 180.0
+        order = np.argsort(lon)
+        lon = lon[order]
+        data = data[:, order]
+    if extent is not None:
+        lon0, lon1, lat0, lat1 = extent
+        lon_ok = (lon >= lon0) & (lon <= lon1) if lon0 <= lon1 else (lon >= lon0) | (lon <= lon1)
+        lat_ok = (lat >= min(lat0, lat1)) & (lat <= max(lat0, lat1))
+        shown = data[np.ix_(lat_ok, lon_ok)]
+        finite = shown[np.isfinite(shown)]
+    else:
+        finite = data[np.isfinite(data)]
+    if zmin is None:
+        zmin = float(np.nanpercentile(finite, 2)) if finite.size else 0.0
+    if zmax is None:
+        zmax = float(np.nanpercentile(finite, 98)) if finite.size else 1.0
+    if not np.isfinite(zmin) or not np.isfinite(zmax) or zmax <= zmin:
+        zmin, zmax = 0.0, 1.0
+
+    fig = fake_uba_map(
+        lon=lon, lat=lat, c_array=data, zmin=zmin, zmax=zmax,
+        labels=cbar_label, title=title, region_boxes=None,
+        cbar_orientation="vertical", cbar_extend="both",
+        show=False, savefile=None,
+    )
+    ax = fig.axes[0]
+    for box in boxes or []:
+        raw0, raw1 = box["lon_range"]
+        blat0, blat1 = box["lat_range"]
+        if central_longitude is None:
+            if raw0 > raw1:
+                rects = [(raw0 - 360.0, raw1 + 360.0 - raw0)]
+            else:
+                rects = [(raw0, raw1 - raw0)]
+        else:
+            x0 = (raw0 - central_longitude + 180.0) % 360.0 - 180.0
+            width = (raw1 + 360.0 - raw0) if raw0 > raw1 else (raw1 - raw0)
+            rects = [(x0, width)]
+        for x0, width in rects:
+            ax.add_patch(_Rectangle(
+                (x0, min(blat0, blat1)), width, abs(blat1 - blat0),
+                fill=False, edgecolor=box.get("color", "magenta"),
+                linewidth=box.get("lw", 1.5), linestyle=box.get("ls", "--"),
+                transform=ccrs.PlateCarree(), zorder=5,
+            ))
+        label = box.get("label")
+        if label and rects:
+            x0, width = rects[0]
+            if box.get("label_below"):
+                y, va = min(blat0, blat1) - 0.8, "top"
+            else:
+                y, va = max(blat0, blat1) + 0.8, "bottom"
+            ax.text(
+                x0 + width / 2.0, y, label, transform=ccrs.PlateCarree(),
+                ha="center", va=va, fontsize=9, color=box.get("color", "magenta"),
+                zorder=6, path_effects=[_pe.withStroke(linewidth=2.5, foreground="white")],
+            )
+    if extent is not None:
+        ax.set_extent(extent, crs=ccrs.PlateCarree())
+    if savefile:
+        fig.savefig(savefile, bbox_inches="tight", dpi=300)
+    try:
+        ip = get_ipython()  # noqa: F821
+    except NameError:
+        ip = None
+    if ip is not None and plt.get_backend().lower() != "agg":
+        from IPython.display import display
+        display(fig)
+    if not show:
+        plt.close(fig)
+    else:
+        plt.show()
+    return fig
+
+
+def plot_curved_field(field, title="", cbar_label="", savefile=None, show=False, extent="global"):
+    """Curved-projection map for a field that has no analysis box."""
+    return uba_map_flex(
+        data=field, title=title, cbar_title=cbar_label, labels=cbar_label,
+        projection_type="curved", extent=extent, show=show, savefile=savefile,
+        cbar_orientation="vertical",
+    )
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt

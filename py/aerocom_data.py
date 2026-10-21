@@ -1057,3 +1057,42 @@ def load_monthly_data_from_netcdf(
 
     print(f"Loaded {loaded_count} NetCDF files for {len(data_dict)} models from {output_base_dir}")
     return data_dict
+
+
+def sum_datasets(model_data, keys, out_name, require_all=False):
+    """Sum variables into a Dataset.
+
+    ``require_all=True`` returns None unless every key is present, so a
+    partial sum (for example BC without OA) is not stored as the total.
+    """
+    missing = [k for k in keys if model_data.get(k) is None]
+    if require_all and missing:
+        return None
+    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
+    if not dsets:
+        return None
+    arrays = [d[list(d.data_vars)[0]] for d in dsets]
+    total = arrays[0].copy()
+    for a in arrays[1:]:
+        total = total + a
+    return total.to_dataset(name=out_name)
+
+
+def positive_deposition(da):
+    """Return deposition as a positive mass sink (handles signed fluxes)."""
+    return da.where(da > 0, -da)
+
+
+def sum_deposition_datasets(model_data, keys, out_name, require_all=True):
+    """Sum deposition species into a positive-sink Dataset."""
+    missing = [k for k in keys if model_data.get(k) is None]
+    if require_all and missing:
+        return None
+    dsets = [model_data[k] for k in keys if model_data.get(k) is not None]
+    if not dsets:
+        return None
+    arrays = [positive_deposition(d[list(d.data_vars)[0]]) for d in dsets]
+    total = arrays[0].copy()
+    for a in arrays[1:]:
+        total = total + a
+    return total.to_dataset(name=out_name)
