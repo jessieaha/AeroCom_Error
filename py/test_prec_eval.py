@@ -187,14 +187,7 @@ for m in models:
 # -------------------------------------------------------------------------------
 sample_model = next(m for m in models if data[m].get('od550aer') is not None)
 template = data[sample_model]['od550aer'].isel(time=0)
-masks = {}
-for name, cfg in REGIONS.items():
-    masks[name] = ct.create_region_mask(
-        template, name=name,
-        lon_range=cfg['lon_range'], lat_range=cfg['lat_range'],
-        surface_type=cfg.get('surface_type', 'all'),
-        mask_registry=masks,
-    )
+masks = ct.masks_for_regions(template, REGIONS)
 print('Regions:', list(masks.keys()))
 
 variables_to_aggregate = [

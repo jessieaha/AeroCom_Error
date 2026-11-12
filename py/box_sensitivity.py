@@ -3,8 +3,9 @@
 
 Baselines
 ---------
-* Sea salt, peak DMS season (DJF): ``remote_SO_DJF`` (large Pacific),
-  ``remote_SPO_box_DJF`` (Amazon-sized, nested) and ``SAO_2_DJF``.
+* Sea salt, peak season in the South Atlantic: ``SAO_SOND`` and ``SAO_2_DJF``
+  (highest 1/τ vs AE). North Pacific and the low-R² Pacific/Antarctic boxes
+  are not baselines.
 * Biomass burning: ``africa`` and ``amazon``.
   Geometry and ``surface_type`` are copied from ``regions.REGIONS``.
 
@@ -54,13 +55,11 @@ SIZE_DEG = (-5, 0, 5)
 
 # Species -> baseline region names (geometry comes from regions.REGIONS).
 BASELINES = {
-    "ss": ("remote_SO_DJF", "remote_SPO_box_DJF", "SAO_2_DJF"),
+    "ss": ("SAO_SOND", "SAO_2_DJF"),
     "bb": ("africa", "amazon"),
 }
-# Extra AeroCom regions so the sea-salt notebook can overlay the other basins.
-# Only names still present in regions.REGIONS (surface_type stays on that registry).
 AEROCOM_EXTRA = {
-    "ss": tuple(n for n in ("NPO_JF", "ANTAO_JFM", "SAO_SOND") if n in reg.REGIONS),
+    "ss": (),
     "bb": (),
 }
 
@@ -468,8 +467,9 @@ def ensemble_mean_aod(ppe_id: str, variables: Sequence[str],
 
 def plot_study_map(field: xr.DataArray, boxes: Sequence[dict], title: str, cbar_label: str,
                    filename: Path, extent: Optional[Tuple[float, float, float, float]] = None,
-                   central_longitude: Optional[float] = None):
-    """Boxed maps use ``cameo_toolbox.plot_boxed_field`` (fake_uba_map).
+                   central_longitude: Optional[float] = None,
+                   land_facecolor: Optional[str] = "0.85"):
+    """Boxed maps use ``cameo_toolbox.plot_boxed_field`` (native cell edges + land).
 
     With no boxes, the curved ``uba_map_flex`` projection is used instead.
     """
@@ -479,7 +479,7 @@ def plot_study_map(field: xr.DataArray, boxes: Sequence[dict], title: str, cbar_
         ct.plot_boxed_field(
             field, boxes=boxes, title=title, cbar_label=cbar_label,
             savefile=str(filename), show=False, extent=extent,
-            central_longitude=central_longitude,
+            central_longitude=central_longitude, land_facecolor=land_facecolor,
         )
     else:
         ct.plot_curved_field(
@@ -511,6 +511,68 @@ def map_boxes(defs: Dict[str, dict], baselines: Sequence[str]) -> List[dict]:
         ))
     records.sort(key=lambda r: r["z"])
     return records
+
+
+def region_boxes(region_names: Sequence[str], *, nominal_only: bool = True) -> List[dict]:
+    """Solid labelled outlines for registered analysis regions (0..360 lon)."""
+    records = []
+    for name in region_names:
+        if name not in reg.REGIONS:
+            continue
+        cfg = reg.REGIONS[name]
+        records.append(dict(
+            lon_range=tuple(cfg["lon_range"]),
+            lat_range=tuple(cfg["lat_range"]),
+            color=cfg.get("color", "magenta"),
+            lw=2.2,
+            ls="-",
+            label=name,
+            label_below="box" in name,
+            z=3,
+        ))
+    return records
+
+
+def extent_for_regions(region_names: Sequence[str], pad: float = 12.0
+                       ) -> Tuple[Optional[float], Tuple[float, float, float, float]]:
+    """Return (central_longitude, extent) covering the named boxes.
+
+    Extent is in the centred display frame [-180, 180]. Boxes that wrap 0°E
+    set ``central_longitude`` to the box mid-meridian.
+    """
+    boxes = region_boxes(region_names)
+    if not boxes:
+        return None, (-180.0, 180.0, -90.0, 90.0)
+    clon = None
+    for box in boxes:
+        lo0, lo1 = box["lon_range"]
+        if lo0 > lo1:
+            clon = ct.box_central_longitude((lo0, lo1))
+            if clon > 180:
+                clon -= 360.0
+            break
+    if clon is None:
+        # mid of all non-global lon spans
+        mids = []
+        for box in boxes:
+            lo0, lo1 = box["lon_range"]
+            if lo0 == 0 and lo1 == 360:
+                continue
+            mids.append(0.5 * (lo0 + lo1))
+        clon = float(np.mean(mids)) if mids else 0.0
+        if clon > 180:
+            clon -= 360.0
+
+    xs, ys = [], []
+    for box in boxes:
+        lo0, lo1 = box["lon_range"]
+        la0, la1 = box["lat_range"]
+        width = (lo1 + 360.0 - lo0) if lo0 > lo1 else (lo1 - lo0)
+        x0 = (lo0 - clon + 180.0) % 360.0 - 180.0
+        xs.extend([x0, x0 + width])
+        ys.extend([la0, la1])
+    extent = (min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad)
+    return clon, extent
 
 
 def main() -> int:

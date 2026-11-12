@@ -21,6 +21,22 @@ warnings.filterwarnings('ignore', category=cartopy.io.DownloadWarning)
 from typing import List, Optional, Union, Tuple, Literal
 from mpl_toolkits.axes_grid1 import ImageGrid
 
+
+def cell_edges(centers: np.ndarray) -> np.ndarray:
+    """Convert 1-D cell-center coordinates to edges for ``pcolormesh(..., shading='flat')``."""
+    x = np.asarray(centers, dtype=float)
+    if x.size == 0:
+        return x
+    if x.size == 1:
+        half = 0.5
+        return np.array([x[0] - half, x[0] + half])
+    edges = np.empty(x.size + 1, dtype=float)
+    edges[1:-1] = 0.5 * (x[:-1] + x[1:])
+    edges[0] = x[0] - 0.5 * (x[1] - x[0])
+    edges[-1] = x[-1] + 0.5 * (x[-1] - x[-2])
+    return edges
+
+
 def fake_uba_map(
     lon, lat, c_array, num_levels=None, zmin=None, zmax=None, labels="", title="",
     mycolor=None,
@@ -33,13 +49,17 @@ def fake_uba_map(
     cbar_extend='auto',           # NEW: 'auto' | 'neither' | 'min' | 'max' | 'both'
     show=True,
     savefile=None,
+    central_longitude: float = 0.0,
+    land_facecolor: Optional[str] = "0.85",
+    land_alpha: float = 1.0,
+    use_cell_edges: bool = True,
 ):
     """
     Plot a pcolormesh with cartopy and a flexible colorbar.
 
-    - Automatically sets colorbar extend when cbar_extend='auto' by checking if data
-      falls outside [zmin, zmax].
-    - cbar_orientation can be 'vertical' or 'horizontal'.
+    - Uses native lon/lat cell edges (``shading='flat'``) so each grid cell is one bin.
+    - Optionally shades land (useful for ocean fields such as sea-salt AOD).
+    - ``central_longitude`` centres the Plate Carrée map (important near 0°E).
     """
 
 
@@ -50,17 +70,29 @@ def fake_uba_map(
     if os.path.isdir(cartopy_dir):
         os.environ['CARTOPY_USER_BACKGROUNDS'] = cartopy_dir
         os.environ['CARTOPY_SHAPEDIR'] = cartopy_dir
+    local_cartopy = Path.home() / ".local" / "share" / "cartopy"
+    if local_cartopy.is_dir():
+        cartopy.config["data_dir"] = str(local_cartopy)
 
     # Ensure arrays
-    lon = np.asarray(lon)
-    lat = np.asarray(lat)
+    lon = np.asarray(lon, dtype=float)
+    lat = np.asarray(lat, dtype=float)
     c_array = np.asarray(c_array)
 
-    # Create figure/axis
-    fig, ax = plt.subplots(figsize=(10, 8), subplot_kw={'projection': ccrs.PlateCarree()})
+    # Create figure/axis centred on the requested meridian
+    fig, ax = plt.subplots(
+        figsize=(10, 8),
+        subplot_kw={"projection": ccrs.PlateCarree(central_longitude=central_longitude)},
+    )
 
-    # Meshgrid from 1D lon/lat
-    lon_grid, lat_grid = np.meshgrid(lon, lat)
+    # Native cell edges (preferred) or centre mesh
+    if use_cell_edges:
+        lon_e, lat_e = cell_edges(lon), cell_edges(lat)
+        plot_lon, plot_lat = lon_e, lat_e
+        shading = "flat"
+    else:
+        plot_lon, plot_lat = np.meshgrid(lon, lat)
+        shading = "auto"
 
     # Compute data min/max (ignore NaN)
     data_min = np.nanmin(c_array) if np.size(c_array) > 0 else np.nan
@@ -124,14 +156,29 @@ def fake_uba_map(
         boundaries = np.linspace(zmin, zmax, num_levels + 1)
         norm = mcolors.BoundaryNorm(boundaries, ncolors=num_levels, clip=True)
 
-    # Draw the field
+    # Draw the field on native lon/lat bins
     # NOTE: 'extend' is NOT a valid kwarg for pcolormesh; it's set on colorbar.
-    c = ax.pcolormesh(lon_grid, lat_grid, c_array, cmap=cmap, norm=norm, shading='auto')
+    c = ax.pcolormesh(
+        plot_lon, plot_lat, c_array, cmap=cmap, norm=norm, shading=shading,
+        transform=ccrs.PlateCarree(),
+    )
 
+    if land_facecolor:
+        try:
+            land_feat = cfeature.LAND.with_scale("110m")
+            next(iter(land_feat.geometries()))
+            ax.add_feature(land_feat, facecolor=land_facecolor, alpha=land_alpha, zorder=3)
+        except Exception:
+            pass
     # Coastlines/borders
-    ax.coastlines()
-    ax.add_feature(cfeature.BORDERS)
-    # ax.add_feature(cfeature.BORDERS.with_scale('50m'), facecolor='none', edgecolor='gray')
+    try:
+        ax.coastlines(resolution="110m", zorder=4)
+    except Exception:
+        ax.coastlines(zorder=4)
+    try:
+        ax.add_feature(cfeature.BORDERS.with_scale("110m"), linewidth=0.4, zorder=4)
+    except Exception:
+        ax.add_feature(cfeature.BORDERS, linewidth=0.4, zorder=4)
 
     # Region boxes & labels
     if region_boxes:
@@ -219,6 +266,16 @@ def fake_uba_map(
     return fig
 
 
+def box_central_longitude(lon_range) -> float:
+    """Mid-longitude of a box in 0..360 (handles wrap across 0°E)."""
+    lo0, lo1 = float(lon_range[0]), float(lon_range[1])
+    if lo0 <= lo1:
+        return 0.5 * (lo0 + lo1)
+    # wrap: e.g. 320..10 → centre near 345 / -15
+    width = (lo1 + 360.0) - lo0
+    return (lo0 + 0.5 * width) % 360.0
+
+
 def plot_boxed_field(
     field,
     boxes=None,
@@ -230,12 +287,18 @@ def plot_boxed_field(
     central_longitude=None,
     zmin=None,
     zmax=None,
+    land_facecolor: Optional[str] = "0.85",
+    mycolor=None,
 ):
     """Ensemble or model field with ``fake_uba_map``, plus one outline per box.
 
     ``boxes`` items may set ``lon_range``, ``lat_range``, ``color``, ``lw``,
     ``ls`` and ``label``. Boxes stay on Plate Carree; a curved projection
     cannot draw the rectangles. Use ``uba_map_flex`` when there is no box.
+
+    Lon/lat are the field's native cell centres; plotting uses cell edges.
+    When ``central_longitude`` is None and boxes wrap 0°E, the map is centred
+    on the first wrapping box.
     """
     import matplotlib.patheffects as _pe
     from matplotlib.patches import Rectangle as _Rectangle
@@ -243,14 +306,29 @@ def plot_boxed_field(
     lon = np.asarray(field.lon.values, dtype=float)
     lat = np.asarray(field.lat.values, dtype=float)
     data = np.asarray(field.values, dtype=float)
-    if central_longitude is not None:
-        lon = (lon - central_longitude + 180.0) % 360.0 - 180.0
-        order = np.argsort(lon)
-        lon = lon[order]
-        data = data[:, order]
+
+    if central_longitude is None and boxes:
+        for box in boxes:
+            lo0, lo1 = box["lon_range"]
+            if lo0 > lo1:
+                central_longitude = box_central_longitude((lo0, lo1))
+                # display in [-180, 180] around that centre
+                if central_longitude > 180:
+                    central_longitude = central_longitude - 360.0
+                break
+    if central_longitude is None:
+        central_longitude = 0.0
+
+    # Re-express longitudes relative to the map centre in [-180, 180]
+    lon_plot = (lon - central_longitude + 180.0) % 360.0 - 180.0
+    order = np.argsort(lon_plot)
+    lon_plot = lon_plot[order]
+    data = data[:, order]
+
     if extent is not None:
         lon0, lon1, lat0, lat1 = extent
-        lon_ok = (lon >= lon0) & (lon <= lon1) if lon0 <= lon1 else (lon >= lon0) | (lon <= lon1)
+        # extent is already in the display frame when caller passes local coords
+        lon_ok = (lon_plot >= lon0) & (lon_plot <= lon1) if lon0 <= lon1 else (lon_plot >= lon0) | (lon_plot <= lon1)
         lat_ok = (lat >= min(lat0, lat1)) & (lat <= max(lat0, lat1))
         shown = data[np.ix_(lat_ok, lon_ok)]
         finite = shown[np.isfinite(shown)]
@@ -264,24 +342,19 @@ def plot_boxed_field(
         zmin, zmax = 0.0, 1.0
 
     fig = fake_uba_map(
-        lon=lon, lat=lat, c_array=data, zmin=zmin, zmax=zmax,
+        lon=lon_plot, lat=lat, c_array=data, zmin=zmin, zmax=zmax,
         labels=cbar_label, title=title, region_boxes=None,
         cbar_orientation="vertical", cbar_extend="both",
-        show=False, savefile=None,
+        show=False, savefile=None, central_longitude=0.0,
+        land_facecolor=land_facecolor, use_cell_edges=True, mycolor=mycolor,
     )
     ax = fig.axes[0]
     for box in boxes or []:
         raw0, raw1 = box["lon_range"]
         blat0, blat1 = box["lat_range"]
-        if central_longitude is None:
-            if raw0 > raw1:
-                rects = [(raw0 - 360.0, raw1 + 360.0 - raw0)]
-            else:
-                rects = [(raw0, raw1 - raw0)]
-        else:
-            x0 = (raw0 - central_longitude + 180.0) % 360.0 - 180.0
-            width = (raw1 + 360.0 - raw0) if raw0 > raw1 else (raw1 - raw0)
-            rects = [(x0, width)]
+        x0 = (raw0 - central_longitude + 180.0) % 360.0 - 180.0
+        width = (raw1 + 360.0 - raw0) if raw0 > raw1 else (raw1 - raw0)
+        rects = [(x0, width)]
         for x0, width in rects:
             ax.add_patch(_Rectangle(
                 (x0, min(blat0, blat1)), width, abs(blat1 - blat0),
@@ -550,9 +623,10 @@ def uba_map_flex(
         ax = grid[i]
         lon_i = _monotonic_lon(lon_list[i] if lon_list[i] is not None else lon)
         lat_i = np.asarray(lat_list[i] if lat_list[i] is not None else lat)
-        mesh = ax.pcolormesh(lon_i, lat_i, np.squeeze(np.asarray(data_val)),
+        lon_e, lat_e = cell_edges(lon_i), cell_edges(np.asarray(lat_i, dtype=float))
+        mesh = ax.pcolormesh(lon_e, lat_e, np.squeeze(np.asarray(data_val)),
                              transform=ccrs.PlateCarree(),
-                             cmap=cmap, norm=norm, shading='auto')
+                             cmap=cmap, norm=norm, shading='flat')
 
         try:
             # Force Cartopy to resolve the land feature now so any missing-data
@@ -1434,41 +1508,56 @@ def _grids_match(m, t):
     )
 
 
-def land_mask_from_cartopy(template, resolution='110m'):
-    """
-    Build a 0/1 land mask from the Cartopy Natural Earth land feature.
+_LAND_GEOM = None
+_LAND_GRID_CACHE: dict = {}
 
-    Returns 1 for land and 0 for ocean on the template lat/lon grid.  The
-    template may use either 0--360 or -180--180 longitude; the polygons are
-    tested in the -180--180 frame and mapped back to the original grid.
 
-    Inland waters (lakes/reservoirs) are excluded from the land mask so that
-    ocean masks do not falsely include lake-covered cells.
-    """
-    import cartopy.feature as cfeature
+def _natural_earth_land():
+    """Land minus lakes, Natural Earth 110 m. Shared by grids and points."""
+    global _LAND_GEOM
+    if _LAND_GEOM is None:
+        import cartopy.feature as cfeature
+        from shapely.ops import unary_union
+
+        def _union(name):
+            feat = cfeature.NaturalEarthFeature("physical", name, "110m")
+            geoms = list(feat.geometries())
+            return unary_union(geoms) if geoms else None
+
+        land = _union("land")
+        lakes = _union("lakes")
+        _LAND_GEOM = land if lakes is None else land.difference(lakes)
+    return _LAND_GEOM
+
+
+def point_is_land(lon, lat) -> np.ndarray:
+    """True on land for each point. Longitude may be −180..180 or 0..360."""
     from shapely.vectorized import contains
-    from shapely.ops import unary_union
 
+    lon = np.asarray(lon, dtype=float)
+    lat = np.asarray(lat, dtype=float)
+    lon180 = (lon + 180.0) % 360.0 - 180.0
+    return contains(_natural_earth_land(), lon180, lat)
+
+
+def land_mask_from_cartopy(template, resolution='110m'):
+    """1 on land and 0 on ocean, Natural Earth 110 m (lakes excluded).
+
+    ``resolution`` is kept for call compatibility; the shared geometry is 110 m.
+    """
+    del resolution
     lat = np.asarray(template.lat.values)
     lon = np.asarray(template.lon.values)
-
-    lon_wrapped = (lon + 180.0) % 360.0 - 180.0
-    lon2d, lat2d = np.meshgrid(lon_wrapped, lat)
-
-    def _feature_mask(feature_name):
-        feat = cfeature.NaturalEarthFeature('physical', feature_name, resolution)
-        geoms = list(feat.geometries())
-        if not geoms:
-            return np.zeros_like(lon2d, dtype=float)
-        union = unary_union(geoms)
-        return contains(union, lon2d, lat2d).astype(float)
-
-    land_mask = _feature_mask('land')
-    lake_mask = _feature_mask('lakes')
-    mask = np.logical_and(land_mask.astype(bool), ~lake_mask.astype(bool)).astype(float)
-
+    key = (lat.tobytes(), lon.tobytes())
+    cached = _LAND_GRID_CACHE.get(key)
+    if cached is None:
+        lon180 = (lon + 180.0) % 360.0 - 180.0
+        lon2d, lat2d = np.meshgrid(lon180, lat)
+        from shapely.vectorized import contains
+        cached = contains(_natural_earth_land(), lon2d, lat2d).astype(float)
+        _LAND_GRID_CACHE[key] = cached
     return xr.DataArray(
-        mask,
+        cached,
         dims=('lat', 'lon'),
         coords={'lat': lat, 'lon': lon},
         name='land_mask',
@@ -1520,11 +1609,6 @@ def _land_sea_mask(template, surface_type, land_mask=None, land_mask_path=None):
     if surface_type == 'all':
         return xr.ones_like(template)
 
-    if land_mask is None and land_mask_path is None:
-        default_path = _default_land_mask_path()
-        if default_path is not None:
-            land_mask_path = str(default_path)
-
     if land_mask is not None:
         lsm = land_mask
     elif land_mask_path is not None:
@@ -1539,33 +1623,11 @@ def _land_sea_mask(template, surface_type, land_mask=None, land_mask_path=None):
                         f"No land-mask variable found in {land_mask_path}. "
                         "Expected one of: lsm, land, land_mask, LAND_MASK, landf"
                     )
-        except Exception as exc:
-            # Fall back to cartopy/regionmask if the provided/default file fails
-            try:
-                import regionmask
-                land = regionmask.defined_regions.natural_earth_v5_0_0.land_110
-                lsm = land.mask(template.lon, template.lat) == 0
-            except Exception:
-                try:
-                    lsm = land_mask_from_cartopy(template)
-                except Exception as exc2:
-                    raise ValueError(
-                        "Land/sea masking requires land_mask, land_mask_path, "
-                        "the 'regionmask' package, or cartopy+shapely."
-                    ) from exc2
+        except Exception:
+            lsm = land_mask_from_cartopy(template)
     else:
-        try:
-            import regionmask
-            land = regionmask.defined_regions.natural_earth_v5_0_0.land_110
-            lsm = land.mask(template.lon, template.lat) == 0
-        except ImportError:
-            try:
-                lsm = land_mask_from_cartopy(template)
-            except Exception as exc:
-                raise ValueError(
-                    "Land/sea masking requires land_mask, land_mask_path, "
-                    "the 'regionmask' package, or cartopy+shapely."
-                ) from exc
+        # One method for AeroCom and PPE: Natural Earth 110 m.
+        lsm = land_mask_from_cartopy(template)
 
     if not isinstance(lsm, xr.DataArray):
         lsm = xr.DataArray(lsm, dims=('lat', 'lon'), coords={'lat': template.lat, 'lon': template.lon})
@@ -1652,6 +1714,24 @@ def _spatial_weights(da, mask, edge_weighted=False):
     return weights, region_mask
 
 
+def masks_for_regions(template, region_defs):
+    """One mask per region, using ``create_region_mask`` and its land/sea mask.
+
+    ``region_defs`` maps a name to ``lon_range``, ``lat_range`` and ``surface_type``.
+    """
+    masks = {}
+    for name, cfg in region_defs.items():
+        masks[name] = create_region_mask(
+            template,
+            name=name,
+            lon_range=cfg["lon_range"],
+            lat_range=cfg["lat_range"],
+            surface_type=cfg.get("surface_type", "all"),
+            mask_registry=masks,
+        )
+    return masks
+
+
 def create_region_mask(
     template,
     region=None,
@@ -1713,7 +1793,22 @@ def create_region_mask(
 
     # Backward compatibility: if the second positional argument is not a
     # recognized region, treat it as the old `name` argument.
-    if region is not None and region not in _REGION_DEFINITIONS:
+    # Prefer the project region registry over the small cameo preset list.
+    try:
+        import regions as _region_registry
+        registry = _region_registry.REGIONS
+    except Exception:
+        registry = {}
+    if region is not None and region in registry:
+        cfg = registry[region]
+        lon_range = cfg['lon_range'] if lon_range is None else lon_range
+        lat_range = cfg['lat_range'] if lat_range is None else lat_range
+        if surface_type is _UNSET:
+            surface_type = cfg.get('surface_type', 'all')
+        if name is None:
+            name = region
+        region = None
+    elif region is not None and region not in _REGION_DEFINITIONS:
         if name is None:
             name = region
         region = None

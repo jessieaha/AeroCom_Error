@@ -225,13 +225,7 @@ print(f'Template grid from {sample_model}: {template.dims}')
 # Global override (legacy).  If None, each region's own surface_type is used.
 SURFACE_TYPE = None  # 'all', 'land', 'ocean', or None to use per-region defaults
 
-masks = {}
-for name, cfg in REGIONS.items():
-    masks[name] = ct.create_region_mask(
-        template, region=name,
-        surface_type=SURFACE_TYPE if SURFACE_TYPE is not None else cfg.get('surface_type', 'all'),
-        mask_registry=masks,
-    )
+masks = ct.masks_for_regions(template, REGIONS)
 print('Regions created:', list(masks.keys()))
 for name, mask in masks.items():
     print(f'  {name}: surface_type={mask.attrs["surface"]}')

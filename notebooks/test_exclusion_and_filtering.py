@@ -133,13 +133,8 @@ sample_model = next((m for m in models if data[m].get('od550aer') is not None), 
 template = data[sample_model]['od550aer'].isel(time=0)
 SURFACE_TYPE = 'all'  # 'all', 'land', or 'ocean'
 
-masks = {}
-for name, cfg in REGIONS.items():
-    masks[name] = ct.create_region_mask(
-        template, region=name,
-        surface_type=SURFACE_TYPE,
-        mask_registry=masks,
-    )
+defs = {n: {**cfg, "surface_type": "all"} for n, cfg in REGIONS.items()}
+masks = ct.masks_for_regions(template, defs)
 
 
 def aggregate_region(model_dict, var_name, region_name, skipna=False):

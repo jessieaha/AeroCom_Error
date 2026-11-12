@@ -61,7 +61,7 @@ print(f"Project root: {project_root}")
 # Configuration
 # -----------------------------------------------------------------------------
 SPECIES = "bb"
-PPE_IDS: List[str] = ["pd2024", "pd2010"]
+PPE_IDS: List[str] = ["pd2024", "pd2010", "icon2025"]
 EXCLUDE_MEMBERS: List[str] = []
 
 MAC_X_COL = "1-SSA"  # theory: MAC = A*(1-SSA)
@@ -91,15 +91,16 @@ save_fig = pp.FigureSaver(FIGURE_DIR, save=SAVE_FIG)
 GPCP_DIR = project_root / "Data" / "Prec"
 
 AXIS_LABELS = {
-    "SSA": "SSA (-)",
-    "1-SSA": "1 − SSA (-)",
+    "SSA": r"SSA [-]",
+    "1-SSA": r"1 − SSA [-]",
     "MAC": r"MAC$_{\mathrm{BC+OA}}$ (m$^{2}$ g$^{-1}$)",
-    "AE": "AE440-550 (-)",
+    "MEC": r"MEC (m$^{2}$ g$^{-1}$)",
+    "AE": r"AE 440–550 [-]",
     "precip": r"Model precipitation (mm day$^{-1}$)",
     pg.MATCHED_COL: r"Model precipitation, GPCP months (mm day$^{-1}$)",
-    "rBC": "rBC = BC/(BC+OA) (-)",
-    "abs550aer": "AAOD$_{550}$ (1)",
-    "od550aer": "AOD$_{550}$ (1)",
+    "rBC": r"rBC = BC/(BC+OA) [-]",
+    "abs550aer": r"AAOD$_{550}$ [-]",
+    "od550aer": r"AOD$_{550}$ [-]",
     "load_BC_OA": r"BC+OA burden (kg m$^{-2}$)",
     "emi_BC_OA": r"BC+OA emission (kg m$^{-2}$ s$^{-1}$)",
 }
@@ -228,6 +229,9 @@ obs_tables: Dict[str, pd.DataFrame] = {}
 obs_means: Dict[str, Dict[str, dict]] = {}
 homog_rows, coverage_rows = [], []
 for pid in PPE_IDS:
+    if not ppe_cfg.get_run(pid).get("extractable", True):
+        print(f"  Skip homogenization for {pid} (native ICON grid, no T63 ensemble)")
+        continue
     obs_name = ppe_io.ppe_obs_name(pid)
     period = ppe_cfg.get_run(pid)["period"]
     print(f"\n--- {pid}: {obs_name} ---")
@@ -468,6 +472,12 @@ pp.scatter_by_region(df_plot, MAC_X_COL, "MAC", ANALYSIS_REGIONS,
                      **common)
 pp.scatter_by_region(df_plot, "rBC", "SSA", ANALYSIS_REGIONS, filename="ppe_SSA_vs_rBC.png",
                      title="PPE: SSA vs rBC (Brown line)", extra=brown_line, **common)
+if "MEC" in df_plot.columns:
+    pp.scatter_by_region(df_plot, "AE", "MEC", ANALYSIS_REGIONS, filename="ppe_MEC_vs_AE.png",
+                         title=r"PPE: MEC vs AE",
+                         obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "AE", ANALYSIS_REGIONS,
+                                                    source_regions=SOURCE_REGIONS),
+                         **common)
 for lt in ("lifetime_BC_OA", "lifetime"):
     if PRECIP_PPES:
         pp.scatter_by_region(df_plot, pg.MATCHED_COL, lt, LIFETIME_REGIONS, inverse_y=True,
@@ -543,6 +553,11 @@ for pid in PRECIP_PPES:
 # Combined PPE + AeroCom figures
 # -----------------------------------------------------------------------------
 combined = dict(common, aerocom_df=aer_plot)
+if "MEC" in df_plot.columns:
+    pp.scatter_by_region(df_plot, "AE", "MEC", ANALYSIS_REGIONS,
+                         filename="combined_MEC_vs_AE.png",
+                         title=r"ECHAM + ICON + AeroCom: MEC vs AE",
+                         **combined)
 pp.scatter_by_region(df_plot, "1-SSA", "MAC", ANALYSIS_REGIONS,
                      filename="combined_MAC_vs_1SSA.png", through_origin=INTERCEPT_0,
                      title="PPE + AeroCom: MAC vs 1−SSA" + (" (through origin)" if INTERCEPT_0 else ""),
@@ -596,8 +611,8 @@ def plot_combined_outflow_meta(filename="combined_outflow_meta_model.png"):
         if np.isfinite(v):
             ax.axvline(v, color=ppe_io.ppe_style(pid)["color"], ls="--", lw=1.1,
                        label=ppe_io.ppe_obs_name(pid))
-    ax.set_xlabel("Model outflow AAOD$_{550}$ (1)")
-    ax.set_ylabel("Meta-model outflow AAOD$_{550}$ (1)")
+    ax.set_xlabel(r"Model outflow AAOD$_{550}$ [-]")
+    ax.set_ylabel(r"Meta-model outflow AAOD$_{550}$ [-]")
     ax.set_title("Outflow AAOD from African E·τ·MAC (Eq. 6)")
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)

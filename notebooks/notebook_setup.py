@@ -222,29 +222,17 @@ def _restore_agg_object(obj_dict, was_df, is_monthly, month_col='month'):
     return seasonal_dict_to_dataframe(obj_dict)
 
 
-def create_analysis_masks(template, region_names, region = REGIONS , surface_type=None):
-    """Build region masks for ``region_names`` using ``REGIONS`` lon/lat boxes.
-
-    Passes explicit ``lon_range``/``lat_range`` so regions absent from
-    ``cameo_toolbox._REGION_DEFINITIONS`` (e.g. se_asia, boreal_na) still work.
-    """
-    masks = {}
+def create_analysis_masks(template, region_names, region=REGIONS, surface_type=None):
+    """Build region masks with ``cameo_toolbox.masks_for_regions``."""
+    defs = {}
     for name in region_names:
         if name not in region:
-            raise KeyError(f'Region {name!r} not in notebook_setup.REGIONS')
-        cfg = region[name]
-        masks[name] = ct.create_region_mask(
-            template,
-            name=name,
-            lon_range=cfg['lon_range'],
-            lat_range=cfg['lat_range'],
-            surface_type=(
-                surface_type if surface_type is not None
-                else cfg.get('surface_type', 'all')
-            ),
-            mask_registry=masks,
-        )
-    return masks
+            raise KeyError(f"Region {name!r} not in notebook_setup.REGIONS")
+        cfg = dict(region[name])
+        if surface_type is not None:
+            cfg["surface_type"] = surface_type
+        defs[name] = cfg
+    return ct.masks_for_regions(template, defs)
 
 
 

@@ -71,17 +71,27 @@ def load_gpcp_months(
     return xr.concat(das, dim="time"), missing
 
 
-def _box_lon_mask(lon: xr.DataArray, lon_range) -> xr.DataArray:
-    lon0, lon1 = lon_range
-    if lon0 <= lon1:
-        return (lon >= lon0) & (lon <= lon1)
-    return (lon >= lon0) | (lon <= lon1)
-
-
 def gpcp_region_subset(da: xr.DataArray, cfg: dict) -> xr.DataArray:
+    """Crop to the box, then apply the shared land/ocean mask."""
+    import cameo_toolbox as ct
+    import regions as reg
+
     lat0, lat1 = cfg["lat_range"]
-    sub = da.sel(lat=slice(lat0, lat1))
-    return sub.where(_box_lon_mask(sub.lon, cfg["lon_range"]), drop=True)
+    lat_vals = np.asarray(da.lat.values, dtype=float)
+    if lat_vals.size and lat_vals[0] > lat_vals[-1]:
+        sub = da.sel(lat=slice(max(lat0, lat1), min(lat0, lat1)))
+    else:
+        sub = da.sel(lat=slice(min(lat0, lat1), max(lat0, lat1)))
+    lon_ok = reg.box_mask(sub.lon.values, np.zeros(sub.sizes["lon"]), cfg["lon_range"], (-90, 90))
+    sub = sub.where(xr.DataArray(lon_ok, coords={"lon": sub.lon}, dims="lon"), drop=True)
+    surface = cfg.get("surface_type", "all")
+    if surface in ("land", "ocean") and sub.sizes.get("lat", 0) and sub.sizes.get("lon", 0):
+        mask = ct.create_region_mask(
+            sub, name="box", lon_range=cfg["lon_range"], lat_range=cfg["lat_range"],
+            surface_type=surface,
+        )
+        sub = sub.where(mask > 0)
+    return sub
 
 
 def gpcp_region_monthly(da: xr.DataArray, cfg: dict) -> pd.Series:
@@ -201,13 +211,19 @@ def label_region_boxes(fig: plt.Figure, region_boxes: Dict[str, tuple], color="m
 
 
 def styled_map(lon, lat, field, regions, save_fig: SaveFig, filename: str, **kwargs):
-    boxes = region_boxes_180(regions)
-    fig = ct.fake_uba_map(
-        lon=lon, lat=lat, c_array=field, region_boxes=boxes, show_region_labels=False,
-        region_edgecolor="magenta", region_linewidth=2.0, cbar_orientation="vertical",
-        show=False, **kwargs,
+    """Map through ``plot_boxed_field`` (same renderer as the species maps)."""
+    da = xr.DataArray(np.asarray(field), coords={"lat": np.asarray(lat), "lon": np.asarray(lon)},
+                      dims=("lat", "lon"))
+    boxes = [
+        dict(lon_range=tuple(cfg["lon_range"]), lat_range=tuple(cfg["lat_range"]),
+             label=MAP_DISPLAY_NAMES.get(name, name), color="magenta", lw=1.6, ls="-")
+        for name, cfg in regions.items()
+    ]
+    fig = ct.plot_boxed_field(
+        da, boxes=boxes, title=kwargs.get("title", ""), cbar_label=kwargs.get("labels", ""),
+        zmin=kwargs.get("zmin"), zmax=kwargs.get("zmax"), mycolor=kwargs.get("mycolor"),
+        show=False, savefile=None, land_facecolor="0.85",
     )
-    label_region_boxes(fig, boxes)
     save_fig(fig, filename)
 
 

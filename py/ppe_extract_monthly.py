@@ -206,8 +206,12 @@ def extract_var_from_file(
     ham_name: str,
     *,
     allow_hifreq_resample: bool,
+    surface_level: bool = False,
 ) -> Optional[xr.DataArray]:
-    """Load one variable; optionally monthly-mean if high-frequency."""
+    """Load one variable; optionally monthly-mean if high-frequency.
+
+    ``surface_level`` keeps only the last hybrid level (ECHAM near-surface).
+    """
     try:
         ds = open_dataset(path, variables=[ham_name])
     except Exception as e:
@@ -221,6 +225,10 @@ def extract_var_from_file(
         if allow_hifreq_resample and "time" in da.dims and da.sizes.get("time", 0) > 12:
             ds2 = to_monthly_mean(ds[[ham_name]])
             da = ds2[ham_name]
+        if surface_level and "lev" in da.dims:
+            da = da.isel(lev=-1, drop=True)
+            da.attrs = dict(da.attrs)
+            da.attrs["level"] = "surface (last hybrid level)"
         drop_dims = [d for d in da.dims if d not in ("time", "lat", "lon")]
         if drop_dims:
             log.warning("  %s has unexpected dims %s — skipping", ham_name, drop_dims)
@@ -247,12 +255,16 @@ def resolve_variable(
     preferred = cfg.preferred_group(ppe_id, aerocom_name)
     groups: List[str] = [preferred] + [g for g in cfg.SOURCE_FALLBACK if g != preferred]
     groups = [g for g in groups if g in globs]
+    surface_level = aerocom_name == "relhum_sfc"
     for group in groups:
         path = find_source_file(ens_dir, group, globs, run.get("group_roots"))
         if path is None:
             continue
         allow_resample = group == "hifreq"
-        da = extract_var_from_file(path, ham_name, allow_hifreq_resample=allow_resample)
+        da = extract_var_from_file(
+            path, ham_name, allow_hifreq_resample=allow_resample,
+            surface_level=surface_level,
+        )
         if da is None:
             continue
         status = "hifreq_resampled" if group == "hifreq" else "monthly"
@@ -332,6 +344,23 @@ def build_member_dataset(ens_dir: Path, ppe_id: str) -> Tuple[xr.Dataset, List[d
     else:
         rows.append(_prov_row(ppe_id, exp, eid, "precip", "", "", "missing", "mm day-1"))
 
+    if "ustrw" in ds and "vstrw" in ds:
+        stress = np.hypot(ds["ustrw"], ds["vstrw"]).astype(np.float32)
+        stress.name = "stress_water"
+        stress.attrs = {
+            "long_name": "wind-stress magnitude over water",
+            "units": "Pa",
+            "derived_from": "ustrw,vstrw",
+            "conversion": "hypot(ustrw, vstrw)",
+            "note": "friction-velocity proxy; air density not divided out",
+        }
+        ds["stress_water"] = stress
+        src = next((r["source_file"] for r in rows if r["aerocom_name"] == "ustrw"), "")
+        rows.append(_prov_row(ppe_id, exp, eid, "stress_water", "hypot(ustrw,vstrw)", src,
+                              "monthly", "Pa"))
+    else:
+        rows.append(_prov_row(ppe_id, exp, eid, "stress_water", "", "", "missing", "Pa"))
+
     ds = ds.expand_dims(ens=[eid])
     ds = ds.assign_coords(experiment=("ens", np.array([exp], dtype="U64")))
     ds.attrs["title"] = f"PPE monthly extract {ppe_id} {ens_dir.name}"
@@ -377,6 +406,14 @@ def member_is_fresh(ens_dir: Path, out: Path, globs: Dict[str, str], renew: bool
     # Precip vars are legitimately absent when the run has no precip stream.
     if not any(g in globs for g in ("vphysc", "echam")):
         missing_now -= set(cfg.PRECIP_VARS)
+    # Meteo (RH / water stress) needs the echam stream (pd2024 only).
+    if "echam" not in globs:
+        missing_now -= set(cfg.METEO_VARS)
+    # Derived fields written beside VAR_MAP entries.
+    if "stress_water" not in have and "echam" in globs:
+        missing_now.add("stress_water")
+    elif "stress_water" in have:
+        missing_now.discard("stress_water")
     return not missing_now
 
 
@@ -425,6 +462,12 @@ def provenance_from_existing_member(ens_dir: Path, out: Path, ppe_id: str) -> Li
                                   "monthly", "mm day-1"))
         else:
             rows.append(_prov_row(ppe_id, exp, eid, "precip", "", "", "missing", "mm day-1"))
+        if "stress_water" in ds.data_vars:
+            rows.append(_prov_row(ppe_id, exp, eid, "stress_water", "hypot(ustrw,vstrw)",
+                                  ds["stress_water"].attrs.get("derived_from", "ustrw,vstrw"),
+                                  "monthly", "Pa"))
+        else:
+            rows.append(_prov_row(ppe_id, exp, eid, "stress_water", "", "", "missing", "Pa"))
         for miss in cfg.MISSING_VARS:
             rows.append(_prov_row(ppe_id, exp, eid, miss, "", "", "missing", ""))
     finally:
@@ -519,6 +562,101 @@ def write_group_ensemble(
     return out
 
 
+def build_meteo_member(ens_dir: Path, ppe_id: str) -> Optional[xr.Dataset]:
+    """Extract only RH / water-stress fields for one member (no full rewrite)."""
+    if "echam" not in cfg.get_run(ppe_id)["file_globs"]:
+        return None
+    data_vars: Dict[str, xr.DataArray] = {}
+    eid = ens_id_from_name(ens_dir.name)
+    exp = experiment_label(ens_dir.name)
+    for aerocom_name in cfg.METEO_VARS:
+        da, path, status, ham_name = resolve_variable(ens_dir, aerocom_name, ppe_id)
+        if da is None:
+            log.warning("  MISSING %s in %s", aerocom_name, ens_dir.name)
+            continue
+        da = da.astype(np.float32)
+        da.name = aerocom_name
+        da.attrs = dict(da.attrs)
+        da.attrs["ham_name"] = ham_name
+        da.attrs["aerocom_name"] = aerocom_name
+        da.attrs["units"] = da.attrs.get("units", cfg.METEO_VARS[aerocom_name][2])
+        da.attrs["source_file"] = path.name if path else ""
+        data_vars[aerocom_name] = da
+    if "ustrw" not in data_vars or "vstrw" not in data_vars:
+        return None
+    if "relhum_sfc" not in data_vars:
+        return None
+    ref_time = data_vars["relhum_sfc"]["time"]
+    aligned = {n: da.reindex(time=ref_time) if "time" in da.dims else da
+               for n, da in data_vars.items()}
+    ds = standardize_coords(xr.Dataset(aligned))
+    stress = np.hypot(ds["ustrw"], ds["vstrw"]).astype(np.float32)
+    stress.name = "stress_water"
+    stress.attrs = {
+        "long_name": "wind-stress magnitude over water",
+        "units": "Pa",
+        "derived_from": "ustrw,vstrw",
+        "conversion": "hypot(ustrw, vstrw)",
+        "note": "friction-velocity proxy; air density not divided out",
+    }
+    ds["stress_water"] = stress
+    # Analysis ensemble keeps the derived fields only.
+    ds = ds[["relhum_sfc", "stress_water"]]
+    ds = ds.expand_dims(ens=[eid])
+    ds = ds.assign_coords(experiment=("ens", np.array([exp], dtype="U64")))
+    ds.attrs["title"] = f"PPE meteo extract {ppe_id} {ens_dir.name}"
+    ds.attrs["ppe_id"] = ppe_id
+    return ds
+
+
+def _meteo_member_safe(args: Tuple[Path, str]) -> Optional[xr.Dataset]:
+    ens_dir, ppe_id = args
+    try:
+        return build_meteo_member(ens_dir, ppe_id)
+    except Exception as exc:
+        log.exception("Meteo extract failed for %s: %s", ens_dir.name, exc)
+        return None
+
+
+def write_meteo_ensemble(ppe_id: str, ensembles: Sequence[Path],
+                         out_dir: Path, workers: int = 1) -> Optional[Path]:
+    """Build ``meteo_monthly.nc`` under ``out_dir`` (local or scratch)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "meteo_monthly.nc"
+    datasets: List[xr.Dataset] = []
+    jobs = [(ens_dir, ppe_id) for ens_dir in ensembles]
+
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for ds in pool.map(_meteo_member_safe, jobs):
+                if ds is not None:
+                    datasets.append(ds.load())
+                    ds.close()
+    else:
+        for job in jobs:
+            ds = _meteo_member_safe(job)
+            if ds is not None:
+                datasets.append(ds.load())
+                ds.close()
+
+    if not datasets:
+        log.error("No meteo members extracted for %s", ppe_id)
+        return None
+    combined = xr.concat(datasets, dim="ens", combine_attrs="override").sortby("ens")
+    combined.attrs["title"] = f"PPE ensemble monthly meteo ({ppe_id})"
+    combined.attrs["ppe_id"] = ppe_id
+    combined.attrs["n_ensemble"] = int(combined.sizes.get("ens", 0))
+    tmp = out.with_suffix(".nc.tmp")
+    combined.to_netcdf(
+        tmp, engine=cfg.XR_WRITE_ENGINE,
+        encoding=netcdf_encoding(combined, with_ens_chunks=True),
+    )
+    combined.close()
+    tmp.replace(out)
+    log.info("Wrote %s (%d members, %.1f MB)", out, len(datasets), out.stat().st_size / 1e6)
+    return out
+
+
 def write_provenance(rows: Iterable[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = sorted(rows, key=lambda r: (int(r["ens_id"]) if int(r["ens_id"]) >= 0 else 10**9,
@@ -539,8 +677,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--ppe",
         default=cfg.DEFAULT_PPE,
-        choices=sorted(cfg.PPE_RUNS),
-        help="Registered PPE run (PPE_set.PPE_RUNS)",
+        choices=sorted(cfg.extractable_ppes()),
+        help="Registered extractable PPE run (PPE_set.extractable_ppes)",
     )
     p.add_argument(
         "--only",
@@ -570,6 +708,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=1,
         help="Parallel member extracts (processes)",
     )
+    p.add_argument(
+        "--meteo-only",
+        action="store_true",
+        help="Extract only relhum_sfc / stress_water into Data/PPE_scratch "
+             "(or scratch when writable); skip the full member rewrite",
+    )
     return p.parse_args(argv)
 
 
@@ -579,8 +723,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run = cfg.get_run(ppe_id)
     renew = bool(args.renew or cfg.RENEW)
     dirs = cfg.run_dirs(ppe_id)
-    for key in ("members", "ensemble", "logs"):
-        dirs[key].mkdir(parents=True, exist_ok=True)
 
     root = args.ppe_root or run["root"]
     if not root.is_dir():
@@ -591,6 +733,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     log.info("[%s] Found %d ensembles under %s", ppe_id, len(ensembles), root)
     if not ensembles:
         return 1
+
+    if args.meteo_only:
+        if "echam" not in run["file_globs"]:
+            log.error("%s has no echam stream; cannot build meteo", ppe_id)
+            return 1
+        # Prefer scratch when writable; otherwise the project-local fallback.
+        try:
+            scratch_ens = dirs["ensemble"]
+            scratch_ens.mkdir(parents=True, exist_ok=True)
+            probe = scratch_ens / ".write_probe"
+            probe.write_text("ok")
+            probe.unlink()
+            out_dir = scratch_ens
+        except OSError:
+            out_dir = cfg.LOCAL_SCRATCH / ppe_id / "ensemble"
+            log.info("Scratch not writable; writing meteo to %s", out_dir)
+        path = write_meteo_ensemble(ppe_id, ensembles, out_dir, workers=args.workers)
+        return 0 if path is not None else 1
+
+    for key in ("members", "ensemble", "logs"):
+        dirs[key].mkdir(parents=True, exist_ok=True)
 
     member_paths: List[Path] = []
     all_rows: List[dict] = []

@@ -373,14 +373,7 @@ def process_one_model(
     if 'time' in template.dims:
         template = template.isel(time=0)
 
-    masks = {}
-    for name, cfg in spatial_regions.items():
-        masks[name] = ct.create_region_mask(
-            template, name=name,
-            lon_range=cfg['lon_range'], lat_range=cfg['lat_range'],
-            surface_type=cfg.get('surface_type', 'all'),
-            mask_registry=masks,
-        )
+    masks = ct.masks_for_regions(template, spatial_regions)
 
     # acc[(region, model, month)] -> {var: value, ...}
     acc: Dict[tuple, dict] = {}

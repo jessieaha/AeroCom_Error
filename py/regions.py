@@ -88,51 +88,20 @@ REGIONS: Dict[str, dict] = {
     #     time_slice_2010=("2010-08-01", "2010-11-15"),
     #     species=("bb",), role="source", color="#ff7f0e",
     # ),
-    # --- Sea salt (AOD_SS_ERROR / build_monthly_regional_aggregates basins) ---
-    # "NPO_JF": dict(
-    #     surface_type="ocean", lon_range=(120, 260), lat_range=(20, 60),
-    #     season_months=(1, 2), edge_weighted=False,
-    #     species=("ss",), role="source", color="#2ca02c",
-    # ),
-    "ANTAO_JFM": dict(
-        surface_type="ocean", lon_range=(0, 360), lat_range=(-90, -60),
-        season_months=(1, 2, 3), edge_weighted=False,
-        species=("ss",), role="source", color="#ff7f0e",
-    ),
+    # Sea salt. North Pacific (NPO) is not used. 1/τ_ss vs AE (pd2024 seasonal)
+    # is highest in the South Atlantic (SAO_SOND R²≈0.16, SAO_2_DJF R²≈0.14).
+    # Remote Pacific, SIO and the Antarctic band are ≤0.10 and are not analysed.
     "SAO_SOND": dict(
         surface_type="ocean", lon_range=(320, 10), lat_range=(-60, -25),
         season_months=(9, 10, 11, 12), edge_weighted=False,
         species=("ss",), role="source", color="#1f77b4",
-        note="South Atlantic; the northern edge can see South American outflow.",
+        note="Highest 1/τ_ss vs AE (pd2024 seasonal R²≈0.16).",
     ),
     "SAO_2_DJF": dict(
         surface_type="ocean", lon_range=(320, 10), lat_range=(-50, -32),
         season_months=(12,1,2), edge_weighted=False,
         species=("ss",), role="source", color="#1f77b4",
-        note="South Atlantic; the northern edge can see South American outflow.",
-    ),
-        
-    "SIO_DJF": dict(
-        surface_type="ocean", lon_range=(50, 90), lat_range=(-52, -27),
-        season_months=(12,1,2), edge_weighted=False,
-        species=("ss",), role="source", color="#1f77b4",
-        note="South Atlantic; the northern edge can see South American outflow.",
-    ),
-    # Remote Pacific-sector Southern Ocean. DJF is the peak DMS season.
-    # 200-260E is between New Zealand and Chile; 42-62S is open ocean.
-    "remote_SO_DJF": dict(
-        surface_type="ocean", lon_range=(200, 260), lat_range=(-62, -42),
-        season_months=(12, 1, 2), edge_weighted=False,
-        species=("ss",), role="source", color="#17becf",
-        note="Large pristine box, far from land, peak DMS season (DJF).",
-    ),
-    # Same season, Amazon-like footprint (30 deg lon x 14 deg lat), nested
-    # inside remote_SO_DJF, to test whether the relations survive a smaller box.
-    "remote_SPO_box_DJF": dict(
-        surface_type="ocean", lon_range=(215, 245), lat_range=(-59, -45),
-        season_months=(12, 1, 2), edge_weighted=False,
-        species=("ss",), role="source", color="#0b3d5c",
-        note="Amazon-sized box inside remote_SO_DJF.",
+        note="South Atlantic DJF box; 1/τ_ss vs AE R²≈0.14, just behind SAO_SOND.",
     ),
     # --- Mineral dust (primary dust seasons) ---
     "sahara": dict(
@@ -211,7 +180,7 @@ SPECIES: Dict[str, dict] = {
         emi=("emidust",),
         dep=("depdust",),
         wet=("wetdu",),
-        dry=(),
+        dry=("drydu",),
         od="od550dust",
         abs="abs550dust",
         mass_coeffs=("MEC_du", "MAC_du"),
@@ -312,20 +281,47 @@ def ppe_view(names: Optional[Sequence[str]] = None,
     return out
 
 
-def in_box(lon360, lat, region: str):
-    """Boolean mask of points (0..360 lon) inside a region box."""
+def box_mask(lon, lat, lon_range, lat_range):
+    """Boolean mask of points inside a lon/lat box.
+
+    Longitude may be −180..180 or 0..360. A range with lon0 > lon1 wraps 0°E.
+    """
     import numpy as np
 
-    cfg = REGIONS[region]
-    lon0, lon1 = cfg["lon_range"]
-    lat0, lat1 = cfg["lat_range"]
-    lon360 = np.asarray(lon360, dtype=float)
+    lon0, lon1 = float(lon_range[0]), float(lon_range[1])
+    lat0, lat1 = float(lat_range[0]), float(lat_range[1])
+    lon = np.asarray(lon, dtype=float)
     lat = np.asarray(lat, dtype=float)
+    lon360 = np.mod(lon, 360.0)
     if lon0 <= lon1:
         lon_ok = (lon360 >= lon0) & (lon360 <= lon1)
     else:
         lon_ok = (lon360 >= lon0) | (lon360 <= lon1)
-    return lon_ok & (lat >= lat0) & (lat <= lat1)
+    return lon_ok & (lat >= min(lat0, lat1)) & (lat <= max(lat0, lat1))
+
+
+def in_box(lon360, lat, region: str):
+    """Boolean mask of points inside a registered region box (no land/sea mask)."""
+    cfg = REGIONS[region]
+    return box_mask(lon360, lat, cfg["lon_range"], cfg["lat_range"])
+
+
+def points_in_region(lon, lat, region: str):
+    """Points inside the box and on the region's land or ocean mask.
+
+    Land/ocean uses the same Natural Earth 110 m mask as gridded AeroCom and PPE
+    aggregates (``cameo_toolbox.point_is_land``).
+    """
+    cfg = REGIONS[region]
+    inside = box_mask(lon, lat, cfg["lon_range"], cfg["lat_range"])
+    surface = cfg.get("surface_type", "all")
+    if surface not in ("land", "ocean"):
+        return inside
+    import cameo_toolbox as ct
+    land = ct.point_is_land(lon, lat)
+    if surface == "land":
+        return inside & land
+    return inside & ~land
 
 
 def definition_hash(names: Optional[Sequence[str]] = None) -> str:

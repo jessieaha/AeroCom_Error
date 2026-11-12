@@ -8,7 +8,8 @@
 #   * pd2024 (Aug 2024 - Jul 2025) is compared with SPEXone;
 #   * pd2010 (2010, the AeroCom / POLDER year) is compared with POLDER-GRASP.
 # Sea-salt regions follow ``regions.REGIONS`` (surface_type unchanged):
-# remote_SO_DJF, remote_SPO_box_DJF, SAO_2_DJF, then the other sea-salt basins.
+# remote_SO and the nested Pacific box are not in the lifetime analysis.
+# Sea-salt regions: SAO_SOND and SAO_2_DJF (highest 1/τ vs AE).
 # Box-size and box-location sensitivity (±5°) is in
 # ``notebooks/PPE_box_sensitivity.py``.
 # Emission-based lifetimes only (no wet/dry/dep streams in the PPE extract);
@@ -25,6 +26,7 @@ from typing import Dict, List
 
 import numpy as np
 import pandas as pd
+import xarray as xr
 
 try:
     get_ipython()  # noqa: F821
@@ -64,11 +66,12 @@ print(f"Project root: {project_root}")
 # Configuration
 # -----------------------------------------------------------------------------
 SPECIES = "ss"
-PPE_IDS: List[str] = ["pd2024", "pd2010"]
+PPE_IDS: List[str] = ["pd2024", "pd2010", "icon2025"]
 EXCLUDE_MEMBERS: List[str] = []  # e.g. ["Control"] or ["pd2010:17"]
 
-# Pristine DJF boxes first, then the original basins (SAO is the less remote ocean).
-_REGION_ORDER = ["remote_SO_DJF", "remote_SPO_box_DJF", "SAO_2_DJF", "SAO_SOND", "ANTAO_JFM", "NPO_JF"]
+# Sea-salt regions with the highest emission-lifetime R² (1/τ vs AE):
+# SAO_SOND ≈ 0.16, SAO_2_DJF ≈ 0.14. North Pacific and the low-R² basins are omitted.
+_REGION_ORDER = ["SAO_SOND", "SAO_2_DJF"]
 SOURCE_REGIONS = reg.source_regions(SPECIES)
 ANALYSIS_REGIONS = [r for r in _REGION_ORDER if r in SOURCE_REGIONS]
 
@@ -81,23 +84,28 @@ save_fig = pp.FigureSaver(FIGURE_DIR, save=SAVE_FIGURE)
 HOMOGENIZE_VARS = {"AOD": "AOD_550", "AAOD": "AAOD_550", "SSA": "SSA"}
 
 AXIS_LABELS = {
-    "SSA": "SSA (1)",
-    "1-SSA": "1 − SSA (1)",
+    "SSA": r"SSA [-]",
+    "1-SSA": r"1 − SSA [-]",
     "MEC": r"MEC (m$^{2}$ g$^{-1}$)",
     "MEC_ss": r"MEC$_{SS}$ (m$^{2}$ g$^{-1}$)",
     "MEC_so4": r"MEC$_{SO4}$ (m$^{2}$ g$^{-1}$)",
     "MAC": r"MAC (m$^{2}$ g$^{-1}$)",
-    "AE": "AE 550-865 (1)",
+    "AE": r"AE 550–865 [-]",
     "precip": r"Precipitation (mm day$^{-1}$)",
+    "relhum_sfc": r"Near-surface RH [-]",
+    "stress_water": r"Water wind stress $|\tau|$ (Pa)",
     "lifetime_ss": r"Sea-salt lifetime $\tau_{SS}$ (day)",
+    "lifetime_SO4": r"Sulfate lifetime $\tau_{SO4}$ (day)",
     "lifetime_mass": r"Lifetime $\tau$ (day)",
     "inv_lifetime_ss": r"1/$\tau_{SS}$ (day$^{-1}$)",
+    "inv_lifetime_SO4": r"1/$\tau_{SO4}$ (day$^{-1}$)",
     "inv_lifetime_mass": r"1/$\tau$ (day$^{-1}$)",
-    "od550aer": "AOD$_{550}$ (1)",
-    "od550ss": "AOD$_{SS,550}$ (1)",
-    "ss_burden_frac": "Sea-salt share of SS+SO4 burden (1)",
-    "dms_source_frac": "DMS share of SO4-equivalent source (1)",
-    "so2_source_frac": "SO2 share of SO4-equivalent source (1)",
+    "inv_lifetime_marine": r"1/$\tau_{SS+SO4}$ (day$^{-1}$)",
+    "od550aer": r"AOD$_{550}$ [-]",
+    "od550ss": r"AOD$_{SS,550}$ [-]",
+    "ss_burden_frac": r"Sea-salt share of SS+SO4 burden [-]",
+    "dms_source_frac": r"DMS share of SO4-equivalent source [-]",
+    "so2_source_frac": r"SO2 share of SO4-equivalent source [-]",
     "lifetime_marine": r"Marine lifetime $\tau_{SS+SO4}$ (day)",
     "lifetime_marine_dep": r"Marine lifetime from deposition (day)",
 }
@@ -171,6 +179,9 @@ obs_tables: Dict[str, pd.DataFrame] = {}
 obs_means: Dict[str, Dict[str, dict]] = {}
 homog_rows = []
 for pid in PPE_IDS:
+    if not ppe_cfg.get_run(pid).get("extractable", True):
+        print(f"  Skip homogenization for {pid} (native ICON grid, no T63 ensemble)")
+        continue
     obs_name = ppe_io.ppe_obs_name(pid)
     print(f"\n--- {pid}: {obs_name} ---")
     try:
@@ -233,6 +244,12 @@ pp.scatter_by_region(df_plot, "SSA", "MEC_ss", filename="ppe_SSA_vs_MEC_ss.png",
 pp.scatter_by_region(df_plot, "1-SSA", "MEC_ss", filename="ppe_1SSA_vs_MEC_ss.png",
                      title="PPE + AeroCom sea salt: MEC$_{SS}$ vs 1−SSA (through origin)",
                      through_origin=True, obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS, transform=lambda v: 1 - v), **common)
+pp.scatter_by_region(df_plot, "AE", "MEC_ss", filename="ppe_MEC_ss_vs_AE.png",
+                     title=r"PPE + AeroCom sea salt: MEC$_{SS}$ vs AE",
+                     obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "AE", ANALYSIS_REGIONS), **common)
+pp.scatter_by_region(df_plot, "AE", "MEC", filename="ppe_MEC_vs_AE.png",
+                     title=r"PPE + AeroCom total aerosol: MEC vs AE",
+                     obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "AE", ANALYSIS_REGIONS), **common)
 pp.scatter_by_region(df_plot, "SSA", "od550aer", filename="ppe_AOD_vs_SSA.png",
                      title="PPE + AeroCom: AOD vs SSA", obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS),
                      obs_y=ppe_io.obs_lines_for(homog_df, obs_means, "AOD", ANALYSIS_REGIONS), **common)
@@ -258,15 +275,233 @@ for lt, name in (("lifetime_ss", "sea salt"), ("lifetime_mass", "total aerosol")
 
 # %%
 # -----------------------------------------------------------------------------
-# What changes sea-salt and sea-salt+sulfate lifetime
+# Lifetime drivers: explore correlations BEFORE any multi-linear fit
+# AeroCom CTRL has no u* / wind stress; ~11 models have ModelLevel rh.
+# PPE 2024 has relhum_sfc + stress_water=hypot(ustrw,vstrw) (no friction velocity).
+# Prefer u* when available; here RH + water stress are the PPE proxies.
 # -----------------------------------------------------------------------------
-# Emission lifetime only (PPE has no depss/wetss/dryss). Sulfate source is
-# primary SO4 plus half of SO2 and DMS, converted to SO4 mass. DMS is the
-# remote source; SO2 is the continental-pollution source.
+METEO_PPE = "pd2024"
+EXPLORE_LIFETIMES = [
+    ("lifetime_ss", "sea salt"),
+    ("lifetime_SO4", "sulfate"),
+    ("lifetime_marine", "SS+SO4 marine"),
+    ("lifetime_mass", "total aerosol (mass)"),
+]
+EXPLORE_PREDICTORS = ["AE", "precip", "relhum_sfc", "stress_water"]
+
+# Merge sampled AeroCom surface RH (metno AP3 CTRL) onto the overlay table
+_rh_csv = TABLE_DIR / "aerocom_relhum_sfc_regional_sample.csv"
+if not aerocom_df.empty and _rh_csv.is_file():
+    _rh = pd.read_csv(_rh_csv)
+    # GISS filenames include "-2010"; strip trailing year tags for join
+    _rh["model_key"] = _rh["model"].str.replace(r"-20\d{2}$", "", regex=True)
+    aerocom_df = aerocom_df.copy()
+    aerocom_df["model_key"] = aerocom_df["model"].astype(str)
+    aerocom_df = aerocom_df.merge(
+        _rh[["model_key", "region", "relhum_sfc"]].rename(columns={"relhum_sfc": "relhum_sfc"}),
+        on=["model_key", "region"], how="left",
+    )
+    n_rh = int(aerocom_df["relhum_sfc"].notna().sum())
+    print(f"AeroCom surface RH joined for {n_rh} seasonal rows "
+          f"({aerocom_df.loc[aerocom_df['relhum_sfc'].notna(), 'model'].nunique()} models)")
+    aerocom_df.to_csv(TABLE_DIR / "aerocom_seasonal_wide.csv", index=False)
+elif not _rh_csv.is_file():
+    print(f"No {_rh_csv.name}: AeroCom RH overlay skipped "
+          "(see Data/AP3_meteo_sample + aerocom_meteo_inventory.csv)")
+
 model_seasonal_df = ppe_io.add_lifetime_drivers(model_seasonal_df)
 aerocom_df = ppe_io.add_lifetime_drivers(aerocom_df)
 df_plot = pp.with_one_minus_ssa(model_seasonal_df)
 aer_plot = pp.with_one_minus_ssa(aerocom_df)
+
+
+def _season_month_mask(df: pd.DataFrame, regions: List[str]) -> pd.Series:
+    keep = np.zeros(len(df), dtype=bool)
+    months = pd.to_datetime(df["time"]).dt.month
+    for region in regions:
+        season = set(reg.REGIONS[region]["season_months"])
+        keep |= (df["region"].to_numpy() == region) & months.isin(season).to_numpy()
+    return pd.Series(keep, index=df.index)
+
+
+def _corr_rows(df: pd.DataFrame, source: str, lifetimes, predictors, regions) -> List[dict]:
+    rows = []
+    for region in regions:
+        sub = df.loc[df["region"] == region]
+        for lt, _ in lifetimes:
+            if lt not in sub.columns:
+                continue
+            y = 1.0 / sub[lt].astype(float)
+            for xcol in predictors:
+                if xcol not in sub.columns:
+                    continue
+                pair = pd.DataFrame({"x": sub[xcol].astype(float), "y": y}).replace(
+                    [np.inf, -np.inf], np.nan
+                ).dropna()
+                if len(pair) < 5:
+                    continue
+                r = float(pair["x"].corr(pair["y"]))
+                rows.append(dict(
+                    source=source, region=region, lifetime=lt, predictor=xcol,
+                    r_inv_tau=r, n=len(pair),
+                    x_min=float(pair["x"].min()), x_med=float(pair["x"].median()),
+                    x_max=float(pair["x"].max()),
+                ))
+    return rows
+
+
+print("\n--- Lifetime ↔ meteo exploration (Pearson r of 1/τ vs predictor) ---")
+corr_rows = []
+corr_rows += _corr_rows(df_plot, "PPE_seasonal", EXPLORE_LIFETIMES, EXPLORE_PREDICTORS, ANALYSIS_REGIONS)
+corr_rows += _corr_rows(aer_plot, "AeroCom_seasonal", EXPLORE_LIFETIMES,
+                        [c for c in EXPLORE_PREDICTORS if c != "stress_water"], ANALYSIS_REGIONS)
+
+meteo_cols = [c for c in ("relhum_sfc", "stress_water") if c in model_monthly_df.columns]
+mon_explore = pd.DataFrame()
+if METEO_PPE in PPE_IDS and meteo_cols:
+    mon_explore = model_monthly_df.loc[model_monthly_df["ppe_id"] == METEO_PPE].copy()
+    mon_explore = mon_explore.loc[_season_month_mask(mon_explore, ANALYSIS_REGIONS)]
+    mon_explore = ppe_io.add_lifetime_drivers(mon_explore)
+    corr_rows += _corr_rows(mon_explore, "PPE_monthly_in_season", EXPLORE_LIFETIMES,
+                            EXPLORE_PREDICTORS, ANALYSIS_REGIONS)
+
+corr_df = pd.DataFrame(corr_rows)
+corr_path = TABLE_DIR / "ppe_lifetime_meteo_correlations.csv"
+if not corr_df.empty:
+    corr_df.to_csv(corr_path, index=False)
+    print(corr_df.pivot_table(index=["source", "lifetime", "predictor"], columns="region",
+                              values="r_inv_tau").round(2).to_string())
+    print(f"Saved: {corr_path}")
+
+# Scatter panels: each lifetime × each available predictor (AeroCom diamonds)
+common_explore = dict(regions=ANALYSIS_REGIONS, saver=save_fig, ppe_ids=PPE_IDS,
+                      labels=AXIS_LABELS, aerocom_df=aer_plot)
+for lt, lt_name in EXPLORE_LIFETIMES:
+    if lt not in df_plot.columns:
+        print(f"Skip scatters for {lt}: not in PPE table")
+        continue
+    for xcol in EXPLORE_PREDICTORS:
+        if xcol not in df_plot.columns and xcol not in aer_plot.columns:
+            continue
+        # precip / PPE meteo: only PPEs that carry the column
+        if xcol == "precip":
+            ids = PRECIP_PPES
+        elif xcol in ("relhum_sfc", "stress_water"):
+            ids = [p for p in PPE_IDS if p == METEO_PPE]
+        else:
+            ids = PPE_IDS
+        if not ids:
+            continue
+        if xcol not in df_plot.columns:
+            continue
+        aer_use = (
+            aer_plot if (xcol in aer_plot.columns and aer_plot[xcol].notna().any())
+            else None
+        )
+        pp.scatter_by_region(
+            df_plot, xcol, lt, inverse_y=True,
+            filename=f"ppe_inv_{lt}_vs_{xcol}.png",
+            title=rf"PPE + AeroCom {lt_name}: 1/$\tau$ vs {AXIS_LABELS.get(xcol, xcol)}",
+            **{**common_explore, "ppe_ids": ids, "aerocom_df": aer_use},
+        )
+
+# Optional nested OLS only after the exploration (monthly, pd2024, lifetime_ss)
+NESTED_MODELS = {
+    "AE": ["AE"],
+    "AE+RH": ["AE", "relhum_sfc"],
+    "AE+stress": ["AE", "stress_water"],
+    "AE+RH+stress": ["AE", "relhum_sfc", "stress_water"],
+    "AE+precip": ["AE", "precip"],
+}
+
+
+def _standardized_ols(y: np.ndarray, X: np.ndarray, names: List[str]) -> dict:
+    mu = X.mean(axis=0)
+    sd = X.std(axis=0, ddof=0)
+    sd = np.where(sd > 0, sd, 1.0)
+    Z = (X - mu) / sd
+    A = np.column_stack([np.ones(len(y)), Z])
+    coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+    pred = A @ coef
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    r2 = 1.0 - np.sum((y - pred) ** 2) / ss_tot if ss_tot > 0 else np.nan
+    raw = {names[i]: float(coef[i + 1] / sd[i]) for i in range(len(names))}
+    std = {f"beta_{names[i]}": float(coef[i + 1]) for i in range(len(names))}
+    intercept = float(coef[0] - np.sum(coef[1:] * mu / sd))
+    return {"A": intercept, "r2": float(r2), "n": int(len(y)),
+            "pred": pred, **raw, **std}
+
+
+if METEO_PPE in PPE_IDS and meteo_cols and not mon_explore.empty:
+    print(f"\n--- Nested monthly OLS for 1/τ_ss ({METEO_PPE}; after exploration) ---")
+    mon = mon_explore.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=["lifetime_ss", "AE"] + meteo_cols
+    )
+    mon = mon.loc[mon["lifetime_ss"] > 0].copy()
+    mon["inv_lifetime_ss"] = 1.0 / mon["lifetime_ss"]
+    coef_rows = []
+    fig, axes = plt.subplots(
+        len(ANALYSIS_REGIONS), 1,
+        figsize=(6.5, 3.8 * len(ANALYSIS_REGIONS)), squeeze=False,
+    )
+    for ax, region in zip(axes[:, 0], ANALYSIS_REGIONS):
+        sub = mon.loc[mon["region"] == region].copy()
+        if len(sub) < 8:
+            ax.set_title(f"{region}: too few months (n={len(sub)})")
+            continue
+        y = sub["inv_lifetime_ss"].to_numpy(float)
+        full_names = [c for c in NESTED_MODELS["AE+RH+stress"] if c in sub.columns]
+        full = _standardized_ols(y, sub[full_names].to_numpy(float), full_names)
+        sub = sub.assign(inv_pred=full["pred"])
+        for model_name, cols in NESTED_MODELS.items():
+            cols = [c for c in cols if c in sub.columns]
+            if not cols:
+                continue
+            fit = _standardized_ols(y, sub[cols].to_numpy(float), cols)
+            row = {"ppe_id": METEO_PPE, "region": region, "model": model_name,
+                   "A": fit["A"], "r2": fit["r2"], "n": fit["n"]}
+            for c in EXPLORE_PREDICTORS:
+                row[c] = fit.get(c, np.nan)
+                row[f"beta_{c}"] = fit.get(f"beta_{c}", np.nan)
+            coef_rows.append(row)
+            print(f"  {region:18} {model_name:14} R²={fit['r2']:.3f}  n={fit['n']}")
+        sc = ax.scatter(sub["inv_pred"], sub["inv_lifetime_ss"],
+                        c=sub["stress_water"], s=12, cmap="viridis", alpha=0.7)
+        lim = max(sub["inv_pred"].max(), sub["inv_lifetime_ss"].max()) * 1.05
+        ax.plot([0, lim], [0, lim], "k--", lw=1)
+        fig.colorbar(sc, ax=ax, shrink=0.8).set_label(AXIS_LABELS["stress_water"])
+        ax.set_xlabel(r"Predicted 1/$\tau_{SS}$ (day$^{-1}$)")
+        ax.set_ylabel(r"Observed 1/$\tau_{SS}$ (day$^{-1}$)")
+        ax.set_title(
+            f"{region}: AE+RH+stress R²={full['r2']:.3f} "
+            f"(β_AE={full.get('beta_AE', np.nan):+.2f}, "
+            f"β_RH={full.get('beta_relhum_sfc', np.nan):+.2f}, "
+            f"β_τ={full.get('beta_stress_water', np.nan):+.2f})",
+            fontsize=10,
+        )
+        ax.grid(True, alpha=0.3)
+    fig.suptitle(
+        rf"{METEO_PPE}: monthly 1/$\tau_{{SS}}$ from AE, RH and water stress "
+        r"(explore first; colour = $|\tau|_{\mathrm{water}}$)",
+        fontsize=12, fontweight="bold",
+    )
+    fig.tight_layout()
+    save_fig(fig, "ppe_inv_lifetime_ss_vs_AE_RH_stress.png")
+    coef_df = pd.DataFrame(coef_rows)
+    coef_path = TABLE_DIR / "ppe_lifetime_ss_meteo_coefficients.csv"
+    coef_df.to_csv(coef_path, index=False)
+    print(f"Saved: {coef_path}")
+else:
+    print("Skip nested meteo OLS (need pd2024 monthly relhum_sfc / stress_water)")
+
+# %%
+# -----------------------------------------------------------------------------
+# What changes sea-salt and sea-salt+sulfate lifetime (marine drivers)
+# -----------------------------------------------------------------------------
+# Emission lifetime only (PPE has no depss/wetss/dryss). Sulfate source is
+# primary SO4 plus half of SO2 and DMS, converted to SO4 mass. DMS is the
+# remote source; SO2 is the continental-pollution source.
+# lifetime_drivers already added in the meteo-exploration block above.
 marine = dict(regions=ANALYSIS_REGIONS, saver=save_fig, ppe_ids=PPE_IDS,
               labels=AXIS_LABELS, aerocom_df=aer_plot)
 pp.scatter_by_region(df_plot, "ss_burden_frac", "lifetime_ss", inverse_y=True,
@@ -299,63 +534,74 @@ if ("lifetime_marine_dep" in aer_plot.columns
 
 # %%
 # -----------------------------------------------------------------------------
-# Observation maps (raw obs per PPE period)
+# Observation maps (native lon/lat spacing, region boxes, centred at box middle)
 # -----------------------------------------------------------------------------
+import cameo_toolbox as ct
+
 for pid, obs in obs_tables.items():
     if obs.empty or not SAVE_FIGURE:
         continue
     period = ppe_cfg.get_run(pid)["period"]
     obs_name = ppe_io.ppe_obs_name(pid)
-    fig, axes = plt.subplots(len(ANALYSIS_REGIONS), 2, figsize=(12, 3.5 * len(ANALYSIS_REGIONS)),
-                             squeeze=False)
-    for i, region in enumerate(ANALYSIS_REGIONS):
-        sub = ppe_io.obs_in_region(obs, region, period)
-        if sub.empty:
-            continue
-        grid = sub.assign(lon=sub["lon360"].round(0), lat=sub["latitude"].round(0)) \
-            .groupby(["lon", "lat"], as_index=False)[["AOD_550", "SSA"]].mean()
-        for j, col in enumerate(["AOD_550", "SSA"]):
-            ax = axes[i, j]
-            sc = ax.scatter(grid["lon"], grid["lat"], c=grid[col], s=8, cmap="viridis")
-            fig.colorbar(sc, ax=ax, shrink=0.8).set_label(f"{col} (1)")
-            ax.set_title(f"{region} {obs_name} {col}")
-            ax.set_xlabel("Longitude (°E, 0-360)")
-            ax.set_ylabel("Latitude (°)")
-    fig.tight_layout()
-    save_fig(fig, f"{pid}_{obs_name}_regional_maps.png")
+    for col, cbar in (("AOD_550", r"AOD$_{550}$ [-]"), ("SSA", r"SSA [-]")):
+        for region in ANALYSIS_REGIONS:
+            sub = ppe_io.obs_in_region(obs, region, period)
+            if sub.empty:
+                continue
+            lon = sub["lon360"].to_numpy(float)
+            lat = sub["latitude"].to_numpy(float)
+            lon_u = np.unique(np.round(lon, 6))
+            lat_u = np.unique(np.round(lat, 6))
+            if lon_u.size < 2 or lat_u.size < 2:
+                continue
+            dlon = float(np.median(np.diff(lon_u)))
+            dlat = float(np.median(np.diff(lat_u)))
+            lon_bin = np.round(lon / dlon) * dlon
+            lat_bin = np.round(lat / dlat) * dlat
+            grid = (
+                pd.DataFrame({"lon": lon_bin, "lat": lat_bin, "z": sub[col].to_numpy(float)})
+                .groupby(["lon", "lat"], as_index=False)["z"].mean()
+            )
+            lon_axis = np.sort(grid["lon"].unique())
+            lat_axis = np.sort(grid["lat"].unique())
+            z = (
+                grid.pivot(index="lat", columns="lon", values="z")
+                .reindex(index=lat_axis, columns=lon_axis)
+                .to_numpy(float)
+            )
+            field = xr.DataArray(
+                z, coords={"lat": lat_axis, "lon": lon_axis}, dims=("lat", "lon"),
+            )
+            clon, ext = boxes.extent_for_regions([region], pad=8.0)
+            out = FIGURE_DIR / f"{pid}_{obs_name}_{col}_{region}.png"
+            ct.plot_boxed_field(
+                field, boxes=boxes.region_boxes([region]),
+                title=f"{region} {obs_name} {col}",
+                cbar_label=cbar, savefile=str(out), show=False,
+                extent=ext, central_longitude=clon, land_facecolor="0.85",
+            )
+            print(f"  Saved {out.name}")
 
 # %%
 # -----------------------------------------------------------------------------
-# Regional map: PPE 2024 ensemble-mean sea-salt AOD, DJF, with the boxes
+# Regional map: PPE 2024 ensemble-mean sea-salt AOD, DJF, with analysis boxes
+# Native T63 lon/lat bins, land shaded, lon centred on each map's boxes.
 # -----------------------------------------------------------------------------
 print("\n--- Sea-salt regional map (PPE 2024, DJF od550ss) ---")
 ss_field = boxes.ensemble_mean_aod("pd2024", ["od550ss"], months=(12, 1, 2))
-ss_defs = boxes.load_defs()
+atlantic = [r for r in ANALYSIS_REGIONS if r in reg.REGIONS]
+clon_a, ext_a = boxes.extent_for_regions(atlantic, pad=12.0)
 boxes.plot_study_map(
-    ss_field, boxes.map_boxes(ss_defs, ["remote_SO_DJF", "remote_SPO_box_DJF"]),
-    title="PPE 2024 ensemble-mean sea-salt AOD$_{550}$ (DJF), remote Pacific",
-    cbar_label="AOD$_{SS,550}$ (1)",
-    filename=FIGURE_DIR / "ppe2024_seasalt_AOD_boxes_DJF.png",
-    extent=(170, 290, -75, -20),
-)
-boxes.plot_study_map(
-    ss_field, boxes.map_boxes(ss_defs, ["SAO_2_DJF"]),
-    title="PPE 2024 ensemble-mean sea-salt AOD$_{550}$ (DJF), SAO_2",
-    cbar_label="AOD$_{SS,550}$ (1)",
-    filename=FIGURE_DIR / "ppe2024_seasalt_AOD_boxes_SAO_2_DJF.png",
-    extent=(-50, 20, -70, -20),
-    central_longitude=0.0,
-)
-boxes.plot_study_map(
-    ss_field, boxes.map_boxes(ss_defs, boxes.BASELINES["ss"]),
-    title="PPE 2024 ensemble-mean sea-salt AOD$_{550}$ (DJF), global",
-    cbar_label="AOD$_{SS,550}$ (1)",
-    filename=FIGURE_DIR / "ppe2024_seasalt_AOD_boxes_DJF_global.png",
+    ss_field, boxes.region_boxes(atlantic),
+    title="PPE 2024 ensemble-mean sea-salt AOD$_{550}$ (DJF), South Atlantic",
+    cbar_label=r"AOD$_{SS,550}$ [-]",
+    filename=FIGURE_DIR / "ppe2024_seasalt_AOD_boxes_SAO.png",
+    extent=ext_a, central_longitude=clon_a, land_facecolor="0.85",
 )
 boxes.plot_study_map(
     ss_field, [],
     title="PPE 2024 ensemble-mean sea-salt AOD$_{550}$ (DJF)",
-    cbar_label="AOD$_{SS,550}$ (1)",
+    cbar_label=r"AOD$_{SS,550}$ [-]",
     filename=FIGURE_DIR / "ppe2024_seasalt_AOD_DJF_curved.png",
 )
 

@@ -189,13 +189,7 @@ sample_model = next((m for m in models if data[m].get('od550aer') is not None), 
 template = data[sample_model]['od550aer'].isel(time=0)
 print(f'\nTemplate grid from {sample_model}: {template.dims}')
 
-masks = {}
-for name, cfg in REGIONS.items():
-    masks[name] = ct.create_region_mask(
-        template, region=name,
-        surface_type=cfg['surface_type'],
-        mask_registry=masks,
-    )
+masks = ct.masks_for_regions(template, REGIONS)
 print('Regions created:', list(masks.keys()))
 
 

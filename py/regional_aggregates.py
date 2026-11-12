@@ -40,7 +40,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
                     datefmt="%H:%M:%S")
 log = logging.getLogger("regional")
 
-GROUPS = ("burden", "emi", "optical", "precip")
+GROUPS = ("burden", "emi", "optical", "precip", "meteo")
 ENS_BATCH = 8
 # Species mass coefficients only where that species' 550 nm AOD >= this.
 SPECIES_MIN_OD = 1e-3
@@ -93,11 +93,15 @@ def ens_label(ens_id: int) -> str:
 def open_ensemble(ppe_id: str) -> xr.Dataset:
     """Merge the run's group NetCDFs into one (ens, time, lat, lon) Dataset."""
     parts = []
+    globs = cfg.get_run(ppe_id)["file_globs"]
     for group in GROUPS:
         path = cfg.ensemble_file(ppe_id, group)
         if not path.is_file():
             if group == "precip" and not cfg.get_run(ppe_id)["has_precip"]:
                 log.info("  %s: no precip ensemble (has_precip=False)", ppe_id)
+                continue
+            if group == "meteo" and "echam" not in globs:
+                log.info("  %s: no meteo ensemble (no echam stream)", ppe_id)
                 continue
             raise FileNotFoundError(f"Missing {ppe_id} ensemble file: {path}")
         ds = xr.open_dataset(path, engine=cfg.XR_WRITE_ENGINE)
@@ -234,66 +238,26 @@ def derived_fields(ds: xr.Dataset, quality=None) -> Dict[str, xr.DataArray]:
 # Regional weights and aggregation
 # ---------------------------------------------------------------------------
 def region_weights(template: xr.DataArray, names: Sequence[str]) -> xr.DataArray:
-    """(region, lat, lon) area weights incl. surface mask and edge weighting."""
-    import notebook_setup as setup
-
-    regions = setup.ALL_REGIONS
-    masks = setup.create_analysis_masks(template, list(names), region=regions)
-    ws = []
-    for name in names:
-        w, _ = ct._spatial_weights(template, masks[name],
-                                   edge_weighted=regions[name]["edge_weighted"])
-        ws.append(w.fillna(0.0).transpose("lat", "lon").values)
-    return xr.DataArray(
-        np.stack(ws), dims=("region", "lat", "lon"),
-        coords={"region": list(names), "lat": template.lat, "lon": template.lon},
-    )
-
-
-def _center_widths(coord: np.ndarray) -> np.ndarray:
-    """Width of each cell of a 1-D monotonic coordinate (degrees)."""
-    x = np.asarray(coord, dtype=float)
-    edges = np.empty(x.size + 1, dtype=float)
-    edges[1:-1] = 0.5 * (x[:-1] + x[1:])
-    edges[0] = x[0] - 0.5 * (x[1] - x[0])
-    edges[-1] = x[-1] + 0.5 * (x[-1] - x[-2])
-    return np.abs(np.diff(edges))
+    """(region, lat, lon) area weights. Same masks as AeroCom."""
+    defs = {name: reg.REGIONS[name] for name in names}
+    return weights_from_defs(template, defs)
 
 
 def weights_from_defs(template: xr.DataArray, region_defs: Dict[str, dict]) -> xr.DataArray:
-    """Area weights for an arbitrary box dict (one land-mask read for the grid).
-
-    ``region_defs`` values need ``lon_range``, ``lat_range`` and ``surface_type``.
-    Weights are cos(lat) * cell size, times the land or ocean mask.
-    """
+    """Area weights from ``create_region_mask`` (Natural Earth land/sea, edge weights)."""
     tpl = template
     for dim in ("ens", "time"):
         if dim in tpl.dims:
             tpl = tpl.isel({dim: 0}, drop=True)
-    lat = np.asarray(tpl.lat.values, dtype=float)
-    lon = np.asarray(tpl.lon.values, dtype=float)
-    land = np.asarray(ct._land_sea_mask(tpl, "land").values, dtype=float) >= 0.5
-    area = np.cos(np.deg2rad(lat))[:, None] * _center_widths(lat)[:, None] * _center_widths(lon)[None, :]
+    masks = ct.masks_for_regions(tpl, region_defs)
     names = list(region_defs)
-    stack = np.zeros((len(names), lat.size, lon.size), dtype=np.float64)
-    for i, name in enumerate(names):
-        cfg = region_defs[name]
-        lon0, lon1 = cfg["lon_range"]
-        lat0, lat1 = cfg["lat_range"]
-        if lon0 <= lon1:
-            lon_ok = (lon >= lon0) & (lon <= lon1)
-        else:
-            lon_ok = (lon >= lon0) | (lon <= lon1)
-        lat_ok = (lat >= min(lat0, lat1)) & (lat <= max(lat0, lat1))
-        mask = lat_ok[:, None] & lon_ok[None, :]
-        surface = cfg.get("surface_type", "all")
-        if surface == "ocean":
-            mask = mask & ~land
-        elif surface == "land":
-            mask = mask & land
-        stack[i] = np.where(mask, area, 0.0)
+    stack = []
+    for name in names:
+        edge = bool(region_defs[name].get("edge_weighted", False))
+        w, _ = ct._spatial_weights(tpl, masks[name], edge_weighted=edge)
+        stack.append(np.asarray(w.fillna(0.0).transpose("lat", "lon").values, dtype=np.float64))
     return xr.DataArray(
-        stack, dims=("region", "lat", "lon"),
+        np.stack(stack), dims=("region", "lat", "lon"),
         coords={"region": names, "lat": tpl.lat, "lon": tpl.lon},
     )
 
@@ -319,8 +283,9 @@ def regional_columns(ds: xr.Dataset, weights: xr.DataArray,
     dimensions ens, time, lat, lon.
     """
     raw_vars = [v for v in cfg.VAR_MAP if v in ds.data_vars]
-    if "precip" in ds.data_vars and "precip" not in raw_vars:
-        raw_vars.append("precip")
+    for derived in ("precip", "stress_water"):
+        if derived in ds.data_vars and derived not in raw_vars:
+            raw_vars.append(derived)
     chunks: Dict[str, List[np.ndarray]] = {}
     n_ens = ds.sizes["ens"]
     for start in range(0, n_ens, ENS_BATCH):

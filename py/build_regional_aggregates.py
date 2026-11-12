@@ -374,14 +374,9 @@ def _load_one_model_netcdf(model: str, variables: List[str]) -> dict:
 # POLDER / GPCP
 # ---------------------------------------------------------------------------
 def _polder_region_mask(df: pd.DataFrame, lon_range, lat_range) -> pd.Series:
-    lon_min, lon_max = lon_range
-    lat_min, lat_max = lat_range
-    if lon_min > lon_max:
-        mask_lon = (df['longitude'] >= lon_min) | (df['longitude'] <= lon_max)
-    else:
-        mask_lon = (df['longitude'] >= lon_min) & (df['longitude'] <= lon_max)
-    mask_lat = (df['latitude'] >= lat_min) & (df['latitude'] <= lat_max)
-    return mask_lon & mask_lat
+    """Same lon/lat box test as ``regions.box_mask``."""
+    import regions as reg
+    return pd.Series(reg.box_mask(df['longitude'], df['latitude'], lon_range, lat_range), index=df.index)
 
 
 def load_polder_df() -> pd.DataFrame:

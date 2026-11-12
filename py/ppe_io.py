@@ -177,6 +177,12 @@ def load_regional(
             f"{path} not built; run `python py/ppe_regional_aggregates.py`."
         )
     df = pd.read_parquet(path)
+    icon_name = "icon2025_regional_seasonal.parquet" if seasonal else "icon2025_regional_monthly.parquet"
+    icon_path = cfg.REGIONAL_DIR / icon_name
+    want_icon = ppe_ids is None or "icon2025" in set(ppe_ids)
+    if want_icon and icon_path.is_file():
+        icon = pd.read_parquet(icon_path)
+        df = pd.concat([df.loc[df["ppe_id"] != "icon2025"], icon], ignore_index=True, sort=False)
     if ppe_ids is not None:
         missing = sorted(set(ppe_ids) - set(df["ppe_id"].unique()))
         if missing:
@@ -443,7 +449,7 @@ def obs_in_region(df: pd.DataFrame, region: str,
     """Rows inside a region box, its season months and (optionally) a period."""
     if df.empty:
         return df
-    inside = reg.in_box(df["lon360"].to_numpy(), df["latitude"].to_numpy(), region)
+    inside = reg.points_in_region(df["lon360"].to_numpy(), df["latitude"].to_numpy(), region)
     months = list(reg.REGIONS[region]["season_months"])
     sub = df.loc[inside & df["date"].dt.month.isin(months).to_numpy()]
     if period is not None:
@@ -570,21 +576,19 @@ def obs_lines_for(homog_df, obs_means, var: str, regions: Sequence[str],
 
 
 def polder_region_mask(df: pd.DataFrame, lon_range, lat_range) -> pd.Series:
-    lon_min, lon_max = lon_range
-    lat_min, lat_max = lat_range
-    if lon_min > lon_max:
-        mask_lon = (df["longitude"] >= lon_min) | (df["longitude"] <= lon_max)
-    else:
-        mask_lon = (df["longitude"] >= lon_min) & (df["longitude"] <= lon_max)
-    mask_lat = (df["latitude"] >= lat_min) & (df["latitude"] <= lat_max)
-    return mask_lon & mask_lat
+    """Box mask only. Prefer ``regions.points_in_region`` when a region name is known."""
+    return pd.Series(reg.box_mask(df["longitude"], df["latitude"], lon_range, lat_range), index=df.index)
 
 
 def polder_monthly_means(df: pd.DataFrame, region_name: str,
                          regions: Mapping[str, dict]) -> pd.DataFrame:
     """Area-weighted monthly regional means from a POLDER table."""
     cfg = regions[region_name]
-    sub = df.loc[polder_region_mask(df, cfg["lon_range"], cfg["lat_range"])].copy()
+    if region_name in reg.REGIONS:
+        keep = reg.points_in_region(df["longitude"].to_numpy(), df["latitude"].to_numpy(), region_name)
+        sub = df.loc[keep].copy()
+    else:
+        sub = df.loc[polder_region_mask(df, cfg["lon_range"], cfg["lat_range"])].copy()
     if "time_slice" in cfg:
         t0, t1 = cfg["time_slice"]
         sub = sub[(sub["time"] >= t0) & (sub["time"] <= t1)]
@@ -609,36 +613,25 @@ def polder_monthly_means(df: pd.DataFrame, region_name: str,
 
 
 def gpcp_region_mean(precip_da, region_name: str, regions: Mapping[str, dict],
-                     surface_mask=None, apply_surface_mask: bool = False):
-    """Area-weighted GPCP mean. Optional land/ocean mask matches the model box."""
+                     surface_mask=None, apply_surface_mask: bool = True):
+    """Area-weighted GPCP mean using the same region mask as the model boxes."""
+    import cameo_toolbox as ct
+
     cfg = regions[region_name]
-    lon_min, lon_max = cfg["lon_range"]
-    lat_min, lat_max = cfg["lat_range"]
-    if lon_min > lon_max:
-        sub = xr.concat([
-            precip_da.sel(lon=slice(lon_min, 360)),
-            precip_da.sel(lon=slice(0, lon_max)),
-        ], dim="lon")
-    else:
-        sub = precip_da.sel(lon=slice(lon_min, lon_max))
-    if sub.lat.values[0] > sub.lat.values[-1]:
-        sub = sub.sel(lat=slice(lat_max, lat_min))
-    else:
-        sub = sub.sel(lat=slice(lat_min, lat_max))
+    sub = precip_da
     if "time_slice" in cfg:
         sub = sub.sel(time=slice(*cfg["time_slice"]))
-    if (apply_surface_mask and surface_mask is not None
-            and cfg.get("surface_type") in ("land", "ocean")):
-        try:
-            mask_on = surface_mask.interp(lat=sub.lat, lon=sub.lon, method="nearest")
-            sub = sub.where(mask_on > 0)
-        except Exception as exc:
-            print(f"  GPCP surface mask skip {region_name}: {exc}")
-    coslat = np.cos(np.deg2rad(sub.lat))
-    weights = coslat * xr.ones_like(sub.isel(time=0))
-    weights = weights.where(np.isfinite(sub.isel(time=0)))
-    wsum = weights.sum()
-    if float(wsum) == 0:
-        return sub.mean(dim=["lat", "lon"])
-    weights = weights / wsum
-    return (sub * weights).sum(dim=["lat", "lon"])
+    if surface_mask is not None and apply_surface_mask:
+        mask_on = surface_mask
+        if not np.array_equal(np.asarray(mask_on.lat), np.asarray(sub.lat)) or not np.array_equal(
+            np.asarray(mask_on.lon), np.asarray(sub.lon)
+        ):
+            mask_on = mask_on.interp(lat=sub.lat, lon=sub.lon, method="nearest")
+    else:
+        mask_on = ct.create_region_mask(
+            sub, name=region_name,
+            lon_range=cfg["lon_range"], lat_range=cfg["lat_range"],
+            surface_type=cfg.get("surface_type", "all") if apply_surface_mask else "all",
+        )
+    w = np.cos(np.deg2rad(sub.lat)) * mask_on
+    return sub.weighted(w.fillna(0)).mean(("lat", "lon"))

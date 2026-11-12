@@ -5,8 +5,7 @@
 One panel figure per species. Regions are the analysis boxes used by the
 species notebooks:
   * BC+OA:    africa, amazon, outflow_af          (AAOD_error_attribution)
-  * sea salt: remote_SO_DJF, remote_SPO_box_DJF, SAO_2_DJF, SAO_SOND, ANTAO_JFM
-                                                 (AOD_SS_ERROR_PPE)
+  * sea salt: SAO_SOND, SAO_2_DJF (highest 1/τ vs AE; NPO removed)
   * sulfate:  the same sea-salt basins            (sulfate is diagnosed there)
   * dust:     sahara, australia, atacama, outflow_sahara
                                                  (AOD_DUST_ERROR_PPE)
@@ -55,9 +54,7 @@ EXCLUDE_MODELS = [
     "NorESM2-met2010_AP3-CTRL-v3",
 ]
 
-_SS_REGIONS = [
-    "remote_SO_DJF", "remote_SPO_box_DJF", "SAO_2_DJF", "SAO_SOND", "ANTAO_JFM",
-]
+_SS_REGIONS = ["SAO_SOND", "SAO_2_DJF"]
 
 # dry / wet / dep are AeroCom variable names summed before the fraction.
 # An empty tuple means that flux is not archived (reconstruct from dep).
@@ -80,21 +77,21 @@ SPECIES: Dict[str, dict] = {
     ),
     "du": dict(
         label="Dust",
-        dry=("durdy",),
+        dry=("drydu",),
         wet=("wetdu",),
         dep=("depdust",),
         regions=["sahara", "australia", "atacama", "outflow_sahara"],
     ),
-    "so4": dict(
-        label="Sulfate",
-        dry=("dryso4",),
-        wet=("wetso4",),
-        dep=("depso4",),
+    "so4+ss": dict(
+        label="Sulfate + Sea salt",
+        dry=("dryso4", "dryss"),
+        wet=("wetso4", "wetss"),
+        dep=("depso4", "depss"),
         regions=list(_SS_REGIONS),
     ),
 }
 
-FIGURE_DIR = project_root / "figure"
+FIGURE_DIR = project_root / "figure"/"dep"
 TABLE_DIR = project_root / "tables"
 DATA_DIR = project_root / "Data" / "AP3_processed_monthly"
 REGION_VIEW = setup.ALL_REGIONS

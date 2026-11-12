@@ -66,7 +66,7 @@ print(f"Project root: {project_root}")
 # Configuration
 # -----------------------------------------------------------------------------
 SPECIES = "du"
-PPE_IDS: List[str] = ["pd2024", "pd2010"]
+PPE_IDS: List[str] = ["pd2024", "pd2010", "icon2025"]
 EXCLUDE_MEMBERS: List[str] = []
 
 SOURCE_REGIONS = reg.source_regions(SPECIES)       # sahara, australia, atacama
@@ -90,20 +90,20 @@ TABLE_DIR.mkdir(parents=True, exist_ok=True)
 save_fig = pp.FigureSaver(FIGURE_DIR, save=SAVE_FIGURE)
 
 AXIS_LABELS = {
-    "SSA": "Column SSA (1)",
-    "1-SSA": "1 − column SSA (1)",
-    "SSA_du": "Dust SSA (1)",
-    "1-SSA_du": "1 − dust SSA (1)",
+    "SSA": r"Column SSA [-]",
+    "1-SSA": r"1 − column SSA [-]",
+    "SSA_du": r"Dust SSA [-]",
+    "1-SSA_du": r"1 − dust SSA [-]",
     "MEC": r"Column MEC (m$^{2}$ g$^{-1}$)",
     "MEC_du": r"MEC$_{DU}$ (m$^{2}$ g$^{-1}$)",
     "MAC_du": r"MAC$_{DU}$ (m$^{2}$ g$^{-1}$)",
-    "AE": "AE 440-550 (1)",
+    "AE": r"AE 440–550 [-]",
     "precip": r"Precipitation (mm day$^{-1}$)",
     "lifetime_du": r"Dust lifetime $\tau_{DU}$ (day)",
     "inv_lifetime_du": r"1/$\tau_{DU}$ (day$^{-1}$)",
-    "od550aer": "AOD$_{550}$ (1)",
-    "od550dust": "AOD$_{DU,550}$ (1)",
-    "dust_frac": "Dust share of AOD$_{550}$ (1)",
+    "od550aer": r"AOD$_{550}$ [-]",
+    "od550dust": r"AOD$_{DU,550}$ [-]",
+    "dust_frac": r"Dust share of AOD$_{550}$ [-]",
     "emi_du": r"Dust emission (kg m$^{-2}$ s$^{-1}$)",
     "ustar_acrit": r"Time fraction u$_*$ > threshold (%)",
 }
@@ -209,6 +209,9 @@ if not aerocom_df.empty:
 obs_means: Dict[str, Dict[str, dict]] = {}
 homog_rows = []
 for pid in PPE_IDS:
+    if not ppe_cfg.get_run(pid).get("extractable", True):
+        print(f"  Skip homogenization for {pid} (native ICON grid, no T63 ensemble)")
+        continue
     obs_name = ppe_io.ppe_obs_name(pid)
     period = ppe_cfg.get_run(pid)["period"]
     print(f"\n--- {pid}: {obs_name} ---")
@@ -259,7 +262,8 @@ pp.scatter_by_region(df_plot, "SSA_du", "MEC_du", ANALYSIS_REGIONS,
                      **common)
 pp.scatter_by_region(df_plot, "1-SSA_du", "MAC_du", ANALYSIS_REGIONS,
                      filename="ppe_MAC_du_vs_1SSA_du.png", through_origin=True,
-                     title="PPE dust: MAC$_{DU}$ vs 1 − dust SSA (through origin)", **common)
+                     title="ECHAM + ICON + AeroCom: MAC$_{DU}$ vs 1 − dust SSA (through origin)",
+                     aerocom_df=aer_plot, **common)
 pp.scatter_by_region(df_plot, "SSA", "MEC", ANALYSIS_REGIONS,
                      filename="combined_MEC_vs_SSA.png", title="PPE + AeroCom: column MEC vs SSA",
                      aerocom_df=aer_plot, obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS), **common)
@@ -267,6 +271,11 @@ pp.scatter_by_region(df_plot, "SSA", "MEC_du", ANALYSIS_REGIONS,
                      filename="combined_MEC_du_vs_SSA.png",
                      title="PPE + AeroCom: MEC$_{DU}$ vs column SSA",
                      aerocom_df=aer_plot, obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS), **common)
+pp.scatter_by_region(df_plot, "AE", "MEC_du", ANALYSIS_REGIONS,
+                     filename="combined_MEC_du_vs_AE.png",
+                     title=r"PPE + AeroCom: MEC$_{DU}$ vs AE",
+                     aerocom_df=aer_plot,
+                     obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "AE", ANALYSIS_REGIONS), **common)
 pp.scatter_by_region(df_plot, "dust_frac", "SSA", ANALYSIS_REGIONS,
                      filename="combined_SSA_vs_dust_frac.png",
                      title="PPE + AeroCom: column SSA vs dust share of AOD",
@@ -363,8 +372,8 @@ if outflow_params:
         vals += list(m["AOD_out"]) + list(m["AOD_meta_fit"])
     lo, hi = np.nanmin(vals), np.nanmax(vals)
     ax.plot([lo, hi], [lo, hi], "k:", lw=1)
-    ax.set_xlabel("Model outflow dust AOD$_{550}$ (1)")
-    ax.set_ylabel("Meta-model outflow dust AOD$_{550}$ (1)")
+    ax.set_xlabel(r"Model outflow dust AOD$_{550}$ [-]")
+    ax.set_ylabel(r"Meta-model outflow dust AOD$_{550}$ [-]")
     ax.set_title("Saharan outflow dust AOD from E·τ·MEC")
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)

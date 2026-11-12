@@ -21,6 +21,7 @@ import ppe_io
 
 AEROCOM_STYLE = dict(s=55, marker="D", facecolors="white", edgecolors="black",
                      linewidths=1.2, zorder=4)
+AEROCOM_LABEL = "AeroCom AP3"
 
 
 def show_inline(fig) -> bool:
@@ -143,12 +144,12 @@ def scatter_by_region(
         if aerocom_df is not None and not aerocom_df.empty:
             xa, ya = xy(aerocom_df, region, xcol, aerocom_ycol or ycol, inverse_y)
             if len(xa):
-                ax.scatter(xa, ya, label=f"AeroCom AP3 (n={len(xa)})", **AEROCOM_STYLE)
+                ax.scatter(xa, ya, label=f"{AEROCOM_LABEL} (n={len(xa)})", **AEROCOM_STYLE)
                 if len(xa) >= 3:
                     s, i, r2 = fit_line(xa, ya, through_origin)
                     xs = np.linspace(np.nanmin(xa), np.nanmax(xa), 40)
                     ax.plot(xs, s * xs + i, color="black", ls="--", lw=1.4,
-                            label=f"AeroCom: {fit_label(s, i, r2)}")
+                            label=f"{AEROCOM_LABEL}: {fit_label(s, i, r2)}")
         for lines, axline in ((obs_x, ax.axvline), (obs_y, ax.axhline)):
             for (pid, r), (val, lab) in (lines or {}).items():
                 if r != region or not np.isfinite(val):

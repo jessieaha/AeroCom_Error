@@ -32,6 +32,8 @@ PPE_PATTERN = "PPE_ENS_*"
 
 SCRATCH_ROOT = Path("/scratch-shared/jzhang1/PPE")
 SCRATCH_LOGS = SCRATCH_ROOT / "logs"
+# Fallback when scratch is not writable (local meteo-only extracts land here).
+LOCAL_SCRATCH = PROJECT_ROOT / "Data" / "PPE_scratch"
 
 REGIONAL_DIR = PROJECT_ROOT / "Data" / "PPE_regional"
 REGIONAL_MONTHLY = REGIONAL_DIR / "ppe_regional_monthly.parquet"
@@ -105,7 +107,7 @@ BURDEN_STREAM_FACTOR = {
 # (Data/PPE_regional/validation_<ppe>.csv).
 PPE_RUNS: Dict[str, dict] = {
     "pd2024": dict(
-        label="PPE 2024-25",
+        label="ECHAM-HAM 2024-25 (YBHATTI)",
         root=PPE_2024_ROOT,
         period=("2024-08-01", "2025-07-31"),
         year_months=[(2024, m) for m in range(8, 13)] + [(2025, m) for m in range(1, 8)],
@@ -118,7 +120,7 @@ PPE_RUNS: Dict[str, dict] = {
         marker="o",
     ),
     "pd2010": dict(
-        label="PPE 2010",
+        label="ECHAM-HAM 2010 (YBHATTI)",
         root=PPE_2010_ROOT,
         period=("2010-01-01", "2010-12-31"),
         year_months=[(2010, m) for m in range(1, 13)],
@@ -139,6 +141,24 @@ PPE_RUNS: Dict[str, dict] = {
         color="#1f77b4",
         marker="s",
     ),
+    # ICON-HAM PPE (hjia). Style reserved for combined BB/SS/DU panels once
+    # unstructured R2B4 monthly fields are area-weighted into regions.py boxes.
+    # Source: /projects/0/prjs1474/shared/tmp/for_jessie/ICON-HAM-PPE_24_25/PD
+    # (~392 members; TAU/burden/emi/ddep/pr). Not extracted yet — do not pass
+    # to ppe_extract_monthly until an ICON reader exists.
+    "icon2025": dict(
+        label="ICON-HAM 2024-25 (hjia)",
+        root=Path("/projects/0/prjs1474/shared/tmp/for_jessie/ICON-HAM-PPE_24_25/PD"),
+        period=("2024-06-01", "2025-08-31"),
+        year_months=[(2024, m) for m in range(6, 13)] + [(2025, m) for m in range(1, 9)],
+        file_globs={},
+        has_precip=True,
+        burden_scale=1.0,
+        obs="SPEXone",
+        color="#2ca02c",
+        marker="^",
+        extractable=False,
+    ),
 }
 DEFAULT_PPE = "pd2024"
 
@@ -147,6 +167,11 @@ def get_run(ppe_id: str) -> dict:
     if ppe_id not in PPE_RUNS:
         raise KeyError(f"Unknown PPE {ppe_id!r}; known: {sorted(PPE_RUNS)}")
     return PPE_RUNS[ppe_id]
+
+
+def extractable_ppes() -> list:
+    """PPE ids that ``ppe_extract_monthly`` can read (skip style-only stubs)."""
+    return [p for p, run in PPE_RUNS.items() if run.get("extractable", True)]
 
 
 def run_dirs(ppe_id: str) -> Dict[str, Path]:
@@ -163,7 +188,12 @@ def run_dirs(ppe_id: str) -> Dict[str, Path]:
 
 
 def ensemble_file(ppe_id: str, group: str) -> Path:
-    return run_dirs(ppe_id)["ensemble"] / f"{group}_monthly.nc"
+    """Preferred ensemble NetCDF path; falls back to the local scratch tree."""
+    primary = run_dirs(ppe_id)["ensemble"] / f"{group}_monthly.nc"
+    if primary.is_file():
+        return primary
+    local = LOCAL_SCRATCH / ppe_id / "ensemble" / f"{group}_monthly.nc"
+    return local if local.is_file() else primary
 
 
 def burden_scale_for(ppe_id: str, var: str):
@@ -249,6 +279,19 @@ PRECIP_DERIVED = {
     "precip": "mm day-1",  # precip_na * 86400
 }
 
+# Near-surface meteorology from the echam stream (pd2024). There is no friction
+# velocity; stress_water = sqrt(ustrw^2 + vstrw^2) is the water-stress proxy.
+# relhum is 47 hybrid levels in the source; the extract keeps only the lowest
+# level as relhum_sfc (fraction, not percent).
+METEO_VARS = {
+    "relhum_sfc": ("relhum", "echam", "1"),
+    "ustrw": ("ustrw", "echam", "Pa"),
+    "vstrw": ("vstrw", "echam", "Pa"),
+}
+METEO_DERIVED = {
+    "stress_water": "Pa",  # hypot(ustrw, vstrw)
+}
+
 # Deposition / wet / dry: required by the AeroCom notebooks but not posted in
 # the PPE. Recorded as missing in provenance; never invent values.
 MISSING_VARS = (
@@ -265,11 +308,14 @@ MISSING_VARS = (
 )
 
 # Group -> AeroCom names written into that ensemble NetCDF.
+# ustrw/vstrw stay in per-member files for freshness checks; the ensemble
+# meteo file only carries the fields used in analysis.
 GROUP_VARS = {
     "burden": list(BURDEN_VARS),
     "emi": list(EMI_VARS),
     "optical": list(OPTICAL_VARS),
     "precip": list(PRECIP_VARS) + list(PRECIP_DERIVED),
+    "meteo": ["relhum_sfc", "stress_water"],
 }
 
 # Flat lookup: aerocom_name -> (ham_name, preferred_group, units)
@@ -278,6 +324,7 @@ VAR_MAP.update(BURDEN_VARS)
 VAR_MAP.update(EMI_VARS)
 VAR_MAP.update(OPTICAL_VARS)
 VAR_MAP.update(PRECIP_VARS)
+VAR_MAP.update(METEO_VARS)
 
 # Fallback search order when the preferred file is missing the variable.
 # Groups absent from a run's file_globs are skipped.
