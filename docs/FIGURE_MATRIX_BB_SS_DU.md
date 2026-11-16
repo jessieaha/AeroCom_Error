@@ -32,7 +32,7 @@ Columns = aerosol type. Paths are under `figure/PPE_bb`, `figure/PPE_ss`, `figur
 | --- | --- | --- | --- | --- |
 | **1−SSA vs MAC** | `combined_MAC_vs_1SSA.png` | `ppe_1SSA_vs_MAC.png` | `ppe_MAC_du_vs_1SSA_du.png` | Through-origin fit. ICON has no dust absorption |
 | **MEC vs AE** | `combined_MEC_vs_AE.png` | `ppe_MEC_ss_vs_AE.png` | `combined_MEC_du_vs_AE.png` | ICON BB/DU AE is 440–670 nm |
-| **1/τ (emission) vs AE** | `combined_inv_lifetime_bcoa_vs_AE.png` | `ppe_inv_lifetime_ss_vs_AE.png` | `combined_inv_lifetime_du_vs_AE.png` | Emission lifetime only in PPE |
+| **1/τ (emission) vs AE** | `combined_inv_lifetime_bcoa_vs_AE.png` | `ppe_inv_lifetime_ss_vs_AE.png` | `combined_inv_lifetime_du_vs_AE.png` | AeroCom diamonds are load/emission. Deposition overlay is `combined_inv_lifetime_bcoa_dep_vs_AE.png` |
 | **1/τ vs precip** *(optional)* | `combined_inv_lifetime_bcoa_vs_precip.png` | `ppe_inv_lifetime_ss_vs_precip.png` | `combined_inv_lifetime_du_vs_precip.png` | `pd2024` (+ AeroCom); skip `pd2010` until precip |
 | **1/τ vs precip + AE** *(optional)* | `ppe_3d_inv_lifetime_BC_OA_vs_precip_AE.png` | `ppe_3d_inv_lifetime_ss_vs_precip_AE.png` | `ppe_3d_inv_lifetime_du_vs_precip_AE.png` | 3-D OLS plane |
 | **SSA vs rBC** *(BB)* | `combined_SSA_vs_rBC.png` | — | — | BB only |
@@ -53,7 +53,7 @@ Also useful but not in the core pack: SSA vs MEC (`ppe_SSA_vs_MEC*.png`), marine
 | Type | Script | Figure dir | Regions |
 | --- | --- | --- | --- |
 | BB | `notebooks/AAOD_error_attribution_PPE.py` | `figure/PPE_bb` | africa, amazon, outflow_af |
-| SS | `notebooks/AOD_SS_ERROR_PPE.py` | `figure/PPE_ss` | SAO_SOND, SAO_2_DJF (highest 1/τ vs AE; NPO removed) |
+| SS | `notebooks/AOD_SS_ERROR_PPE.py` | `figure/PPE_ss` | SAO_SOND, SPO_DJF (remote South Pacific, formerly remote_SO_DJF) |
 | DU | `notebooks/AOD_DUST_ERROR_PPE.py` | `figure/PPE_du` | sahara, australia, atacama, outflow_sahara |
 | Dry/wet | `notebooks/drywet_deposition_fraction.py` | `figure/dep` | AeroCom regional |
 

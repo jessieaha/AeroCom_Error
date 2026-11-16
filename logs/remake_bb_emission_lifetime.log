@@ -1,0 +1,235 @@
+Project root: /gpfs/home4/jzhang1/AeroCom_Error
+--- Active configuration ---
+  PPE_IDS          = ['pd2024', 'pd2010', 'icon2025']
+  ANALYSIS_REGIONS = ['africa', 'amazon', 'outflow_af']
+  pd2024: ('2024-08-01', '2025-07-31')  burden_scale=1.0  precip=True  obs=SPEXone
+  pd2010: ('2010-01-01', '2010-12-31')  burden_scale={'loaddust': 227.4, 'loadss': 257.4, 'loadbc': 255.6, 'loadoa': 250.8, 'loadso4': 255.8}  precip=False  obs=POLDER
+  icon2025: ('2024-06-01', '2025-08-31')  burden_scale=1.0  precip=True  obs=SPEXone
+  MAC_X_COL='1-SSA'  INTERCEPT_0=True
+  FIGURE_DIR = /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb
+  TABLE_DIR  = /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_analysis/bb
+Seasonal rows: 2592  PPEs with precip: ['pd2024', 'icon2025']
+                     MAC  SSA   AE  ...  lifetime_naive  precip  abs550aer
+ppe_id   region                     ...                                   
+icon2025 africa      392  392  392  ...             392     392        392
+         amazon      392  392  392  ...             392     392        392
+         outflow_af  392  392  392  ...               0     392        392
+pd2010   africa      221  221  221  ...             221       0        221
+         amazon      221  221  221  ...             221       0        221
+         outflow_af  221  221  221  ...               0       0        221
+pd2024   africa      251  251  251  ...             251     251        251
+         amazon      251  251  251  ...             251     251        251
+         outflow_af  251  251  251  ...               0     251        251
+
+[9 rows x 12 columns]
+  pd2024 africa: GPCP season mean = 1.357 mm/day over ['2024-08', '2024-09', '2025-06']
+  pd2024 amazon: GPCP season mean = 1.942 mm/day over ['2024-08', '2024-09', '2024-10']
+  pd2024 outflow_af: GPCP season mean = 0.235 mm/day over ['2024-08', '2024-09', '2025-06']
+  pd2010 africa: GPCP season mean = 1.096 mm/day over ['2010-06', '2010-07', '2010-08', '2010-09']
+  pd2010 amazon: GPCP season mean = 1.898 mm/day over ['2010-07', '2010-08', '2010-09', '2010-10']
+  pd2010 outflow_af: GPCP season mean = 0.206 mm/day over ['2010-06', '2010-07', '2010-08', '2010-09']
+  icon2025 africa: GPCP season mean = 1.030 mm/day over ['2024-06', '2024-07', '2024-08', '2024-09', '2025-06']
+  icon2025 amazon: GPCP season mean = 1.570 mm/day over ['2024-07', '2024-08', '2024-09', '2024-10']
+  icon2025 outflow_af: GPCP season mean = 0.238 mm/day over ['2024-06', '2024-07', '2024-08', '2024-09', '2025-06']
+
+--- Derived-variable range check (seasonal) ---
+  ppe_id            var    n    q05  median   q95  frac_in_expected  inv_median_per_d
+icon2025            MAC 1176 0.5787   1.226 2.397                 1               NaN
+icon2025 lifetime_BC_OA  784  1.688   2.188 2.725               NaN            0.4571
+icon2025  lifetime_prim  784  2.131   3.469 8.687               NaN            0.2882
+icon2025       lifetime  784  2.427   3.829 8.717               NaN            0.2612
+icon2025   lifetime_SO4  784  3.711   7.464 16.64               NaN             0.134
+icon2025     lifetime_S  784  3.256   5.546 11.16               NaN            0.1803
+icon2025 lifetime_naive  784  2.587   3.892 8.682               NaN            0.2569
+  pd2010            MAC  663  0.483  0.8974 1.324                 1               NaN
+  pd2010 lifetime_BC_OA  442  2.094   3.074 3.995               NaN            0.3253
+  pd2010  lifetime_prim  442  3.102   4.395   7.6               NaN            0.2275
+  pd2010       lifetime  442  3.445   4.692 8.649               NaN            0.2131
+  pd2010   lifetime_SO4  442  4.723   8.303 19.99               NaN            0.1204
+  pd2010     lifetime_S  442   2.42   4.251 10.22               NaN            0.2353
+  pd2010 lifetime_naive  442  3.375   4.581   8.4               NaN            0.2183
+  pd2024            MAC  753 0.5314   1.136 2.347                 1               NaN
+  pd2024 lifetime_BC_OA  502  2.845   3.428 3.921               NaN            0.2917
+  pd2024  lifetime_prim  502  4.016   5.828 10.53               NaN            0.1716
+  pd2024       lifetime  502  4.185   6.093 10.48               NaN            0.1641
+  pd2024   lifetime_SO4  502  4.974   9.275 18.46               NaN            0.1078
+  pd2024     lifetime_S  502  4.556   6.995 13.32               NaN             0.143
+  pd2024 lifetime_naive  502  4.293   6.163 10.49               NaN            0.1623
+
+Lifetime definitions by PPE / region (seasonal, days):
+  ppe_id       lifetime                     definition region  tau_q05_d  tau_median_d  tau_q95_d  inv_tau_median_per_d   n
+icon2025 lifetime_BC_OA                          BC+OA africa        1.9           2.3       2.75                 0.435 392
+icon2025 lifetime_BC_OA                          BC+OA amazon        1.6          2.03       2.66                 0.492 392
+  pd2010 lifetime_BC_OA                          BC+OA africa       3.31          3.72       4.09                 0.269 221
+  pd2010 lifetime_BC_OA                          BC+OA amazon       2.04          2.33       2.72                  0.43 221
+  pd2024 lifetime_BC_OA                          BC+OA africa       3.29          3.69          4                 0.271 251
+  pd2024 lifetime_BC_OA                          BC+OA amazon       2.77           3.2       3.55                 0.313 251
+icon2025  lifetime_prim  primary aerosol (BC+OA+DU+SS) africa       2.58          3.76       9.21                 0.266 392
+icon2025  lifetime_prim  primary aerosol (BC+OA+DU+SS) amazon       1.95          3.06       8.23                 0.327 392
+  pd2010  lifetime_prim  primary aerosol (BC+OA+DU+SS) africa       3.79          4.45       6.53                 0.225 221
+  pd2010  lifetime_prim  primary aerosol (BC+OA+DU+SS) amazon       2.85          4.19       9.07                 0.239 221
+  pd2024  lifetime_prim  primary aerosol (BC+OA+DU+SS) africa       4.71          6.56       11.2                 0.153 251
+  pd2024  lifetime_prim  primary aerosol (BC+OA+DU+SS) amazon       3.82          5.15       8.94                 0.194 251
+icon2025       lifetime total aerosol (SO4-eq. source) africa       2.89          4.22       9.44                 0.237 392
+icon2025       lifetime total aerosol (SO4-eq. source) amazon       2.33          3.42       8.32                 0.293 392
+  pd2010       lifetime total aerosol (SO4-eq. source) africa       4.06          4.75        7.3                  0.21 221
+  pd2010       lifetime total aerosol (SO4-eq. source) amazon       3.26          4.53       9.38                 0.221 221
+  pd2024       lifetime total aerosol (SO4-eq. source) africa       4.98          6.91       11.5                 0.145 251
+  pd2024       lifetime total aerosol (SO4-eq. source) amazon       3.99          5.27       8.75                  0.19 251
+icon2025   lifetime_SO4           SO4 (SO4-eq. source) africa       4.93          9.28       19.5                 0.108 392
+icon2025   lifetime_SO4           SO4 (SO4-eq. source) amazon       3.44           6.2       12.8                 0.161 392
+  pd2010   lifetime_SO4           SO4 (SO4-eq. source) africa       4.64          7.77       13.6                 0.129 221
+  pd2010   lifetime_SO4           SO4 (SO4-eq. source) amazon       5.01          9.97       24.2                   0.1 221
+  pd2024   lifetime_SO4           SO4 (SO4-eq. source) africa       7.61          11.4         23                0.0875 251
+  pd2024   lifetime_SO4           SO4 (SO4-eq. source) amazon        4.6          6.52       14.9                 0.153 251
+icon2025     lifetime_S         sulfur family (S mass) africa       3.56          6.16       12.3                 0.162 392
+icon2025     lifetime_S         sulfur family (S mass) amazon       3.11          5.13       9.73                 0.195 392
+  pd2010     lifetime_S         sulfur family (S mass) africa       2.38          3.98       6.99                 0.251 221
+  pd2010     lifetime_S         sulfur family (S mass) amazon       2.57           5.1       12.4                 0.196 221
+  pd2024     lifetime_S         sulfur family (S mass) africa       5.76          8.07       14.7                 0.124 251
+  pd2024     lifetime_S         sulfur family (S mass) amazon       4.38          5.75       10.7                 0.174 251
+icon2025 lifetime_naive    naive mass sum (diagnostic) africa       2.91           4.3        9.4                 0.233 392
+icon2025 lifetime_naive    naive mass sum (diagnostic) amazon       2.47          3.53       8.22                 0.283 392
+  pd2010 lifetime_naive    naive mass sum (diagnostic) africa       3.94          4.63       6.88                 0.216 221
+  pd2010 lifetime_naive    naive mass sum (diagnostic) amazon       3.19          4.43       9.12                 0.226 221
+  pd2024 lifetime_naive    naive mass sum (diagnostic) africa       5.05             7       11.6                 0.143 251
+  pd2024 lifetime_naive    naive mass sum (diagnostic) amazon       4.11          5.36       8.85                 0.186 251
+  pd2024 africa: PPE median=0.124 [q05=0.042, q95=0.322]  GPCP=1.357
+  pd2024 amazon: PPE median=0.575 [q05=0.163, q95=1.198]  GPCP=1.942
+  pd2024 outflow_af: PPE median=0.362 [q05=0.249, q95=0.476]  GPCP=0.235
+  icon2025 africa: PPE median=1.105 [q05=0.723, q95=1.586]  GPCP=1.030
+  icon2025 amazon: PPE median=1.042 [q05=0.538, q95=1.929]  GPCP=1.570
+  icon2025 outflow_af: PPE median=0.563 [q05=0.411, q95=0.766]  GPCP=0.238
+
+--- pd2024: SPEXone ---
+SPEXone rows: 567,701  valid AOD+AAOD+SSA: 567,659
+  africa: n=1812  AAOD=0.03482  SSA=0.9210  AE=1.459
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_homog_AAOD_africa.png
+    AAOD: raw=0.03482 -> homogenized=0.04208 (R²=1.00)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_homog_SSA_africa.png
+    SSA: raw=0.92099 -> homogenized=0.92272 (R²=1.00)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_homog_AE_africa.png
+    AE: raw=1.45900 -> homogenized=1.40496 (R²=0.99)
+  amazon: n=1789  AAOD=0.01447  SSA=0.9415  AE=1.061
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_homog_AAOD_amazon.png
+    AAOD: raw=0.01447 -> homogenized=0.01588 (R²=1.00)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_homog_SSA_amazon.png
+    SSA: raw=0.94152 -> homogenized=0.94244 (R²=1.00)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_homog_AE_amazon.png
+    AE: raw=1.06109 -> homogenized=0.97450 (R²=0.98)
+  outflow_af: n=1525  AAOD=0.03804  SSA=0.9176  AE=1.069
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_homog_AAOD_outflow_af.png
+    AAOD: raw=0.03804 -> homogenized=0.04189 (R²=1.00)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_homog_SSA_outflow_af.png
+    SSA: raw=0.91765 -> homogenized=0.91370 (R²=1.00)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_homog_AE_outflow_af.png
+    AE: raw=1.06931 -> homogenized=1.13181 (R²=1.00)
+
+--- pd2010: POLDER ---
+POLDER rows: 1,904,702
+  africa: n=5625  AAOD=0.08235  SSA=0.8556  AE=1.305
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2010_homog_AAOD_africa.png
+    AAOD: raw=0.08235 -> homogenized=0.07583 (R²=1.00)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2010_homog_SSA_africa.png
+    SSA: raw=0.85560 -> homogenized=0.85522 (R²=0.99)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2010_homog_AE_africa.png
+    AE: raw=1.30515 -> homogenized=1.30831 (R²=0.97)
+  amazon: n=5283  AAOD=0.04938  SSA=0.9029  AE=1.258
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2010_homog_AAOD_amazon.png
+    AAOD: raw=0.04938 -> homogenized=0.02522 (R²=0.99)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2010_homog_SSA_amazon.png
+    SSA: raw=0.90293 -> homogenized=0.92325 (R²=0.97)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2010_homog_AE_amazon.png
+    AE: raw=1.25823 -> homogenized=1.16963 (R²=0.83)
+  outflow_af: n=6200  AAOD=0.07290  SSA=0.8632  AE=1.244
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2010_homog_AAOD_outflow_af.png
+    AAOD: raw=0.07290 -> homogenized=0.07653 (R²=1.00)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2010_homog_SSA_outflow_af.png
+    SSA: raw=0.86319 -> homogenized=0.85452 (R²=1.00)
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2010_homog_AE_outflow_af.png
+    AE: raw=1.24358 -> homogenized=1.26926 (R²=0.98)
+  Skip homogenization for icon2025 (native ICON grid, no T63 ensemble)
+/home/jzhang1/.local/share/cartopy
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_region_map.png
+/home/jzhang1/.local/share/cartopy
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2010_region_map.png
+
+--- AeroCom overlay table ---
+AeroCom models: 26
+
+Constrained lifetimes (GPCP precip + obs AE):
+  ppe_id       lifetime region  precip_obs  AE_obs   n       A  alpha_pr  beta_ae      r2  tau_ppe_median_d  inv_tau_constrained  tau_constrained_d          note
+  pd2024 lifetime_BC_OA africa        1.36     1.4 251   0.248    0.0436   0.0143  0.0701              3.69                0.328               3.05           NaN
+  pd2024 lifetime_BC_OA amazon        1.94   0.974 251   0.303  -0.00352    0.013 0.00981               3.2                0.309               3.24           NaN
+  pd2024  lifetime_prim africa        1.36     1.4 251  -0.135   -0.0665    0.227   0.589              6.56               0.0936               10.7           NaN
+  pd2024  lifetime_prim amazon        1.94   0.974 251 -0.0801   0.00499     0.22   0.543              5.15                0.144               6.94           NaN
+  pd2024       lifetime africa        1.36     1.4 251  -0.102   -0.0582    0.194    0.55              6.91               0.0922               10.8           NaN
+  pd2024       lifetime amazon        1.94   0.974 251 -0.0477   0.00293    0.191   0.502              5.27                0.144               6.94           NaN
+  pd2024   lifetime_SO4 africa        1.36     1.4 251  0.0769    0.0272  0.00435 0.00963              11.4                 0.12               8.34           NaN
+  pd2024   lifetime_SO4 amazon        1.94   0.974 251   0.186   -0.0157  -0.0235  0.0182              6.52                0.132               7.57           NaN
+  pd2024     lifetime_S africa        1.36     1.4 251  0.0987    0.0256   0.0154  0.0085              8.07                0.155               6.45           NaN
+  pd2024     lifetime_S amazon        1.94   0.974 251   0.194    -0.019  -0.0117   0.022              5.75                0.146               6.86           NaN
+  pd2010 lifetime_BC_OA africa         1.1    1.31 NaN     NaN       NaN      NaN     NaN               NaN                  NaN                NaN no PPE precip
+  pd2010 lifetime_BC_OA amazon         1.9    1.17 NaN     NaN       NaN      NaN     NaN               NaN                  NaN                NaN no PPE precip
+  pd2010  lifetime_prim africa         1.1    1.31 NaN     NaN       NaN      NaN     NaN               NaN                  NaN                NaN no PPE precip
+  pd2010  lifetime_prim amazon         1.9    1.17 NaN     NaN       NaN      NaN     NaN               NaN                  NaN                NaN no PPE precip
+  pd2010       lifetime africa         1.1    1.31 NaN     NaN       NaN      NaN     NaN               NaN                  NaN                NaN no PPE precip
+  pd2010       lifetime amazon         1.9    1.17 NaN     NaN       NaN      NaN     NaN               NaN                  NaN                NaN no PPE precip
+  pd2010   lifetime_SO4 africa         1.1    1.31 NaN     NaN       NaN      NaN     NaN               NaN                  NaN                NaN no PPE precip
+  pd2010   lifetime_SO4 amazon         1.9    1.17 NaN     NaN       NaN      NaN     NaN               NaN                  NaN                NaN no PPE precip
+  pd2010     lifetime_S africa         1.1    1.31 NaN     NaN       NaN      NaN     NaN               NaN                  NaN                NaN no PPE precip
+  pd2010     lifetime_S amazon         1.9    1.17 NaN     NaN       NaN      NaN     NaN               NaN                  NaN                NaN no PPE precip
+icon2025 lifetime_BC_OA africa        1.03     NaN 392   0.226    0.0828   0.0831   0.419               2.3                  NaN                NaN           NaN
+icon2025 lifetime_BC_OA amazon        1.57     NaN 392   0.127    0.0729    0.186   0.578              2.03                  NaN                NaN           NaN
+icon2025  lifetime_prim africa        1.03     NaN 392   -0.03     0.106    0.118   0.289              3.76                  NaN                NaN           NaN
+icon2025  lifetime_prim amazon        1.57     NaN 392  -0.307    0.0612    0.369   0.672              3.06                  NaN                NaN           NaN
+icon2025       lifetime africa        1.03     NaN 392 0.00443     0.089   0.0919   0.252              4.22                  NaN                NaN           NaN
+icon2025       lifetime amazon        1.57     NaN 392  -0.164    0.0341    0.273   0.537              3.42                  NaN                NaN           NaN
+icon2025   lifetime_SO4 africa        1.03     NaN 392  0.0746    0.0215   0.0137  0.0232              9.28                  NaN                NaN           NaN
+icon2025   lifetime_SO4 amazon        1.57     NaN 392   0.182   -0.0253   0.0115  0.0222               6.2                  NaN                NaN           NaN
+icon2025     lifetime_S africa        1.03     NaN 392    0.14   0.00627   0.0156  0.0047              6.16                  NaN                NaN           NaN
+icon2025     lifetime_S amazon        1.57     NaN 392    0.25    -0.036  -0.0032   0.057              5.13                  NaN                NaN           NaN
+
+--- Outflow meta-model ---
+  pd2024: R^2=0.958 n=251
+  pd2010: R^2=0.995 n=221
+  icon2025: R^2=0.952 n=392
+  AeroCom: R^2=0.905 n=18
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_MAC_vs_SSA.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_MAC_vs_1SSA.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_SSA_vs_rBC.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_MEC_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_inv_lifetime_BC_OA_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_inv_lifetime_BC_OA_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_3d_inv_lifetime_BC_OA_vs_precip_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_inv_lifetime_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_inv_lifetime_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_3d_inv_lifetime_vs_precip_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/ppe_lifetime_definitions.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_precip_ppe_vs_gpcp_monthly.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_precip_ppe_aerocom_vs_gpcp_season.png
+/home/jzhang1/.local/share/cartopy
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_precip_gpcp_map.png
+/home/jzhang1/.local/share/cartopy
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_precip_ppe_minus_gpcp_map.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/pd2024_precip_ppe_ensmean_vs_gpcp_scatter.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/icon2025_precip_ppe_vs_gpcp_monthly.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/icon2025_precip_ppe_aerocom_vs_gpcp_season.png
+  Skip precip maps for icon2025: icon2025: none of ['precip'] found on scratch
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_MEC_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_MAC_vs_1SSA.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_MAC_vs_SSA.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_SSA_vs_rBC.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_AAOD_vs_SSA.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_inv_lifetime_bcoa_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_inv_lifetime_bcoa_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_inv_lifetime_bcoa_dep_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_inv_lifetime_bcoa_dep_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_outflow_meta_model.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_inv_lifetime_BC_OA_vs_rBC.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb/combined_inv_lifetime_BC_OA_dep_vs_rBC.png
+Wrote /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_analysis/bb/potential_issues.md (13 items)
+
+Done.
+Figures in: /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_bb
+Tables in:  /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_analysis/bb

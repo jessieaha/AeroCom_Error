@@ -3,9 +3,8 @@
 
 Baselines
 ---------
-* Sea salt, peak season in the South Atlantic: ``SAO_SOND`` and ``SAO_2_DJF``
-  (highest 1/τ vs AE). North Pacific and the low-R² Pacific/Antarctic boxes
-  are not baselines.
+* Sea salt: ``SAO_SOND`` and the remote South Pacific box ``SPO_DJF``
+  (formerly ``remote_SO_DJF``). North Pacific is not a baseline.
 * Biomass burning: ``africa`` and ``amazon``.
   Geometry and ``surface_type`` are copied from ``regions.REGIONS``.
 
@@ -55,7 +54,7 @@ SIZE_DEG = (-5, 0, 5)
 
 # Species -> baseline region names (geometry comes from regions.REGIONS).
 BASELINES = {
-    "ss": ("SAO_SOND", "SAO_2_DJF"),
+    "ss": ("SAO_SOND", "SPO_DJF"),
     "bb": ("africa", "amazon"),
 }
 AEROCOM_EXTRA = {

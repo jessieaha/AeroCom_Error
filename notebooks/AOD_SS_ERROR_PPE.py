@@ -8,8 +8,7 @@
 #   * pd2024 (Aug 2024 - Jul 2025) is compared with SPEXone;
 #   * pd2010 (2010, the AeroCom / POLDER year) is compared with POLDER-GRASP.
 # Sea-salt regions follow ``regions.REGIONS`` (surface_type unchanged):
-# remote_SO and the nested Pacific box are not in the lifetime analysis.
-# Sea-salt regions: SAO_SOND and SAO_2_DJF (highest 1/τ vs AE).
+# Sea-salt regions: SAO_SOND and SPO_DJF (remote South Pacific, formerly remote_SO_DJF).
 # Box-size and box-location sensitivity (±5°) is in
 # ``notebooks/PPE_box_sensitivity.py``.
 # Emission-based lifetimes only (no wet/dry/dep streams in the PPE extract);
@@ -69,9 +68,8 @@ SPECIES = "ss"
 PPE_IDS: List[str] = ["pd2024", "pd2010", "icon2025"]
 EXCLUDE_MEMBERS: List[str] = []  # e.g. ["Control"] or ["pd2010:17"]
 
-# Sea-salt regions with the highest emission-lifetime R² (1/τ vs AE):
-# SAO_SOND ≈ 0.16, SAO_2_DJF ≈ 0.14. North Pacific and the low-R² basins are omitted.
-_REGION_ORDER = ["SAO_SOND", "SAO_2_DJF"]
+# South Atlantic (SOND) and the remote South Pacific DJF box.
+_REGION_ORDER = ["SAO_SOND", "SPO_DJF"]
 SOURCE_REGIONS = reg.source_regions(SPECIES)
 ANALYSIS_REGIONS = [r for r in _REGION_ORDER if r in SOURCE_REGIONS]
 
@@ -90,7 +88,7 @@ AXIS_LABELS = {
     "MEC_ss": r"MEC$_{SS}$ (m$^{2}$ g$^{-1}$)",
     "MEC_so4": r"MEC$_{SO4}$ (m$^{2}$ g$^{-1}$)",
     "MAC": r"MAC (m$^{2}$ g$^{-1}$)",
-    "AE": r"AE 550–865 [-]",
+    "AE": r"AE [-]",
     "precip": r"Precipitation (mm day$^{-1}$)",
     "relhum_sfc": r"Near-surface RH [-]",
     "stress_water": r"Water wind stress $|\tau|$ (Pa)",
@@ -149,10 +147,30 @@ availability = [c for c in ["MEC_ss", "MEC", "MAC", "SSA", "AE", "lifetime_ss",
                             "lifetime_mass", "precip"] if c in model_seasonal_df.columns]
 print(model_seasonal_df.groupby(["ppe_id", "region"])[availability].count())
 
-aerocom_df = boxes.screen_lifetime(
-    boxes.aerocom_frame(SPECIES, ANALYSIS_REGIONS),
-    ["lifetime_ss", "lifetime_mass", "lifetime"],
-)
+aerocom_path = project_root / "tables" / "aerocom_ss_seasonal.parquet"
+if aerocom_path.is_file():
+    aerocom_df = pd.read_parquet(aerocom_path)
+    aerocom_df = aerocom_df.loc[aerocom_df["region"].isin(ANALYSIS_REGIONS)].copy()
+    aerocom_df = ppe_io.add_budget_columns(aerocom_df, mask_outflow_lifetimes=False)
+    print(f"AeroCom sea salt from {aerocom_path.name}: {aerocom_df['model'].nunique()} models "
+          f"with emission, lifetime finite "
+          f"{int(aerocom_df['lifetime_ss'].notna().sum())} rows")
+    # Optical columns (SSA, MAC, MEC) still come from the box-sensitivity table.
+    # AE and lifetime stay on the emission table (550–870 nm filled in).
+    optical = boxes.aerocom_frame(SPECIES, ANALYSIS_REGIONS)
+    if not optical.empty:
+        drop = [c for c in ("AE", "AE_550_865", "AE_550_870", "lifetime_ss",
+                            "lifetime", "lifetime_mass", "loadss", "emiss",
+                            "od550aer", "od865aer") if c in optical.columns]
+        optical = optical.drop(columns=drop)
+        aerocom_df = aerocom_df.merge(optical, on=["model", "region"], how="left")
+else:
+    aerocom_df = boxes.aerocom_frame(SPECIES, ANALYSIS_REGIONS)
+    print("AeroCom sea-salt table missing "
+          "(run python py/fill_ss_gaps.py aerocom).")
+# Keep non-physical lifetimes out. Do not drop short sea-salt lifetimes:
+# every model with sea-salt emission should remain on the plot.
+aerocom_df = boxes.screen_lifetime(aerocom_df, ["lifetime_mass", "lifetime"])
 if aerocom_df.empty:
     print("AeroCom sea-salt overlay skipped (run python py/box_sensitivity.py).")
 else:
@@ -238,6 +256,12 @@ pp.scatter_by_region(df_plot, "1-SSA", "MEC", filename="ppe_1SSA_vs_MEC.png",
 pp.scatter_by_region(df_plot, "1-SSA", "MAC", filename="ppe_1SSA_vs_MAC.png",
                      title="PPE + AeroCom total aerosol: MAC vs 1−SSA (through origin)",
                      through_origin=True, obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS, transform=lambda v: 1 - v), **common)
+pp.density_by_region(
+    df_plot, "1-SSA", "MAC", ANALYSIS_REGIONS, save_fig,
+    filename="ppe_1SSA_vs_MAC_density.png",
+    title=r"Sea salt: MAC vs 1−SSA — three PPE densities, AeroCom points",
+    labels=AXIS_LABELS, aerocom_df=aer_plot,
+)
 pp.scatter_by_region(df_plot, "SSA", "MEC_ss", filename="ppe_SSA_vs_MEC_ss.png",
                      title="PPE + AeroCom sea salt: MEC$_{SS}$ vs SSA",
                      obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS), **common)
@@ -247,9 +271,21 @@ pp.scatter_by_region(df_plot, "1-SSA", "MEC_ss", filename="ppe_1SSA_vs_MEC_ss.pn
 pp.scatter_by_region(df_plot, "AE", "MEC_ss", filename="ppe_MEC_ss_vs_AE.png",
                      title=r"PPE + AeroCom sea salt: MEC$_{SS}$ vs AE",
                      obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "AE", ANALYSIS_REGIONS), **common)
+pp.density_by_region(
+    df_plot, "AE", "MEC_ss", ANALYSIS_REGIONS, save_fig,
+    filename="ppe_MEC_ss_vs_AE_density.png",
+    title=r"Sea salt: MEC$_{SS}$ vs AE — three PPE densities, AeroCom points",
+    labels=AXIS_LABELS, aerocom_df=aer_plot,
+)
 pp.scatter_by_region(df_plot, "AE", "MEC", filename="ppe_MEC_vs_AE.png",
                      title=r"PPE + AeroCom total aerosol: MEC vs AE",
                      obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "AE", ANALYSIS_REGIONS), **common)
+pp.density_by_region(
+    df_plot, "AE", "MEC", ANALYSIS_REGIONS, save_fig,
+    filename="ppe_MEC_vs_AE_density.png",
+    title=r"Total aerosol: MEC vs AE — three PPE densities, AeroCom points",
+    labels=AXIS_LABELS, aerocom_df=aer_plot,
+)
 pp.scatter_by_region(df_plot, "SSA", "od550aer", filename="ppe_AOD_vs_SSA.png",
                      title="PPE + AeroCom: AOD vs SSA", obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS),
                      obs_y=ppe_io.obs_lines_for(homog_df, obs_means, "AOD", ANALYSIS_REGIONS), **common)
@@ -268,6 +304,14 @@ for lt, name in (("lifetime_ss", "sea salt"), ("lifetime_mass", "total aerosol")
                          filename=f"ppe_inv_{lt}_vs_AE.png",
                          title=rf"PPE + AeroCom {name}: 1/$\tau$ vs AE",
                          obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "AE", ANALYSIS_REGIONS), **common)
+    if lt == "lifetime_ss":
+        pp.density_by_region(
+            df_plot, "AE", lt, ANALYSIS_REGIONS, save_fig,
+            filename="ppe_inv_lifetime_ss_vs_AE_density.png",
+            title=r"Sea salt: 1/$\tau_{SS}$ vs AE — three PPE densities, AeroCom points",
+            inverse_y=True, ppe_ids=("pd2024", "pd2010", "icon2025"),
+            labels=AXIS_LABELS, aerocom_df=aer_plot,
+        )
     pp.lifetime_3d(model_seasonal_df, lt, ANALYSIS_REGIONS, save_fig,
                    filename=f"ppe_3d_inv_{lt}_vs_precip_AE.png",
                    title=rf"PPE {name}: 1/$\tau$ vs precip and AE",
@@ -589,15 +633,15 @@ for pid, obs in obs_tables.items():
 # -----------------------------------------------------------------------------
 print("\n--- Sea-salt regional map (PPE 2024, DJF od550ss) ---")
 ss_field = boxes.ensemble_mean_aod("pd2024", ["od550ss"], months=(12, 1, 2))
-atlantic = [r for r in ANALYSIS_REGIONS if r in reg.REGIONS]
-clon_a, ext_a = boxes.extent_for_regions(atlantic, pad=12.0)
-boxes.plot_study_map(
-    ss_field, boxes.region_boxes(atlantic),
-    title="PPE 2024 ensemble-mean sea-salt AOD$_{550}$ (DJF), South Atlantic",
-    cbar_label=r"AOD$_{SS,550}$ [-]",
-    filename=FIGURE_DIR / "ppe2024_seasalt_AOD_boxes_SAO.png",
-    extent=ext_a, central_longitude=clon_a, land_facecolor="0.85",
-)
+for region in [r for r in ANALYSIS_REGIONS if r in reg.REGIONS]:
+    clon_a, ext_a = boxes.extent_for_regions([region], pad=12.0)
+    boxes.plot_study_map(
+        ss_field, boxes.region_boxes([region]),
+        title=rf"PPE 2024 ensemble-mean sea-salt AOD$_{{550}}$ (DJF), {region}",
+        cbar_label=r"AOD$_{SS,550}$ [-]",
+        filename=FIGURE_DIR / f"ppe2024_seasalt_AOD_boxes_{region}.png",
+        extent=ext_a, central_longitude=clon_a, land_facecolor="0.85",
+    )
 boxes.plot_study_map(
     ss_field, [],
     title="PPE 2024 ensemble-mean sea-salt AOD$_{550}$ (DJF)",

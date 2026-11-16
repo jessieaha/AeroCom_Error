@@ -170,6 +170,120 @@ def scatter_by_region(
     saver(fig, filename)
 
 
+def density_by_region(
+    df: pd.DataFrame,
+    xcol: str,
+    ycol: str,
+    regions: Sequence[str],
+    saver: Callable,
+    filename: str,
+    title: str,
+    ppe_ids: Sequence[str] = ("pd2024", "pd2010", "icon2025"),
+    labels: Optional[Mapping[str, str]] = None,
+    inverse_y: bool = False,
+    aerocom_df: Optional[pd.DataFrame] = None,
+    aerocom_ycol: Optional[str] = None,
+    n_shades: int = 3,
+):
+    """Joint density of the three emission-lifetime PPEs, AeroCom as points.
+
+    Each PPE is a few filled shades plus contour lines in its own colour.
+    Marginal densities sit above and to the right of each panel.
+    """
+    from matplotlib.gridspec import GridSpec
+    from scipy.stats import gaussian_kde
+
+    labels = labels or {}
+    ylabel = labels.get(f"inv_{ycol}" if inverse_y else ycol, ycol)
+    xlabel = labels.get(xcol, xcol)
+    fig = plt.figure(figsize=(5.4 * len(regions), 5.2))
+    outer = GridSpec(1, len(regions), figure=fig, wspace=0.42)
+
+    def _kde_grid(x, y, xlim, ylim, nx=70, ny=70):
+        if len(x) < 8 or np.nanstd(x) == 0 or np.nanstd(y) == 0:
+            return None
+        kde = gaussian_kde(np.vstack([x, y]))
+        xx, yy = np.meshgrid(
+            np.linspace(*xlim, nx),
+            np.linspace(*ylim, ny),
+        )
+        zz = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
+        return xx, yy, zz
+
+    for i, region in enumerate(regions):
+        inner = outer[i].subgridspec(2, 2, height_ratios=(1.0, 4.0), width_ratios=(4.0, 1.05),
+                                      hspace=0.05, wspace=0.05)
+        ax_top = fig.add_subplot(inner[0, 0])
+        ax = fig.add_subplot(inner[1, 0])
+        ax_right = fig.add_subplot(inner[1, 1])
+        clouds = []
+        for ppe_id in ppe_ids:
+            x, y = xy(df.loc[df["ppe_id"] == ppe_id], region, xcol, ycol, inverse_y)
+            if len(x):
+                clouds.append((ppe_id, x, y))
+        if not clouds:
+            ax.set_title(f"{region}: no PPE data")
+            ax_top.axis("off")
+            ax_right.axis("off")
+            continue
+        xa, ya = (np.array([]), np.array([]))
+        if aerocom_df is not None and not aerocom_df.empty:
+            xa, ya = xy(aerocom_df, region, xcol, aerocom_ycol or ycol, inverse_y)
+        xs = np.concatenate([c[1] for c in clouds])
+        ys = np.concatenate([c[2] for c in clouds])
+        lim_x = np.concatenate([xs, xa]) if len(xa) else xs
+        lim_y = np.concatenate([ys, ya]) if len(ya) else ys
+        pad_x = 0.08 * (np.nanmax(lim_x) - np.nanmin(lim_x) or 1.0)
+        pad_y = 0.08 * (np.nanmax(lim_y) - np.nanmin(lim_y) or 1.0)
+        xlim = (np.nanmin(lim_x) - pad_x, np.nanmax(lim_x) + pad_x)
+        ylim = (np.nanmin(lim_y) - pad_y, np.nanmax(lim_y) + pad_y)
+        gx = np.linspace(*xlim, 200)
+        gy = np.linspace(*ylim, 200)
+        for ppe_id, x, y in clouds:
+            st = ppe_io.ppe_style(ppe_id)
+            color = st["color"]
+            grid = _kde_grid(x, y, xlim, ylim)
+            if grid is not None:
+                xx, yy, zz = grid
+                edges = np.linspace(zz.max() * 0.12, zz.max(), n_shades + 1)
+                shades = [matplotlib.colors.to_rgba(color, a) for a in np.linspace(0.12, 0.42, n_shades)]
+                ax.contourf(xx, yy, zz, levels=edges, colors=shades, zorder=1)
+                ax.contour(xx, yy, zz, levels=edges, colors=color, linewidths=1.0, zorder=2)
+            if len(x) >= 8 and np.nanstd(x) > 0:
+                kx = gaussian_kde(x)(gx)
+                ax_top.fill_between(gx, kx, color=color, alpha=0.2)
+                ax_top.plot(gx, kx, color=color, lw=1.3, label=st["label"])
+            if len(y) >= 8 and np.nanstd(y) > 0:
+                ky = gaussian_kde(y)(gy)
+                ax_right.fill_betweenx(gy, ky, color=color, alpha=0.2)
+                ax_right.plot(ky, gy, color=color, lw=1.3)
+            ax.plot([], [], color=color, lw=1.4, label=st["label"])
+        if len(xa):
+            ax.scatter(xa, ya, label=f"{AEROCOM_LABEL} (n={len(xa)})", **AEROCOM_STYLE)
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+        ax_top.set_xlim(xlim)
+        ax_right.set_ylim(ylim)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax_top.set_title(region, fontsize=11)
+        ax.grid(True, alpha=0.25, zorder=0)
+        ax.legend(fontsize=7, loc="best")
+        ax_top.tick_params(labelbottom=False, length=0)
+        ax_right.tick_params(labelleft=False, length=0)
+        for side in ("top", "right", "left"):
+            ax_top.spines[side].set_visible(False)
+        ax_top.spines["bottom"].set_visible(False)
+        ax_top.set_yticks([])
+        for side in ("top", "right", "bottom"):
+            ax_right.spines[side].set_visible(False)
+        ax_right.spines["left"].set_visible(False)
+        ax_right.set_xticks([])
+    fig.suptitle(title, y=0.98)
+    fig.subplots_adjust(top=0.88, wspace=0.42)
+    saver(fig, filename)
+
+
 def lifetime_3d(
     df: pd.DataFrame,
     lifetime_col: str,

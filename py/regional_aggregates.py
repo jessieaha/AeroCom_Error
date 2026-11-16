@@ -7,7 +7,7 @@ recompute a new box without editing the registry). ``surface_type`` is
 honoured by the land/sea mask.
 
     python py/regional_aggregates.py --source ppe --ppe pd2010
-    python py/regional_aggregates.py --source aerocom --species ss --regions SAO_2_DJF
+    python py/regional_aggregates.py --source aerocom --species ss --regions SPO_DJF
 
 ``py/ppe_regional_aggregates.py`` re-exports this module.
 """

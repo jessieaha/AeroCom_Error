@@ -88,20 +88,19 @@ REGIONS: Dict[str, dict] = {
     #     time_slice_2010=("2010-08-01", "2010-11-15"),
     #     species=("bb",), role="source", color="#ff7f0e",
     # ),
-    # Sea salt. North Pacific (NPO) is not used. 1/τ_ss vs AE (pd2024 seasonal)
-    # is highest in the South Atlantic (SAO_SOND R²≈0.16, SAO_2_DJF R²≈0.14).
-    # Remote Pacific, SIO and the Antarctic band are ≤0.10 and are not analysed.
+    # Sea salt. North Pacific (NPO) is not used. The second box is the remote
+    # South Pacific (formerly remote_SO_DJF), not the smaller South Atlantic DJF box.
     "SAO_SOND": dict(
         surface_type="ocean", lon_range=(320, 10), lat_range=(-60, -25),
         season_months=(9, 10, 11, 12), edge_weighted=False,
         species=("ss",), role="source", color="#1f77b4",
-        note="Highest 1/τ_ss vs AE (pd2024 seasonal R²≈0.16).",
+        note="South Atlantic, SON+December.",
     ),
-    "SAO_2_DJF": dict(
-        surface_type="ocean", lon_range=(320, 10), lat_range=(-50, -32),
-        season_months=(12,1,2), edge_weighted=False,
-        species=("ss",), role="source", color="#1f77b4",
-        note="South Atlantic DJF box; 1/τ_ss vs AE R²≈0.14, just behind SAO_SOND.",
+    "SPO_DJF": dict(
+        surface_type="ocean", lon_range=(200, 260), lat_range=(-62, -42),
+        season_months=(12, 1, 2), edge_weighted=False,
+        species=("ss",), role="source", color="#17becf",
+        note="Remote South Pacific Southern Ocean, DJF. Formerly remote_SO_DJF.",
     ),
     # --- Mineral dust (primary dust seasons) ---
     "sahara": dict(

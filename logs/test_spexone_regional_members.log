@@ -1,0 +1,56 @@
+Project root: /gpfs/home4/jzhang1/AeroCom_Error
+loaded spex 916420
+=== cell 3 ===
+PPE pd2024: period=('2024-08-01', '2025-07-31')  obs=SPEXone  n_year_months=12
+SPEXone rows in PPE period: 567,847
+SPEXone monthly AOD: {'time': 13, 'lat': 164, 'lon': 360}  months=['2024-08', '2024-09', '2024-10', '2024-11', '2024-12', '2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06', '2025-07', '2025-08']
+Opening /scratch-shared/jzhang1/PPE/pd2024/ensemble/optical_monthly.nc
+PPE AOD dims={'ens': 251, 'time': 12, 'lat': 96, 'lon': 192}  control ens id=-1
+Common months (12): ['2024-08', '2024-09', '2024-10', '2024-11', '2024-12', '2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06', '2025-07']
+=== cell 4 ===
+/home/jzhang1/.local/share/cartopy
+Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/SPEXone_check/spexone_aod550_mean_map.png
+/home/jzhang1/.local/share/cartopy
+Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/SPEXone_check/ppe_control_aod550_mean_map.png
+/home/jzhang1/.local/share/cartopy
+Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/SPEXone_check/ppe_control_minus_spexone_aod550_map.png
+/home/jzhang1/.local/share/cartopy
+Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/SPEXone_check/ppe_control_minus_spexone_aaod550_map.png
+=== cell 5 ===
+<string>:28: RuntimeWarning: Mean of empty slice
+/gpfs/home4/jzhang1/AeroCom_Error/.venv-1/lib/python3.13/site-packages/numpy/lib/_nanfunctions_impl.py:1593: RuntimeWarning: All-NaN slice encountered
+  return fnb._ureduce(a,
+<string>:28: RuntimeWarning: Mean of empty slice
+/gpfs/home4/jzhang1/AeroCom_Error/.venv-1/lib/python3.13/site-packages/numpy/lib/_nanfunctions_impl.py:1593: RuntimeWarning: All-NaN slice encountered
+  return fnb._ureduce(a,
+<string>:28: RuntimeWarning: Mean of empty slice
+/gpfs/home4/jzhang1/AeroCom_Error/.venv-1/lib/python3.13/site-packages/numpy/lib/_nanfunctions_impl.py:1593: RuntimeWarning: All-NaN slice encountered
+  return fnb._ureduce(a,
+Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/SPEXone_check/spexone_vs_ppe_ensmean_aod550_scatter.png
+       region  n_points  n_members      r   p  spex_mean  ppe_ensmean  ctrl_mean
+       africa      1061        251 0.6476 0.0     0.4291       0.1905     0.1212
+       amazon      1161        251 0.7786 0.0     0.4015       0.1870     0.1093
+   outflow_af      1008        251 0.4575 0.0     0.4542       0.2793     0.1479
+remote_SO_DJF      1528        251 0.1886 0.0     0.1369       0.1669     0.0985
+    SAO_2_DJF      1484        251 0.2720 0.0     0.1186       0.1513     0.0956
+    ANTAO_JFM      2780        251 0.3012 0.0     0.0975       0.0537     0.0207
+          region  n_points  n_members  ...  spex_mean  ppe_ensmean  ctrl_mean
+0         africa      1061        251  ...     0.4291       0.1905     0.1212
+1         amazon      1161        251  ...     0.4015       0.1870     0.1093
+2     outflow_af      1008        251  ...     0.4542       0.2793     0.1479
+3  remote_SO_DJF      1528        251  ...     0.1369       0.1669     0.0985
+4      SAO_2_DJF      1484        251  ...     0.1186       0.1513     0.0956
+5      ANTAO_JFM      2780        251  ...     0.0975       0.0537     0.0207
+
+[6 rows x 8 columns]
+=== cell 6 ===
+Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/SPEXone_check/spexone_vs_ppe_members_regional_mean_aod550.png
+       region  spex_mean  ppe_median  ppe_q25  ppe_q75   n   ctrl
+    ANTAO_JFM     0.0976      0.0387   0.0257   0.0502 251 0.0245
+    SAO_2_DJF     0.1164      0.1382   0.0962   0.1930 251 0.0953
+       africa     0.4284      0.2025   0.1656   0.2432 251 0.1215
+       amazon     0.4242      0.1887   0.1464   0.2348 251 0.1093
+   outflow_af     0.4697      0.2853   0.2186   0.3537 251 0.1482
+remote_SO_DJF     0.1375      0.1502   0.1031   0.2091 251 0.0994
+Closed PPE optical dataset.
+done

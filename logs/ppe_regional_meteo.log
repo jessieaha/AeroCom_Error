@@ -1,0 +1,37 @@
+15:16:54 INFO [pd2024] opening ensemble files
+15:17:27 INFO [pd2024] 251 members, 12 months, 14 regions
+15:18:44 INFO   members 0-7 of 251
+15:18:45 INFO   members 8-15 of 251
+15:18:45 INFO   members 16-23 of 251
+15:18:46 INFO   members 24-31 of 251
+15:18:54 INFO   members 32-39 of 251
+15:18:54 INFO   members 40-47 of 251
+15:18:55 INFO   members 48-55 of 251
+15:18:55 INFO   members 56-63 of 251
+15:19:41 INFO   members 64-71 of 251
+15:19:42 INFO   members 72-79 of 251
+15:19:43 INFO   members 80-87 of 251
+15:19:43 INFO   members 88-95 of 251
+15:20:15 INFO   members 96-103 of 251
+15:20:16 INFO   members 104-111 of 251
+15:20:16 INFO   members 112-119 of 251
+15:20:17 INFO   members 120-127 of 251
+15:21:14 INFO   members 128-135 of 251
+15:21:15 INFO   members 136-143 of 251
+15:21:15 INFO   members 144-151 of 251
+15:21:16 INFO   members 152-159 of 251
+15:22:24 INFO   members 160-167 of 251
+15:22:25 INFO   members 168-175 of 251
+15:22:26 INFO   members 176-183 of 251
+15:22:26 INFO   members 184-191 of 251
+15:22:44 INFO   members 192-199 of 251
+15:22:45 INFO   members 200-207 of 251
+15:22:45 INFO   members 208-215 of 251
+15:22:46 INFO   members 216-223 of 251
+15:23:05 INFO   members 224-231 of 251
+15:23:06 INFO   members 232-239 of 251
+15:23:06 INFO   members 240-247 of 251
+15:23:07 INFO   members 248-250 of 251
+15:23:07 INFO [pd2024] aggregated 50 variables
+15:23:07 INFO Wrote /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_regional/ppe_regional_monthly.parquet (87252 rows, 22.6 MB)
+15:23:07 INFO Wrote /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_regional/ppe_regional_seasonal.parquet (7271 rows, 1.8 MB)

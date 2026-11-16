@@ -1,0 +1,260 @@
+Project root: /gpfs/home4/jzhang1/AeroCom_Error
+--- Active configuration ---
+  PPE_IDS          = ['pd2024', 'pd2010', 'icon2025']
+  ANALYSIS_REGIONS = ['remote_SO_DJF', 'remote_SPO_box_DJF', 'SAO_2_DJF', 'SAO_SOND', 'ANTAO_JFM']
+  pd2024: ('2024-08-01', '2025-07-31')  burden_scale=1.0  precip=True  obs=SPEXone
+  pd2010: ('2010-01-01', '2010-12-31')  burden_scale={'loaddust': 227.4, 'loadss': 257.4, 'loadbc': 255.6, 'loadoa': 250.8, 'loadso4': 255.8}  precip=False  obs=POLDER
+  icon2025: ('2024-06-01', '2025-08-31')  burden_scale=1.0  precip=True  obs=SPEXone
+  FIGURE_DIR       = /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss
+  TABLE_DIR        = /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_analysis/ss
+Seasonal rows: 3657  PPEs with precip: ['pd2024', 'icon2025']
+                             MEC_ss  MEC  ...  lifetime_mass  precip
+ppe_id   region                           ...                       
+icon2025 ANTAO_JFM              289  392  ...            392     392
+         SAO_2_DJF              384  392  ...            392     392
+         SAO_SOND               389  392  ...            392     392
+         remote_SO_DJF          373  392  ...            392     392
+         remote_SPO_box_DJF     371  392  ...            392     392
+pd2010   ANTAO_JFM              221  221  ...            221       0
+         SAO_SOND               221  221  ...            221       0
+pd2024   ANTAO_JFM              229  251  ...            251     251
+         SAO_2_DJF              251  251  ...            251     251
+         SAO_SOND               251  251  ...            251     251
+         remote_SO_DJF          251  251  ...            251     251
+         remote_SPO_box_DJF     250  251  ...            251     251
+
+[12 rows x 8 columns]
+AeroCom models: 27  regions: ['ANTAO_JFM', 'SAO_2_DJF', 'SAO_SOND', 'remote_SO_DJF', 'remote_SPO_box_DJF']
+
+--- Derived-variable range check (seasonal) ---
+  ppe_id           var    n    q05  median    q95  frac_in_expected  inv_median_per_d
+icon2025        MEC_ss 1806 0.4138  0.7506  1.463                 1               NaN
+icon2025           MEC 1960  5.614    10.8  18.07            0.8367               NaN
+icon2025   lifetime_ss 1960   0.29  0.4418 0.6512               NaN             2.264
+icon2025 lifetime_mass 1960 0.5548   1.439   9.26               NaN            0.6952
+  pd2010        MEC_ss  442 0.7202  0.9094  1.132                 1               NaN
+  pd2010           MEC  442  4.648   7.224  11.89                 1               NaN
+  pd2010   lifetime_ss  442 0.3424  0.6204 0.8698               NaN             1.612
+  pd2010 lifetime_mass  442    1.4   2.253  5.839               NaN            0.4438
+  pd2024        MEC_ss 1232 0.4561  0.8125  1.479                 1               NaN
+  pd2024           MEC 1255  6.105   11.46  20.02            0.7697               NaN
+  pd2024   lifetime_ss 1255 0.3961  0.6953 0.9605               NaN             1.438
+  pd2024 lifetime_mass 1255 0.8716   1.753  5.719               NaN            0.5704
+
+--- pd2024: SPEXone ---
+SPEXone rows: 567,701  valid AOD+AAOD+SSA: 567,659
+  remote_SO_DJF: n=1846  AOD=0.1376  SSA=0.9761  AE=0.616
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_AOD_remote_SO_DJF.png
+    AOD: sampled=0.999*regional+0.0009 (R²=1.00)  raw=0.1376 -> homogenized=0.1369
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_AAOD_remote_SO_DJF.png
+    AAOD: sampled=1.062*regional+0.0000 (R²=1.00)  raw=0.0034 -> homogenized=0.0032
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_SSA_remote_SO_DJF.png
+    SSA: sampled=1.029*regional-0.0292 (R²=1.00)  raw=0.9761 -> homogenized=0.9769
+  remote_SPO_box_DJF: n=575  AOD=0.1502  SSA=0.9789  AE=0.547
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_AOD_remote_SPO_box_DJF.png
+    AOD: sampled=1.009*regional-0.0004 (R²=1.00)  raw=0.1502 -> homogenized=0.1494
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_AAOD_remote_SPO_box_DJF.png
+    AAOD: sampled=1.055*regional+0.0000 (R²=1.00)  raw=0.0031 -> homogenized=0.0029
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_SSA_remote_SPO_box_DJF.png
+    SSA: sampled=1.034*regional-0.0341 (R²=1.00)  raw=0.9789 -> homogenized=0.9796
+  SAO_2_DJF: n=2100  AOD=0.1173  SSA=0.9752  AE=0.611
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_AOD_SAO_2_DJF.png
+    AOD: sampled=0.974*regional+0.0009 (R²=1.00)  raw=0.1173 -> homogenized=0.1194
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_AAOD_SAO_2_DJF.png
+    AAOD: sampled=1.073*regional+0.0000 (R²=1.00)  raw=0.0030 -> homogenized=0.0027
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_SSA_SAO_2_DJF.png
+    SSA: sampled=1.077*regional-0.0777 (R²=1.00)  raw=0.9752 -> homogenized=0.9772
+  SAO_SOND: n=5151  AOD=0.1409  SSA=0.9712  AE=0.611
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_AOD_SAO_SOND.png
+    AOD: sampled=1.028*regional+0.0070 (R²=1.00)  raw=0.1409 -> homogenized=0.1304
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_AAOD_SAO_SOND.png
+    AAOD: sampled=1.227*regional+0.0001 (R²=1.00)  raw=0.0041 -> homogenized=0.0032
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_SSA_SAO_SOND.png
+    SSA: sampled=1.038*regional-0.0405 (R²=1.00)  raw=0.9712 -> homogenized=0.9742
+  ANTAO_JFM: n=3282  AOD=0.0990  SSA=0.9858  AE=0.500
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_AOD_ANTAO_JFM.png
+    AOD: sampled=1.015*regional+0.0004 (R²=1.00)  raw=0.0990 -> homogenized=0.0971
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_AAOD_ANTAO_JFM.png
+    AAOD: sampled=1.011*regional+0.0000 (R²=1.00)  raw=0.0013 -> homogenized=0.0013
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2024_homog_SSA_ANTAO_JFM.png
+    SSA: sampled=0.987*regional+0.0134 (R²=1.00)  raw=0.9858 -> homogenized=0.9854
+
+--- pd2010: POLDER ---
+POLDER rows: 1,904,702
+  remote_SO_DJF: n=7330  AOD=0.0890  SSA=0.9457  AE=0.685
+  remote_SPO_box_DJF: n=2013  AOD=0.0959  SSA=0.9467  AE=0.652
+  SAO_2_DJF: n=10892  AOD=0.0835  SSA=0.9479  AE=0.735
+  SAO_SOND: n=17548  AOD=0.0876  SSA=0.9409  AE=0.811
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2010_homog_AOD_SAO_SOND.png
+    AOD: sampled=1.176*regional+0.0031 (R²=1.00)  raw=0.0876 -> homogenized=0.0718
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2010_homog_AAOD_SAO_SOND.png
+    AAOD: sampled=1.117*regional-0.0000 (R²=1.00)  raw=0.0052 -> homogenized=0.0047
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2010_homog_SSA_SAO_SOND.png
+    SSA: sampled=0.965*regional+0.0343 (R²=0.99)  raw=0.9409 -> homogenized=0.9393
+  ANTAO_JFM: n=773  AOD=0.0708  SSA=0.9087  AE=0.682
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2010_homog_AOD_ANTAO_JFM.png
+    AOD: sampled=1.464*regional+0.0033 (R²=0.95)  raw=0.0708 -> homogenized=0.0461
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2010_homog_AAOD_ANTAO_JFM.png
+    AAOD: sampled=1.015*regional+0.0000 (R²=1.00)  raw=0.0061 -> homogenized=0.0060
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/pd2010_homog_SSA_ANTAO_JFM.png
+    SSA: sampled=0.809*regional+0.1908 (R²=0.99)  raw=0.9087 -> homogenized=0.8874
+  Skip homogenization for icon2025 (native ICON grid, no T63 ensemble)
+Wrote /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_analysis/ss/obs_homogenized.csv
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_SSA_vs_MEC.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_1SSA_vs_MEC.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_1SSA_vs_MAC.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_SSA_vs_MEC_ss.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_1SSA_vs_MEC_ss.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_MEC_ss_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_MEC_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_AOD_vs_SSA.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_ss_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_ss_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_3d_inv_lifetime_ss_vs_precip_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_mass_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_mass_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_3d_inv_lifetime_mass_vs_precip_AE.png
+AeroCom surface RH joined for 45 seasonal rows (9 models)
+
+--- Lifetime ↔ meteo exploration (Pearson r of 1/τ vs predictor) ---
+region                                              ANTAO_JFM  SAO_2_DJF  SAO_SOND  remote_SO_DJF  remote_SPO_box_DJF
+source                lifetime        predictor                                                                      
+AeroCom_seasonal      lifetime_mass   precip            -0.20      -0.32     -0.22          -0.04               -0.05
+                      lifetime_ss     precip            -0.24       0.21      0.16          -0.04               -0.04
+                                      relhum_sfc         0.57      -0.59     -0.66          -0.84               -0.82
+PPE_monthly_in_season lifetime_SO4    AE                -0.14      -0.01     -0.37          -0.33               -0.35
+                                      precip            -0.69       0.33      0.16          -0.69               -0.69
+                                      relhum_sfc         0.55      -0.43      0.27           0.54                0.35
+                                      stress_water      -0.63       0.45     -0.68          -0.62               -0.29
+                      lifetime_marine AE                -0.57      -0.82     -0.83          -0.65               -0.63
+                                      precip             0.42      -0.45     -0.08          -0.01               -0.17
+                                      relhum_sfc        -0.36       0.09      0.07          -0.10               -0.00
+                                      stress_water       0.39      -0.22     -0.26           0.03                0.01
+                      lifetime_mass   AE                -0.46      -0.84     -0.85          -0.66               -0.64
+                                      precip             0.43      -0.37      0.14           0.01               -0.14
+                                      relhum_sfc        -0.33       0.01      0.28          -0.08               -0.02
+                                      stress_water       0.38      -0.12     -0.60           0.04                0.04
+                      lifetime_ss     AE                -0.17      -0.42     -0.55          -0.22               -0.21
+                                      precip             0.58      -0.58     -0.10          -0.14               -0.56
+                                      relhum_sfc        -0.52       0.03      0.04          -0.04                0.36
+                                      stress_water       0.55      -0.25     -0.40          -0.10               -0.39
+PPE_seasonal          lifetime_SO4    AE                -0.52      -0.40     -0.21          -0.25               -0.24
+                                      precip             0.68      -0.55     -0.18           0.26                0.18
+                                      relhum_sfc         0.32       0.06      0.27           0.23                0.14
+                                      stress_water       0.13       0.22      0.33           0.09               -0.02
+                      lifetime_marine AE                -0.66      -0.48     -0.43          -0.34               -0.37
+                                      precip             0.41       0.16      0.46          -0.24               -0.25
+                                      relhum_sfc        -0.21      -0.01     -0.09          -0.19               -0.14
+                                      stress_water      -0.01      -0.11      0.24          -0.11               -0.07
+                      lifetime_mass   AE                -0.56      -0.50     -0.39          -0.33               -0.36
+                                      precip             0.31       0.11      0.38          -0.25               -0.26
+                                      relhum_sfc        -0.14       0.09      0.11          -0.10               -0.04
+                                      stress_water       0.12      -0.03      0.34          -0.00                0.05
+                      lifetime_ss     AE                -0.03       0.39      0.08           0.41                0.36
+                                      precip            -0.16       0.68      0.74          -0.68               -0.72
+                                      relhum_sfc        -0.33      -0.37     -0.45          -0.44               -0.48
+                                      stress_water      -0.34      -0.23      0.13          -0.25               -0.25
+Saved: /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_analysis/ss/ppe_lifetime_meteo_correlations.csv
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_ss_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_ss_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_ss_vs_relhum_sfc.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_ss_vs_stress_water.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_SO4_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_SO4_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_SO4_vs_relhum_sfc.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_SO4_vs_stress_water.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_marine_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_marine_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_marine_vs_relhum_sfc.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_marine_vs_stress_water.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_mass_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_mass_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_mass_vs_relhum_sfc.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_mass_vs_stress_water.png
+
+--- Nested monthly OLS for 1/τ_ss (pd2024; after exploration) ---
+  remote_SO_DJF      AE             R²=0.048  n=753
+  remote_SO_DJF      AE+RH          R²=0.055  n=753
+  remote_SO_DJF      AE+stress      R²=0.051  n=753
+  remote_SO_DJF      AE+RH+stress   R²=0.192  n=753
+  remote_SO_DJF      AE+precip      R²=0.056  n=753
+  remote_SPO_box_DJF AE             R²=0.045  n=753
+  remote_SPO_box_DJF AE+RH          R²=0.187  n=753
+  remote_SPO_box_DJF AE+stress      R²=0.228  n=753
+  remote_SPO_box_DJF AE+RH+stress   R²=0.261  n=753
+  remote_SPO_box_DJF AE+precip      R²=0.333  n=753
+  SAO_2_DJF          AE             R²=0.179  n=753
+  SAO_2_DJF          AE+RH          R²=0.183  n=753
+  SAO_2_DJF          AE+stress      R²=0.244  n=753
+  SAO_2_DJF          AE+RH+stress   R²=0.549  n=753
+  SAO_2_DJF          AE+precip      R²=0.450  n=753
+  SAO_SOND           AE             R²=0.300  n=1004
+  SAO_SOND           AE+RH          R²=0.300  n=1004
+  SAO_SOND           AE+stress      R²=0.345  n=1004
+  SAO_SOND           AE+RH+stress   R²=0.410  n=1004
+  SAO_SOND           AE+precip      R²=0.310  n=1004
+  ANTAO_JFM          AE             R²=0.030  n=753
+  ANTAO_JFM          AE+RH          R²=0.324  n=753
+  ANTAO_JFM          AE+stress      R²=0.361  n=753
+  ANTAO_JFM          AE+RH+stress   R²=0.361  n=753
+  ANTAO_JFM          AE+precip      R²=0.389  n=753
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_ss_vs_AE_RH_stress.png
+Saved: /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_analysis/ss/ppe_lifetime_ss_meteo_coefficients.csv
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_ss_vs_ss_fraction.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_marine_vs_precip.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_marine_vs_AE.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_marine_vs_DMS.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe_inv_lifetime_marine_vs_SO2.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2024_SPEXone_AOD_550_remote_SO_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2024_SPEXone_AOD_550_remote_SPO_box_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2024_SPEXone_AOD_550_SAO_2_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2024_SPEXone_AOD_550_SAO_SOND.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2024_SPEXone_AOD_550_ANTAO_JFM.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2024_SPEXone_SSA_remote_SO_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2024_SPEXone_SSA_remote_SPO_box_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2024_SPEXone_SSA_SAO_2_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2024_SPEXone_SSA_SAO_SOND.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2024_SPEXone_SSA_ANTAO_JFM.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2010_POLDER_AOD_550_remote_SO_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2010_POLDER_AOD_550_remote_SPO_box_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2010_POLDER_AOD_550_SAO_2_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2010_POLDER_AOD_550_SAO_SOND.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2010_POLDER_AOD_550_ANTAO_JFM.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2010_POLDER_SSA_remote_SO_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2010_POLDER_SSA_remote_SPO_box_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2010_POLDER_SSA_SAO_2_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2010_POLDER_SSA_SAO_SOND.png
+/home/jzhang1/.local/share/cartopy
+  Saved pd2010_POLDER_SSA_ANTAO_JFM.png
+
+--- Sea-salt regional map (PPE 2024, DJF od550ss) ---
+/home/jzhang1/.local/share/cartopy
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe2024_seasalt_AOD_boxes_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe2024_seasalt_AOD_boxes_SAO_2_DJF.png
+/home/jzhang1/.local/share/cartopy
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe2024_seasalt_AOD_boxes_DJF_global.png
+  Saved /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss/ppe2024_seasalt_AOD_DJF_curved.png
+
+Done.
+Figures in: /gpfs/home4/jzhang1/AeroCom_Error/figure/PPE_ss
+Tables in:  /gpfs/home4/jzhang1/AeroCom_Error/Data/PPE_analysis/ss

@@ -1,0 +1,22 @@
+07:48:05 INFO ICON members: 392  root=/projects/0/prjs1474/shared/tmp/for_jessie/ICON-HAM-PPE_24_25/PD
+07:48:05 INFO land mask on 20480 ICON cells
+07:48:15 INFO   20 / 392 members
+07:48:19 INFO   40 / 392 members
+07:48:24 INFO   60 / 392 members
+07:48:28 INFO   80 / 392 members
+07:48:37 INFO   100 / 392 members
+07:48:42 INFO   120 / 392 members
+07:48:46 INFO   140 / 392 members
+07:48:51 INFO   160 / 392 members
+07:48:59 INFO   180 / 392 members
+07:49:04 INFO   200 / 392 members
+07:49:09 INFO   220 / 392 members
+07:49:14 INFO   240 / 392 members
+07:49:21 INFO   260 / 392 members
+07:49:26 INFO   280 / 392 members
+07:49:31 INFO   300 / 392 members
+07:49:36 INFO   320 / 392 members
+07:49:43 INFO   340 / 392 members
+07:49:48 INFO   360 / 392 members
+07:49:54 INFO   380 / 392 members
+07:50:09 INFO Wrote icon2025_regional_monthly.parquet (76440 rows) and icon2025_regional_seasonal.parquet (5096 rows)

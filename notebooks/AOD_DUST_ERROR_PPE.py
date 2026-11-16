@@ -97,7 +97,7 @@ AXIS_LABELS = {
     "MEC": r"Column MEC (m$^{2}$ g$^{-1}$)",
     "MEC_du": r"MEC$_{DU}$ (m$^{2}$ g$^{-1}$)",
     "MAC_du": r"MAC$_{DU}$ (m$^{2}$ g$^{-1}$)",
-    "AE": r"AE 440–550 [-]",
+    "AE": r"AE [-]",
     "precip": r"Precipitation (mm day$^{-1}$)",
     "lifetime_du": r"Dust lifetime $\tau_{DU}$ (day)",
     "inv_lifetime_du": r"1/$\tau_{DU}$ (day$^{-1}$)",
@@ -264,6 +264,12 @@ pp.scatter_by_region(df_plot, "1-SSA_du", "MAC_du", ANALYSIS_REGIONS,
                      filename="ppe_MAC_du_vs_1SSA_du.png", through_origin=True,
                      title="ECHAM + ICON + AeroCom: MAC$_{DU}$ vs 1 − dust SSA (through origin)",
                      aerocom_df=aer_plot, **common)
+pp.density_by_region(
+    df_plot, "1-SSA_du", "MAC_du", ANALYSIS_REGIONS, save_fig,
+    filename="ppe_MAC_du_vs_1SSA_du_density.png",
+    title=r"Dust: MAC$_{DU}$ vs 1−SSA — three PPE densities, AeroCom points",
+    labels=AXIS_LABELS, aerocom_df=aer_plot,
+)
 pp.scatter_by_region(df_plot, "SSA", "MEC", ANALYSIS_REGIONS,
                      filename="combined_MEC_vs_SSA.png", title="PPE + AeroCom: column MEC vs SSA",
                      aerocom_df=aer_plot, obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS), **common)
@@ -276,6 +282,12 @@ pp.scatter_by_region(df_plot, "AE", "MEC_du", ANALYSIS_REGIONS,
                      title=r"PPE + AeroCom: MEC$_{DU}$ vs AE",
                      aerocom_df=aer_plot,
                      obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "AE", ANALYSIS_REGIONS), **common)
+pp.density_by_region(
+    df_plot, "AE", "MEC_du", ANALYSIS_REGIONS, save_fig,
+    filename="combined_MEC_du_vs_AE_density.png",
+    title=r"Dust: MEC$_{DU}$ vs AE — three PPE densities, AeroCom points",
+    labels=AXIS_LABELS, aerocom_df=aer_plot,
+)
 pp.scatter_by_region(df_plot, "dust_frac", "SSA", ANALYSIS_REGIONS,
                      filename="combined_SSA_vs_dust_frac.png",
                      title="PPE + AeroCom: column SSA vs dust share of AOD",

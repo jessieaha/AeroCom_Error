@@ -95,7 +95,7 @@ AXIS_LABELS = {
     "1-SSA": r"1 − SSA [-]",
     "MAC": r"MAC$_{\mathrm{BC+OA}}$ (m$^{2}$ g$^{-1}$)",
     "MEC": r"MEC (m$^{2}$ g$^{-1}$)",
-    "AE": r"AE 440–550 [-]",
+    "AE": r"AE [-]",
     "precip": r"Model precipitation (mm day$^{-1}$)",
     pg.MATCHED_COL: r"Model precipitation, GPCP months (mm day$^{-1}$)",
     "rBC": r"rBC = BC/(BC+OA) [-]",
@@ -321,7 +321,9 @@ for pid, obs in obs_tables.items():
 # -----------------------------------------------------------------------------
 AEROCOM_AGG_PARQUET = project_root / "tables" / "regional_seasonal_aggregates.parquet"
 AEROCOM_EXCLUDE_MODELS = pg.AEROCOM_EXCLUDE_MODELS
-AEROCOM_LIFETIME_VAR = "lifetime_BC_OA"  # load/deposition, 0.3-50 d filter
+# Parquet lifetime_BC_OA is load/deposition. Default overlays use emission,
+# the same definition as the PPE (load / emission).
+AEROCOM_LIFETIME_DEP_VAR = "lifetime_BC_OA"
 
 
 def load_aerocom_seasonal() -> Tuple[pd.DataFrame, Dict[str, float]]:
@@ -344,12 +346,14 @@ def load_aerocom_seasonal() -> Tuple[pd.DataFrame, Dict[str, float]]:
     with np.errstate(divide="ignore", invalid="ignore"):
         wide["AE"] = -np.log(wide["od550aer"] / wide["od440aer"]) / np.log(550.0 / 440.0)
         wide["rBC"] = wide["loadbc"] / (wide["loadbc"] + wide["loadoa"])
-    wide["lifetime_BC_OA"] = wide.get(AEROCOM_LIFETIME_VAR, np.nan)
+    wide["lifetime_BC_OA_deposition"] = wide.get(AEROCOM_LIFETIME_DEP_VAR, np.nan)
     lt_emi = wide.get("lifetime_BC_OA_emission", pd.Series(np.nan, index=wide.index))
     wide["lifetime_BC_OA_emission"] = lt_emi.where((lt_emi >= 0.3) & (lt_emi <= 50.0))
+    # Default column matches the PPE emission lifetime.
+    wide["lifetime_BC_OA"] = wide["lifetime_BC_OA_emission"]
     wide[pg.MATCHED_COL] = wide.get("precip", np.nan)
     no_lt = ~wide["region"].isin(LIFETIME_REGIONS)
-    wide.loc[no_lt, ["lifetime_BC_OA", "lifetime_BC_OA_emission"]] = np.nan
+    wide.loc[no_lt, ["lifetime_BC_OA", "lifetime_BC_OA_emission", "lifetime_BC_OA_deposition"]] = np.nan
     print(f"AeroCom models: {wide['model'].nunique()}")
     return wide, gpcp_2010
 
@@ -361,8 +365,8 @@ if not aerocom_df.empty:
     ISSUES.append(
         "AeroCom overlay uses tables/regional_seasonal_aggregates.parquet (year 2010). Only "
         "pd2010 shares that year (same meteorology year as POLDER / GPCP 2010). AeroCom "
-        "lifetime_BC_OA is load/deposition (0.3-50 d filter); PPE is load/emission, so "
-        "lifetime_BC_OA_emission is also overlaid like-for-like."
+        "Default AeroCom lifetime_BC_OA is load/emission (0.3-50 d), matching the PPE. "
+        "load/deposition is kept as lifetime_BC_OA_deposition and plotted separately."
     )
 
 # %%
@@ -558,10 +562,22 @@ if "MEC" in df_plot.columns:
                          filename="combined_MEC_vs_AE.png",
                          title=r"ECHAM + ICON + AeroCom: MEC vs AE",
                          **combined)
+    pp.density_by_region(
+        df_plot, "AE", "MEC", ANALYSIS_REGIONS, save_fig,
+        filename="combined_MEC_vs_AE_density.png",
+        title=r"BC+OA: MEC vs AE — three PPE densities, AeroCom points",
+        labels=AXIS_LABELS, aerocom_df=aer_plot,
+    )
 pp.scatter_by_region(df_plot, "1-SSA", "MAC", ANALYSIS_REGIONS,
                      filename="combined_MAC_vs_1SSA.png", through_origin=INTERCEPT_0,
                      title="PPE + AeroCom: MAC vs 1−SSA" + (" (through origin)" if INTERCEPT_0 else ""),
                      obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS, transform=lambda v: 1 - v, source_regions=SOURCE_REGIONS), **combined)
+pp.density_by_region(
+    df_plot, "1-SSA", "MAC", ANALYSIS_REGIONS, save_fig,
+    filename="combined_MAC_vs_1SSA_density.png",
+    title=r"BC+OA: MAC vs 1−SSA — three PPE densities, AeroCom points",
+    labels=AXIS_LABELS, aerocom_df=aer_plot,
+)
 pp.scatter_by_region(df_plot, "SSA", "MAC", ANALYSIS_REGIONS, filename="combined_MAC_vs_SSA.png",
                      title="PPE + AeroCom: MAC vs SSA", obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS, source_regions=SOURCE_REGIONS), **combined)
 pp.scatter_by_region(df_plot, "rBC", "SSA", ANALYSIS_REGIONS, filename="combined_SSA_vs_rBC.png",
@@ -572,18 +588,33 @@ pp.scatter_by_region(df_plot, "SSA", "abs550aer", ANALYSIS_REGIONS,
                      obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "SSA", ANALYSIS_REGIONS, source_regions=SOURCE_REGIONS), obs_y=ppe_io.obs_lines_for(homog_df, obs_means, "AAOD", ANALYSIS_REGIONS, source_regions=SOURCE_REGIONS), **combined)
 aer_gpcp_lines = {("AeroCom", r): (aerocom_gpcp_2010.get(r, np.nan), "GPCP 2010 (AeroCom yr)")
                   for r in LIFETIME_REGIONS}
-for aer_lt, tag, desc in (("lifetime_BC_OA", "bcoa", "AeroCom load/deposition"),
-                          ("lifetime_BC_OA_emission", "bcoa_aeroemi", "AeroCom load/emission")):
+# Default: both axes are emission lifetimes. Deposition is a separate pair of figures.
+for aer_lt, tag, desc in (
+        ("lifetime_BC_OA_emission", "bcoa", "load/emission"),
+        ("lifetime_BC_OA_deposition", "bcoa_dep", "AeroCom load/deposition"),
+):
+    title_prefix = (
+        r"PPE + AeroCom (load/emission)" if tag == "bcoa"
+        else r"PPE (load/emission) + AeroCom (load/deposition)"
+    )
     pp.scatter_by_region(df_plot, pg.MATCHED_COL, "lifetime_BC_OA", LIFETIME_REGIONS,
                          inverse_y=True, aerocom_ycol=aer_lt,
                          filename=f"combined_inv_lifetime_{tag}_vs_precip.png",
-                         title=rf"PPE (load/emission) + {desc}: 1/$\tau_{{BC+OA}}$ vs precipitation",
+                         title=rf"{title_prefix}: 1/$\tau_{{BC+OA}}$ vs precipitation",
                          obs_x={**gpcp_lines(), **aer_gpcp_lines},
                          **{**combined, "ppe_ids": PRECIP_PPES})
     pp.scatter_by_region(df_plot, "AE", "lifetime_BC_OA", LIFETIME_REGIONS, inverse_y=True,
                          aerocom_ycol=aer_lt, filename=f"combined_inv_lifetime_{tag}_vs_AE.png",
-                         title=rf"PPE (load/emission) + {desc}: 1/$\tau_{{BC+OA}}$ vs AE440-550",
+                         title=rf"{title_prefix}: 1/$\tau_{{BC+OA}}$ vs AE",
                          obs_x=ppe_io.obs_lines_for(homog_df, obs_means, "AE", LIFETIME_REGIONS, source_regions=SOURCE_REGIONS), **combined)
+    if tag == "bcoa":
+        pp.density_by_region(
+            df_plot, "AE", "lifetime_BC_OA", LIFETIME_REGIONS, save_fig,
+            filename="combined_inv_lifetime_bcoa_vs_AE_density.png",
+            title=r"BC+OA emission lifetime: 1/$\tau$ vs AE — three PPE densities, AeroCom points",
+            inverse_y=True, ppe_ids=("pd2024", "pd2010", "icon2025"),
+            labels=AXIS_LABELS, aerocom_df=aer_plot, aerocom_ycol=aer_lt,
+        )
 
 
 def plot_combined_outflow_meta(filename="combined_outflow_meta_model.png"):
@@ -634,16 +665,16 @@ aer_plot = pp.with_one_minus_ssa(aerocom_df) if not aerocom_df.empty else aeroco
 bb_drivers = dict(saver=save_fig, ppe_ids=PPE_IDS, labels=AXIS_LABELS, aerocom_df=aer_plot)
 pp.scatter_by_region(df_plot, "rBC", "lifetime_BC_OA", LIFETIME_REGIONS, inverse_y=True,
                      filename="combined_inv_lifetime_BC_OA_vs_rBC.png",
-                     title=r"BC+OA: 1/$\tau$ vs BC fraction of BC+OA",
+                     title=r"BC+OA emission lifetime: 1/$\tau$ vs BC fraction of BC+OA",
                      **bb_drivers)
-if ("lifetime_BC_OA_dep" in getattr(aer_plot, "columns", [])
-        and np.isfinite(aer_plot["lifetime_BC_OA_dep"].astype(float)).any()):
+if ("lifetime_BC_OA_deposition" in getattr(aer_plot, "columns", [])
+        and np.isfinite(aer_plot["lifetime_BC_OA_deposition"].astype(float)).any()):
     pp.scatter_by_region(
-        df_plot, "precip", "lifetime_BC_OA", LIFETIME_REGIONS, inverse_y=True,
-        filename="combined_inv_lifetime_BC_OA_dep_vs_precip.png",
-        title=r"BC+OA vs precipitation (AeroCom y is deposition lifetime)",
-        aerocom_ycol="lifetime_BC_OA_dep",
-        **{**bb_drivers, "ppe_ids": PRECIP_PPES},
+        df_plot, "rBC", "lifetime_BC_OA", LIFETIME_REGIONS, inverse_y=True,
+        filename="combined_inv_lifetime_BC_OA_dep_vs_rBC.png",
+        title=r"BC+OA: 1/$\tau$ vs rBC (AeroCom y is deposition lifetime)",
+        aerocom_ycol="lifetime_BC_OA_deposition",
+        **bb_drivers,
     )
 
 # %%

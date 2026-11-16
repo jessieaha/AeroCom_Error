@@ -5,7 +5,7 @@
 One panel figure per species. Regions are the analysis boxes used by the
 species notebooks:
   * BC+OA:    africa, amazon, outflow_af          (AAOD_error_attribution)
-  * sea salt: SAO_SOND, SAO_2_DJF (highest 1/τ vs AE; NPO removed)
+  * sea salt: SAO_SOND, SPO_DJF (remote South Pacific; formerly remote_SO_DJF)
   * sulfate:  the same sea-salt basins            (sulfate is diagnosed there)
   * dust:     sahara, australia, atacama, outflow_sahara
                                                  (AOD_DUST_ERROR_PPE)
@@ -54,7 +54,7 @@ EXCLUDE_MODELS = [
     "NorESM2-met2010_AP3-CTRL-v3",
 ]
 
-_SS_REGIONS = ["SAO_SOND", "SAO_2_DJF"]
+_SS_REGIONS = ["SAO_SOND", "SPO_DJF"]
 
 # dry / wet / dep are AeroCom variable names summed before the fraction.
 # An empty tuple means that flux is not archived (reconstruct from dep).

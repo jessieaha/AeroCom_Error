@@ -89,12 +89,20 @@ print(f"Boxes below the minimum size: {len(too_small)}")
 print("\n--- Maps ---")
 ss_field = boxes.ensemble_mean_aod("pd2024", ["od550ss"], months=(12, 1, 2))
 boxes.plot_study_map(
-    ss_field, boxes.map_boxes(defs, ["SAO_SOND", "SAO_2_DJF"]),
+    ss_field, boxes.map_boxes(defs, ["SAO_SOND"]),
     title="Sea salt: PPE 2024 ensemble-mean AOD$_{SS,550}$ (DJF), South Atlantic",
     cbar_label=r"AOD$_{SS,550}$ [-]",
     filename=FIGURE_DIR / "map_ss_SAO.png",
     extent=(-50, 20, -70, -20),
     central_longitude=0.0,
+)
+clon_spo, ext_spo = boxes.extent_for_regions(["SPO_DJF"], pad=12.0)
+boxes.plot_study_map(
+    ss_field, boxes.region_boxes(["SPO_DJF"]),
+    title="Sea salt: PPE 2024 ensemble-mean AOD$_{SS,550}$ (DJF), South Pacific",
+    cbar_label=r"AOD$_{SS,550}$ [-]",
+    filename=FIGURE_DIR / "map_ss_SPO.png",
+    extent=ext_spo, central_longitude=clon_spo,
 )
 boxes.plot_study_map(
     ss_field, boxes.map_boxes(defs, boxes.BASELINES["ss"]),
