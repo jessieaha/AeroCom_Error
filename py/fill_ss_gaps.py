@@ -236,6 +236,7 @@ def fill_aerocom(regions=SS_REGIONS) -> None:
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "both"
     if which in ("both", "pd2010"):
-        fill_pd2010_region("SPO_DJF")
+        for region in SS_REGIONS:
+            fill_pd2010_region(region)
     if which in ("both", "aerocom"):
-        fill_aerocom(("SPO_DJF",))
+        fill_aerocom(SS_REGIONS)

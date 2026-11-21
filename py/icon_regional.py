@@ -296,7 +296,8 @@ def _seasonal(monthly: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def extract(members: Optional[Sequence[str]] = None, workers: int = 8) -> None:
+def extract(members: Optional[Sequence[str]] = None, workers: int = 8,
+            regions: Optional[Sequence[str]] = None, merge: bool = False) -> None:
     root = _icon_root()
     ids = member_ids(root)
     if members:
@@ -306,6 +307,11 @@ def extract(members: Optional[Sequence[str]] = None, workers: int = 8) -> None:
         raise SystemExit(f"No ICON members under {root}")
     log.info("ICON members: %d  root=%s", len(ids), root)
     bundle = build_region_weights(root)
+    if regions:
+        missing = [name for name in regions if name not in bundle["weights"]]
+        if missing:
+            raise KeyError(f"ICON weights have no {missing}")
+        bundle["weights"] = {name: bundle["weights"][name] for name in regions}
     cache = cfg.REGIONAL_DIR / "_icon_weights.pkl"
     cache.parent.mkdir(parents=True, exist_ok=True)
     with open(cache, "wb") as handle:
@@ -334,8 +340,18 @@ def extract(members: Optional[Sequence[str]] = None, workers: int = 8) -> None:
     seasonal = _seasonal(monthly)
     mon_path = cfg.REGIONAL_DIR / "icon2025_regional_monthly.parquet"
     sea_path = cfg.REGIONAL_DIR / "icon2025_regional_seasonal.parquet"
-    monthly.to_parquet(mon_path, index=False)
-    seasonal.to_parquet(sea_path, index=False)
+    if merge:
+        keep = list(regions or [])
+        for path, new in ((mon_path, monthly), (sea_path, seasonal)):
+            old = pd.read_parquet(path) if path.is_file() else pd.DataFrame()
+            if not old.empty and keep:
+                old = old.loc[~old["region"].isin(keep)]
+            new = pd.concat([old, new], ignore_index=True, sort=False)
+            new.to_parquet(path, index=False)
+            log.info("Merged %s (%d rows)", path.name, len(new))
+    else:
+        monthly.to_parquet(mon_path, index=False)
+        seasonal.to_parquet(sea_path, index=False)
     log.info("Wrote %s (%d rows) and %s (%d rows)",
              mon_path.name, len(monthly), sea_path.name, len(seasonal))
     cache.unlink(missing_ok=True)

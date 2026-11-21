@@ -464,6 +464,117 @@ def ensemble_mean_aod(ppe_id: str, variables: Sequence[str],
     return mean
 
 
+def mask_to_surface(field: xr.DataArray, names: Sequence[str],
+                    blank_outside: bool = False) -> xr.DataArray:
+    """Keep values only on each box's land or ocean.
+
+    With ``blank_outside``, cells outside the region mask are NaN as well.
+    That is the regional sanity map. Global maps leave the field outside the
+    boxes unchanged and should not call this.
+    """
+    import cameo_toolbox as ct
+    import regions as reg
+
+    out = field.copy(deep=True)
+    data = np.array(out.values, dtype=float, copy=True)
+    lon = np.mod(np.asarray(out.lon.values, dtype=float), 360.0)
+    lat = np.asarray(out.lat.values, dtype=float)
+    order = np.argsort(lon)
+    lon = lon[order]
+    data = data[:, order]
+    lon2d, lat2d = np.meshgrid(lon, lat)
+    template = xr.DataArray(data, coords={"lat": lat, "lon": lon}, dims=("lat", "lon"))
+    defs = {name: reg.REGIONS[name] for name in names}
+    masks = ct.masks_for_regions(template, defs)
+    for name in names:
+        inside = reg.box_mask(lon2d, lat2d, reg.REGIONS[name]["lon_range"], reg.REGIONS[name]["lat_range"])
+        keep = np.asarray(masks[name].values, dtype=float) > 0.5
+        if blank_outside:
+            data[~keep] = np.nan
+        else:
+            data[inside & ~keep] = np.nan
+        n_in = int(inside.sum())
+        n_keep = int((inside & keep).sum())
+        land = ct.point_is_land(lon2d[inside], lat2d[inside]) if n_in else np.array([])
+        print(f"  {name:16} {reg.REGIONS[name]['surface_type']:5}  "
+              f"box cells {n_in:4d}  kept {n_keep:4d}  "
+              f"land in box {100 * land.mean():5.1f}%" if n_in else f"  {name}: empty")
+    # restore original longitude order
+    undo = np.empty_like(order)
+    undo[order] = np.arange(order.size)
+    out = out.copy(data=data[:, undo])
+    return out
+
+
+def plot_world_field(field: xr.DataArray, boxes: Sequence[dict], projection, title: str,
+                     cbar_label: str, filename: Path,
+                     extent: Optional[Tuple[float, float, float, float]] = None,
+                     zmin: Optional[float] = None, zmax: Optional[float] = None):
+    """Global map with region boxes in true geographic coordinates.
+
+    ``projection`` is a Cartopy CRS (Mercator, Robinson, Orthographic, …).
+    The field and the boxes both use Plate Carrée longitude/latitude, so the
+    outlines stay on the coastlines.
+    """
+    import matplotlib.colors as mcolors
+    import matplotlib.patheffects as pe
+    import matplotlib.pyplot as plt
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    filename = Path(filename)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    lon = np.mod(np.asarray(field.lon.values, dtype=float), 360.0)
+    lat = np.asarray(field.lat.values, dtype=float)
+    order = np.argsort(lon)
+    lon = lon[order]
+    data = np.asarray(field.values, dtype=float)[:, order]
+    finite = data[np.isfinite(data)]
+    if zmin is None:
+        zmin = float(np.nanpercentile(finite, 2)) if finite.size else 0.0
+    if zmax is None:
+        zmax = float(np.nanpercentile(finite, 98)) if finite.size else 1.0
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "daod", ["#DBD6D6", "#9D579A", "#009BD5", "#5EAD35", "#FABB00", "#CE1F5E"], N=12)
+    norm = mcolors.BoundaryNorm(np.linspace(zmin, zmax, 13), ncolors=12, clip=True)
+    fig = plt.figure(figsize=(12.5, 6.4))
+    ax = plt.axes(projection=projection)
+    mesh = ax.pcolormesh(
+        ct.cell_edges(lon), ct.cell_edges(lat), data,
+        transform=ccrs.PlateCarree(), cmap=cmap, norm=norm, shading="flat",
+    )
+    ax.coastlines(resolution="110m", zorder=4)
+    try:
+        ax.add_feature(cfeature.BORDERS.with_scale("110m"), linewidth=0.3, zorder=4)
+    except Exception:
+        pass
+    for box in boxes:
+        blat0, blat1 = (float(v) for v in box["lat_range"])
+        ct.draw_box_outline(
+            ax, box["lon_range"], box["lat_range"],
+            color=box.get("color", "magenta"), lw=box.get("lw", 1.8),
+        )
+        if box.get("label"):
+            west, east = ct._box_span(box["lon_range"])
+            ax.text(
+                0.5 * (west + east), max(blat0, blat1) + 1.2, box["label"],
+                transform=ccrs.PlateCarree(), ha="center", va="bottom", fontsize=8,
+                color=box.get("color", "magenta"), zorder=6,
+                path_effects=[pe.withStroke(linewidth=2.5, foreground="white")],
+            )
+    if extent is None:
+        ax.set_global()
+    else:
+        ax.set_extent(list(extent), crs=ccrs.PlateCarree())
+    cbar = fig.colorbar(mesh, ax=ax, orientation="vertical", shrink=0.72, pad=0.02, extend="both")
+    cbar.set_label(cbar_label)
+    ax.set_title(title)
+    fig.savefig(filename, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+    print(f"  Saved {filename}")
+    return filename
+
+
 def plot_study_map(field: xr.DataArray, boxes: Sequence[dict], title: str, cbar_label: str,
                    filename: Path, extent: Optional[Tuple[float, float, float, float]] = None,
                    central_longitude: Optional[float] = None,
@@ -534,10 +645,12 @@ def region_boxes(region_names: Sequence[str], *, nominal_only: bool = True) -> L
 
 def extent_for_regions(region_names: Sequence[str], pad: float = 12.0
                        ) -> Tuple[Optional[float], Tuple[float, float, float, float]]:
-    """Return (central_longitude, extent) covering the named boxes.
+    """Return (central_longitude, geographic extent) covering the named boxes.
 
-    Extent is in the centred display frame [-180, 180]. Boxes that wrap 0°E
-    set ``central_longitude`` to the box mid-meridian.
+    Extent is true longitude/latitude for ``set_extent(..., crs=PlateCarree)``.
+    A box that crosses 0°E is unwrapped (358..30 → -2..30). Boxes west of
+    180°E are expressed in -180..180. ``central_longitude`` only centres the
+    map projection; it is not subtracted from the coordinates.
     """
     boxes = region_boxes(region_names)
     if not boxes:
@@ -551,26 +664,30 @@ def extent_for_regions(region_names: Sequence[str], pad: float = 12.0
                 clon -= 360.0
             break
     if clon is None:
-        # mid of all non-global lon spans
         mids = []
         for box in boxes:
             lo0, lo1 = box["lon_range"]
             if lo0 == 0 and lo1 == 360:
                 continue
-            mids.append(0.5 * (lo0 + lo1))
+            mid = ct.box_central_longitude((lo0, lo1))
+            mids.append(mid - 360.0 if mid > 180 else mid)
         clon = float(np.mean(mids)) if mids else 0.0
-        if clon > 180:
-            clon -= 360.0
 
-    xs, ys = [], []
+    wests, easts, souths, norths = [], [], [], []
     for box in boxes:
-        lo0, lo1 = box["lon_range"]
-        la0, la1 = box["lat_range"]
-        width = (lo1 + 360.0 - lo0) if lo0 > lo1 else (lo1 - lo0)
-        x0 = (lo0 - clon + 180.0) % 360.0 - 180.0
-        xs.extend([x0, x0 + width])
-        ys.extend([la0, la1])
-    extent = (min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad)
+        lo0, lo1 = (float(v) for v in box["lon_range"])
+        la0, la1 = (float(v) for v in box["lat_range"])
+        if lo0 > lo1:
+            west, east = lo0 - 360.0, lo1
+        elif lo0 > 180.0:
+            west, east = lo0 - 360.0, lo1 - 360.0
+        else:
+            west, east = lo0, lo1
+        wests.append(west)
+        easts.append(east)
+        souths.append(min(la0, la1))
+        norths.append(max(la0, la1))
+    extent = (min(wests) - pad, max(easts) + pad, min(souths) - pad, max(norths) + pad)
     return clon, extent
 
 

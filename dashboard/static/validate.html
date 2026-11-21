@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Model vs observations</title>
+  <style>
+    :root { --bg: #0f1419; --panel: #1a2332; --border: #2d3a4d; --text: #e7ecf3; --muted: #9aa8bc; --accent: #3d8bfd; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    header, #controls { padding: 12px 18px; background: var(--panel); }
+    header p, #status { color: var(--muted); font-size: 0.85rem; }
+    select, button { background: #0f1419; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; }
+    button { background: var(--accent); border-color: transparent; font-weight: 600; cursor: pointer; }
+    #controls { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; }
+    label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; }
+    section { padding: 8px 18px 18px; }
+    .row { display: grid; grid-template-columns: 220px 1fr 90px; gap: 8px; align-items: center; margin: 3px 0; font-size: 0.78rem; }
+    .bar { height: 10px; background: #3d8bfd; border-radius: 3px; }
+    .obs { background: #f0c14a; }
+    h2 { font-size: 1rem; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Model vs observations</h1>
+    <p>2010 models are compared with POLDER. 2024 onwards (ECHAM 2024–25 and ICON-HAM / hjia) are compared with SPEXone. Values are the monthly median inside the region; AeroCom is the seasonal model value.</p>
+  </header>
+  <div id="controls">
+    <div><label for="region">Region</label><select id="region"></select></div>
+    <div><label for="var">Variable</label>
+      <select id="var">
+        <option value="od550aer">AOD 550</option>
+        <option value="SSA">SSA</option>
+        <option value="AE_440_550">AE 440–550</option>
+        <option value="AE_550_865">AE 550–865</option>
+      </select>
+    </div>
+    <div><label for="month">Month</label>
+      <select id="month">
+        <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+        <option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option>
+      </select>
+    </div>
+    <button id="go" type="button">Compare</button>
+  </div>
+  <div id="status"></div>
+  <section>
+    <h2>2010 · POLDER</h2>
+    <div id="y2010"></div>
+  </section>
+  <section>
+    <h2>2024 onwards · SPEXone</h2>
+    <div id="y2024"></div>
+  </section>
+  <script>
+    const params = new URLSearchParams(location.search);
+    function setStatus(msg) { document.getElementById("status").textContent = msg || ""; }
+    function bars(id, rows) {
+      const box = document.getElementById(id);
+      box.innerHTML = "";
+      const vals = rows.map((r) => r.value).filter((v) => Number.isFinite(v));
+      const hi = Math.max(...vals, 1e-9);
+      if (!rows.length) { box.textContent = "No values."; return; }
+      for (const row of rows) {
+        const line = document.createElement("div");
+        line.className = "row";
+        const name = document.createElement("div");
+        name.textContent = row.label;
+        const track = document.createElement("div");
+        const bar = document.createElement("div");
+        bar.className = "bar" + (row.note === "observation" ? " obs" : "");
+        bar.style.width = Math.max(2, 100 * row.value / hi) + "%";
+        track.appendChild(bar);
+        const num = document.createElement("div");
+        num.textContent = Number(row.value).toPrecision(3);
+        line.appendChild(name); line.appendChild(track); line.appendChild(num);
+        box.appendChild(line);
+      }
+    }
+    async function loadRegions() {
+      const res = await fetch("/api/meta");
+      const meta = await res.json();
+      const sel = document.getElementById("region");
+      const preset = params.get("region");
+      for (const r of meta.regions) {
+        const opt = document.createElement("option");
+        opt.value = r.name;
+        opt.textContent = r.name;
+        sel.appendChild(opt);
+      }
+      if (preset && [...sel.options].some((o) => o.value === preset)) sel.value = preset;
+    }
+    async function go() {
+      setStatus("Comparing…");
+      const q = new URLSearchParams({
+        region: document.getElementById("region").value,
+        var: document.getElementById("var").value,
+        month: document.getElementById("month").value,
+      });
+      const res = await fetch("/api/validate?" + q.toString());
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        setStatus(err.detail || res.statusText);
+        return;
+      }
+      const payload = await res.json();
+      bars("y2010", payload.y2010);
+      bars("y2024", payload.y2024);
+      setStatus("");
+    }
+    document.getElementById("go").addEventListener("click", () => go().catch((e) => setStatus(e.message)));
+    loadRegions().then(go).catch((e) => setStatus(e.message));
+  </script>
+</body>
+</html>

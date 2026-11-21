@@ -1,0 +1,1323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AeroCom / PPE map dashboard</title>
+  <link rel="stylesheet" href="/static/vendor/leaflet.css" />
+  <link rel="stylesheet" href="/static/vendor/leaflet.draw.css" />
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4d;
+      --text: #e7ecf3;
+      --muted: #9aa8bc;
+      --accent: #3d8bfd;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    #layout { display: grid; grid-template-columns: 300px 1fr 300px; height: 100%; position: relative; }
+    #cycle-panel {
+      background: var(--panel); border-left: 1px solid var(--border);
+      padding: 14px 12px; overflow-y: auto;
+    }
+    #cycle-panel h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 8px; }
+    #compare-list { font-size: 0.78rem; line-height: 1.45; white-space: pre-wrap; margin-top: 8px; }
+    #sidebar {
+      background: var(--panel); border-right: 1px solid var(--border);
+      padding: 14px 16px; overflow-y: auto;
+    }
+    #sidebar h1 { font-size: 1.05rem; margin: 0 0 12px; font-weight: 600; }
+    #sidebar h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 16px 0 8px; }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin: 8px 0 4px; }
+    select, input, button {
+      width: 100%; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border);
+      background: #0f1419; color: var(--text); font-size: 0.9rem;
+    }
+    button {
+      background: var(--accent); border-color: transparent; cursor: pointer; font-weight: 600; margin-top: 10px;
+    }
+    button.secondary { background: #243044; margin-top: 6px; }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    #map { height: 100%; width: 100%; background: #0a0e14; position: relative; }
+    #pipeline-panel {
+      position: absolute; z-index: 1200; top: 12px; right: 12px; width: 300px;
+      max-height: calc(100% - 24px); overflow: auto;
+      background: rgba(15, 20, 25, 0.95); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.4);
+    }
+    #pipeline-panel h3 { margin: 0 0 8px; font-size: 0.9rem; }
+    .flow-box {
+      border: 1px solid #3d8bfd; border-radius: 6px; padding: 6px 8px; margin: 0;
+      font-size: 0.8rem; cursor: pointer; background: #1a2332;
+    }
+    .flow-box:hover { border-color: #fff; }
+    .flow-box small { display: block; color: var(--muted); word-break: break-all; margin-top: 3px; }
+    .flow-arrow { text-align: center; color: var(--muted); font-size: 0.75rem; margin: 2px 0; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    #status { font-size: 0.8rem; color: var(--muted); margin-top: 10px; min-height: 1.2em; }
+    #result {
+      margin-top: 12px; padding: 10px; border-radius: 8px; background: #0f1419;
+      border: 1px solid var(--border); font-size: 0.85rem; line-height: 1.45; white-space: pre-wrap;
+    }
+    .check { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 0.85rem; }
+    .check input { width: auto; }
+    .months { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    .months button {
+      width: auto; margin: 0; padding: 4px 7px; background: #243044; font-weight: 500;
+    }
+    .months button.on { background: var(--accent); }
+    #box-list { list-style: none; padding: 0; margin: 8px 0 0; }
+    #box-list li {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 8px; font-size: 0.85rem; padding: 3px 0;
+    }
+    #box-list button { width: auto; margin: 0; padding: 2px 8px; background: #243044; }
+    #note { font-size: 0.75rem; color: var(--muted); margin-top: 8px; }
+    .map-legend {
+      background: rgba(15, 20, 25, 0.92);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px 10px;
+      width: 230px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    }
+    .map-legend .title { font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; }
+    .map-legend .bar {
+      height: 14px; border-radius: 3px; border: 1px solid var(--border);
+      background: linear-gradient(90deg, #dbd6d6, #9d579a, #009bd5, #5ead35, #fabb00, #ce1f5e);
+    }
+    .map-legend .ticks {
+      display: flex; justify-content: space-between;
+      font-size: 0.7rem; color: var(--muted); margin-top: 3px;
+    }
+    .map-legend .limits { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; margin-top: 8px; }
+    .map-legend input, .map-legend button {
+      width: 100%; margin: 0; padding: 4px 6px; font-size: 0.78rem;
+    }
+    .map-legend button { width: auto; padding: 4px 8px; background: #243044; }
+    .map-legend label { margin: 0 0 2px; font-size: 0.68rem; }
+    .leaflet-container { background: #0a0e14; font: inherit; }
+    .leaflet-image-layer {
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+    /* The draw stylesheet points the icons at a missing SVG, which hides the toolbar. */
+    .leaflet-draw-toolbar a {
+      background-color: #fff;
+      background-image: url("/static/vendor/images/spritesheet.png") !important;
+      background-repeat: no-repeat;
+      background-size: 300px 30px;
+    }
+    .leaflet-retina .leaflet-draw-toolbar a {
+      background-image: url("/static/vendor/images/spritesheet-2x.png") !important;
+    }
+    .leaflet-draw-toolbar {
+      border: 1px solid #888;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <div id="layout">
+    <aside id="sidebar">
+      <h1>AeroCom / PPE maps</h1>
+      <p style="font-size:0.8rem;color:var(--muted);margin:0 0 8px;">
+        Draw a polygon to compute an area-weighted regional mean (same land/sea weights as the analysis pipeline).
+        Each coloured block is one data cell: ECHAM is the T63 grid (about 1.9°), SPEXone and POLDER are 1°, and ICON is the native grid averaged into 1° bins for display.
+      </p>
+
+      <h2>Field</h2>
+      <label for="dataset">Dataset</label>
+      <select id="dataset"></select>
+      <div id="model-wrap" style="display:none">
+        <label for="model">AeroCom model</label>
+        <select id="model"></select>
+      </div>
+      <label for="variable">Variable</label>
+      <select id="variable"></select>
+      <label>Months to average</label>
+      <button class="secondary" id="annual-btn" type="button">Annual mean</button>
+      <div id="months" class="months"></div>
+      <label for="member">PPE member</label>
+      <select id="member">
+        <option value="">Ensemble mean</option>
+      </select>
+      <div id="spex-wrap" style="display:none">
+        <label for="spex-mode">SPEXone mode</label>
+        <select id="spex-mode">
+          <option value="regridded">Regridded</option>
+          <option value="native">Native overpass</option>
+        </select>
+        <label for="spex-res">Regrid resolution</label>
+        <select id="spex-res">
+          <option value="1">1°</option>
+          <option value="0.5">0.5°</option>
+          <option value="0.1">0.1°</option>
+        </select>
+        <label for="spex-year">Native year</label>
+        <select id="spex-year">
+          <option value="2024">2024</option>
+          <option value="2025">2025</option>
+        </select>
+        <button class="secondary" id="spex-regrid-btn" type="button">Submit SPEXone regrid (SLURM)</button>
+      </div>
+      <button id="load-btn">Load map</button>
+      <button class="secondary" id="save-fig" type="button">Save figure</button>
+
+      <h2>Map lines</h2>
+      <div class="check"><input type="checkbox" id="show-coast" checked /><label for="show-coast" style="margin:0">Land / sea border</label></div>
+      <div class="check"><input type="checkbox" id="show-countries" /><label for="show-countries" style="margin:0">Country borders</label></div>
+      <div class="check"><input type="checkbox" id="show-pipeline" checked /><label for="show-pipeline" style="margin:0">Flowchart layer</label></div>
+      <div id="cell-readout" style="font-size:0.8rem;color:var(--muted);margin-top:6px;">Click the map to read a cell.</div>
+
+      <h2>Region boxes</h2>
+      <label for="box-pick">Add a saved box</label>
+      <select id="box-pick"></select>
+      <button class="secondary" id="add-box" type="button">Add box to map</button>
+      <ul id="box-list"></ul>
+      <button class="secondary" id="plots-btn" type="button">Go to aggregate plots</button>
+
+      <h2>Drawn polygon</h2>
+      <label for="surface">Surface for drawn polygon</label>
+      <select id="surface">
+        <option value="all">all</option>
+        <option value="land">land</option>
+        <option value="ocean">ocean</option>
+      </select>
+      <button class="secondary" id="mean-btn" disabled>Mean of drawn polygon</button>
+      <button class="secondary" id="clear-btn">Clear drawing</button>
+      <label for="poly-name">Save current polygon</label>
+      <input id="poly-name" type="text" placeholder="name for this session" />
+      <button class="secondary" id="save-poly-btn" disabled>Save polygon</button>
+      <label for="saved-poly">Reuse saved polygon</label>
+      <select id="saved-poly"><option value="">—</option></select>
+      <button class="secondary" id="cycle-btn" type="button" disabled>Annual cycle</button>
+      <button class="secondary" id="validate-btn" type="button">Model vs observations</button>
+      <button class="secondary" id="flow-btn" type="button">Show flowchart</button>
+      <p id="mem-note" style="font-size:0.75rem;color:var(--muted);margin:8px 0 0;">
+        A drawn-box aggregate needs about 8 GB and should reserve 32 GB on SLURM (64 GB if a notebook shares the node). The annual cycle of one variable stays near 2 GB.
+      </p>
+      <button class="secondary" id="job-local" type="button" disabled>Aggregate on this node</button>
+      <button class="secondary" id="job-slurm" type="button" disabled>Submit SLURM job (32 GB)</button>
+      <div id="job-status" style="font-size:0.8rem;color:var(--muted);margin-top:6px;"></div>
+      <button class="secondary" id="add-pipeline" type="button" disabled>Add polygon to main tables</button>
+      <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 0;line-height:1.35;">
+        After the aggregate finishes, this writes the box to <code>Data/PPE_regional/extra_regions.csv</code>
+        (read by <code>py/regions.py</code>) and appends its rows to the monthly and seasonal parquet files.
+      </p>
+
+      <div id="status"></div>
+      <div id="note"></div>
+      <div id="result">Draw a polygon, then click “Mean of drawn polygon”.</div>
+    </aside>
+    <div id="map">
+    <aside id="pipeline-panel" hidden>
+      <h3>Pipeline <button type="button" id="pipeline-close" class="secondary" style="width:auto;margin:0;padding:2px 8px;float:right">Hide</button></h3>
+      <p style="font-size:0.75rem;color:var(--muted);margin:0 0 8px;">Hover a box for the path. Click to copy it.</p>
+      <div id="pipeline-flow"></div>
+    </aside>
+    </div>
+    <aside id="cycle-panel">
+      <h2>Annual cycle</h2>
+      <svg id="cycle" viewBox="0 0 280 200" style="width:100%;height:200px;background:#0f1419;border:1px solid var(--border);border-radius:6px"></svg>
+      <p id="cycle-caption" style="font-size:0.72rem;color:var(--muted);margin:6px 0 0;line-height:1.35;">
+        Area-weighted spatial mean inside the polygon for each calendar month. The band is the spatial standard deviation. Click a month.
+      </p>
+      <div id="cycle-readout" style="font-size:0.8rem;margin-top:8px;">Click the map or a month.</div>
+      <button id="compare-all" type="button">Show compare all</button>
+      <div id="compare-list"></div>
+    </aside>
+  </div>
+
+  <script src="/static/vendor/leaflet.js"></script>
+  <script src="/static/vendor/leaflet.draw.js"></script>
+  <script>
+    const state = {
+      meta: null,
+      field: null,
+      ring: null,
+      overlay: null,
+      overlays: [],
+      boxLayer: null,
+      boxes: {},
+      months: new Set(),
+      coastLayer: null,
+      countryLayer: null,
+      pipelineLayer: null,
+      pipelineNodes: null,
+      saved: {},
+      savedSlug: null,
+      jobTimer: null,
+      values: null,
+      keepRange: false,
+    };
+
+    const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+    const map = L.map("map", { worldCopyJump: true, minZoom: 1, maxZoom: 8 }).setView([10, 0], 2);
+    map.createPane("borders");
+    map.getPane("borders").style.zIndex = 450;
+    // No remote basemap: Leaflet, draw tools and coastlines are stored in the repo.
+    const drawnItems = new L.FeatureGroup().addTo(map);
+    const drawStyle = { color: "#ffffff", weight: 2.5, fillColor: "#ffffff", fillOpacity: 0.08, pane: "borders" };
+    const drawControl = new L.Control.Draw({
+      draw: {
+        polygon: { allowIntersection: false, showArea: false, shapeOptions: drawStyle },
+        polyline: false,
+        rectangle: { shapeOptions: drawStyle },
+        circle: false, marker: false, circlemarker: false,
+      },
+      edit: { featureGroup: drawnItems },
+    });
+    map.addControl(drawControl);
+
+    const legend = L.control({ position: "bottomright" });
+    legend.onAdd = function () {
+      const div = L.DomUtil.create("div", "map-legend");
+      div.innerHTML = `
+        <div class="title" id="legend-title">Color scale</div>
+        <div class="bar"></div>
+        <div class="ticks"><span id="tick-lo">—</span><span id="tick-mid">—</span><span id="tick-hi">—</span></div>
+        <div class="limits">
+          <div><label for="cmin">Minimum</label><input id="cmin" type="number" step="any" /></div>
+          <div><label for="cmax">Maximum</label><input id="cmax" type="number" step="any" /></div>
+          <div><label>&nbsp;</label><button id="creset" type="button">Fit</button></div>
+        </div>
+        <div class="check" style="margin:8px 0 0"><input type="checkbox" id="ckeep" /><label for="ckeep" style="margin:0">Keep this range</label></div>`;
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.disableScrollPropagation(div);
+      return div;
+    };
+    legend.addTo(map);
+
+    function setRing(ring, layer) {
+      state.ring = ring;
+      const ready = !!(ring && ring.length >= 4);
+      document.getElementById("mean-btn").disabled = !ready;
+      document.getElementById("save-poly-btn").disabled = !ready;
+      if (ready) setStatus(`Polygon with ${ring.length - 1} vertices ready.`);
+    }
+
+    map.on(L.Draw.Event.CREATED, (e) => {
+      drawnItems.clearLayers();
+      if (e.layer.setStyle) e.layer.setStyle(drawStyle);
+      if (e.layer.options) e.layer.options.pane = "borders";
+      drawnItems.addLayer(e.layer);
+      drawnItems.bringToFront();
+      setRing(layerToRing(e.layer));
+    });
+    map.on(L.Draw.Event.DELETED, () => {
+      setRing(null);
+    });
+
+    function drawCycle(rows, ylabel) {
+      const svg = document.getElementById("cycle");
+      const finite = rows.filter((r) => Number.isFinite(r.mean));
+      if (!finite.length) {
+        svg.innerHTML = "";
+        return;
+      }
+      const means = finite.map((r) => r.mean);
+      const stds = finite.map((r) => (Number.isFinite(r.std) ? r.std : 0));
+      let lo = Math.min(...finite.map((r, i) => means[i] - stds[i]));
+      let hi = Math.max(...finite.map((r, i) => means[i] + stds[i]));
+      if (!(hi > lo)) { lo -= 1; hi += 1; }
+      const pad = (hi - lo) * 0.08;
+      lo -= pad; hi += pad;
+      state.cycle = finite;
+      const left = 48, top = 16, width = 210, height = 140;
+      const X = (m) => left + (m - 1) * (width / 11);
+      const Y = (v) => top + (hi - v) / (hi - lo) * height;
+      const band = finite.map((r, i) => `${X(r.month)},${Y(means[i] - stds[i])}`).join(" ")
+        + " " + finite.slice().reverse().map((r, i) => {
+          const j = finite.length - 1 - i;
+          return `${X(r.month)},${Y(means[j] + stds[j])}`;
+        }).join(" ");
+      const line = finite.map((r, i) => `${X(r.month)},${Y(means[i])}`).join(" ");
+      const xticks = finite.map((r) =>
+        `<text x="${X(r.month)}" y="178" fill="#9aa8bc" font-size="9" text-anchor="middle">${r.month}</text>`
+      ).join("");
+      const dots = finite.map((r, i) =>
+        `<circle class="cycle-pt" data-month="${r.month}" cx="${X(r.month)}" cy="${Y(means[i])}" r="5" fill="#3d8bfd" stroke="#fff" stroke-width="1" style="cursor:pointer"/>`
+      ).join("");
+      const yTicks = [hi, (hi + lo) / 2, lo].map((v) => {
+        const y = Y(v);
+        return `<line x1="${left - 4}" y1="${y}" x2="${left}" y2="${y}" stroke="#9aa8bc"/>`
+          + `<text x="${left - 6}" y="${y + 3}" fill="#9aa8bc" font-size="8" text-anchor="end">${fmt(v)}</text>`;
+      }).join("");
+      const axisLabel = plainLabel(ylabel || document.getElementById("variable").value);
+      svg.innerHTML = `
+        <text transform="translate(12,${top + height / 2}) rotate(-90)" fill="#9aa8bc" font-size="9" text-anchor="middle">${axisLabel}</text>
+        <line x1="${left}" y1="${top}" x2="${left}" y2="${top + height}" stroke="#2d3a4d"/>
+        <line x1="${left}" y1="${top + height}" x2="${left + width}" y2="${top + height}" stroke="#2d3a4d"/>
+        ${yTicks}
+        <polygon points="${band}" fill="rgba(61,139,253,0.25)"></polygon>
+        <polyline points="${line}" fill="none" stroke="#3d8bfd" stroke-width="1.6"></polyline>
+        ${dots}
+        ${xticks}`;
+      svg.querySelectorAll(".cycle-pt").forEach((dot) => {
+        dot.addEventListener("click", () => {
+          const month = Number(dot.getAttribute("data-month"));
+          const row = finite.find((r) => r.month === month);
+          state.pickedMonth = month;
+          document.getElementById("cycle-readout").textContent =
+            `${MONTHS[month - 1]}: ${fmt(row.mean)} ± ${fmt(row.std)} (n=${row.n_cells})`;
+        });
+      });
+    }
+
+    function copyText(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+      }
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+      return Promise.resolve();
+    }
+
+    function renderJobStatus(job) {
+      const box = document.getElementById("job-status");
+      const id = job.slurm_id ? ` job ${job.slurm_id}` : "";
+      const head = `${job.state || ""}${id} ${job.message || ""}`.trim();
+      const bits = [];
+      if (Number.isFinite(job.lon_min) && Number.isFinite(job.lon_max)) {
+        bits.push(`lon [${Number(job.lon_min).toFixed(2)}, ${Number(job.lon_max).toFixed(2)}]`);
+      }
+      if (Number.isFinite(job.lat_min) && Number.isFinite(job.lat_max)) {
+        bits.push(`lat [${Number(job.lat_min).toFixed(2)}, ${Number(job.lat_max).toFixed(2)}]`);
+      }
+      const paths = [job.monthly, job.seasonal].filter(Boolean);
+      let html = `<div>${head}</div>`;
+      if (bits.length) html += `<div>${bits.join(" · ")}</div>`;
+      if (paths.length) {
+        html += `<div style="word-break:break-all;margin-top:4px">${paths.map((p) => `<code>${p}</code>`).join("<br>")}</div>`;
+        html += `<button type="button" class="secondary" id="copy-job-paths" style="margin-top:4px">Copy paths</button>`;
+      }
+      box.innerHTML = html;
+      document.getElementById("add-pipeline").disabled = job.state !== "done";
+      const btn = document.getElementById("copy-job-paths");
+      if (btn) {
+        btn.addEventListener("click", () => {
+          copyText(paths.join("\n")).then(() => setStatus("Copied parquet paths."));
+        });
+      }
+    }
+
+    async function savePolygon() {
+      const name = document.getElementById("poly-name").value.trim();
+      if (!name || !state.ring) return;
+      const surface = document.getElementById("surface").value;
+      const res = await fetch("/api/polygons", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, ring: state.ring, surface_type: surface }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || res.statusText);
+      }
+      const saved = await res.json();
+      state.saved[name] = state.ring.map((p) => p.slice());
+      state.savedSlug = saved.slug;
+      state.savedName = name;
+      refreshSavedSelect();
+      document.getElementById("saved-poly").value = name;
+      document.getElementById("cycle-btn").disabled = false;
+      document.getElementById("job-local").disabled = false;
+      document.getElementById("job-slurm").disabled = false;
+      setStatus(`Saved polygon “${name}”.`);
+    }
+
+    async function showAnnual() {
+      if (!state.ring) return;
+      setStatus("Annual cycle…");
+      const ens = document.getElementById("member").value;
+      const body = {
+        dataset: currentDataset(),
+        var: document.getElementById("variable").value,
+        ring: state.ring,
+        surface_type: document.getElementById("surface").value,
+      };
+      if (ens !== "") body.ens = Number(ens);
+      const res = await fetch("/api/annual_cycle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || res.statusText);
+      }
+      const payload = await res.json();
+      drawCycle(payload.months, payload.label || document.getElementById("variable").value);
+      const lines = payload.months.filter((r) => r.mean != null).map((r) =>
+        `${r.month}: ${fmt(r.mean)} ± ${fmt(r.std)} (n=${r.n_cells})`);
+      document.getElementById("result").textContent =
+        `${payload.label}\n${payload.note}\nspatial mean ± spatial std (cells in box)\n` + lines.join("\n");
+      setStatus("Annual cycle ready.");
+    }
+
+    async function launchJob(where) {
+      if (!state.savedSlug) throw new Error("Save the polygon first.");
+      setStatus(where === "slurm" ? "Submitting SLURM job…" : "Starting aggregate on this node…");
+      const res = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: state.savedSlug, where, mem_gb: 32 }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || res.statusText);
+      }
+      pollJob(state.savedSlug);
+    }
+
+    function pollJob(slug) {
+      if (state.jobTimer) clearInterval(state.jobTimer);
+      const tick = async () => {
+        const res = await fetch("/api/jobs/" + encodeURIComponent(slug));
+        if (!res.ok) return;
+        const job = await res.json();
+        renderJobStatus(job);
+        if (job.state === "done" || job.state === "failed") {
+          clearInterval(state.jobTimer);
+          state.jobTimer = null;
+        }
+      };
+      tick();
+      state.jobTimer = setInterval(tick, 5000);
+    }
+
+    function refreshSavedSelect() {
+      const sel = document.getElementById("saved-poly");
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">—</option>';
+      for (const name of Object.keys(state.saved).sort()) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      }
+      if (state.saved[cur]) sel.value = cur;
+    }
+
+    function showRingOnMap(ring) {
+      drawnItems.clearLayers();
+      const latlngs = ring.slice(0, -1).map(([lon, lat]) => {
+        const signed = lon > 180 ? lon - 360 : lon;
+        return [lat, signed];
+      });
+      const layer = L.polygon(latlngs, { color: "#3d8bfd" });
+      drawnItems.addLayer(layer);
+      setRing(ring);
+      try { map.fitBounds(layer.getBounds(), { padding: [20, 20] }); } catch (_) {}
+    }
+
+    function layerToRing(layer) {
+      let latlngs = layer.getLatLngs();
+      if (Array.isArray(latlngs[0]) && !("lat" in latlngs[0])) latlngs = latlngs[0];
+      const ring = latlngs.map((ll) => {
+        let lon = ll.lng;
+        lon = ((lon % 360) + 360) % 360;
+        return [lon, ll.lat];
+      });
+      if (ring.length && (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])) {
+        ring.push(ring[0].slice());
+      }
+      return ring;
+    }
+
+    function setStatus(msg) {
+      document.getElementById("status").textContent = msg || "";
+    }
+
+    function fmt(x) {
+      if (x == null || !Number.isFinite(x)) return "—";
+      const a = Math.abs(x);
+      if (a === 0) return "0";
+      if (a >= 100 || a < 0.001) return x.toExponential(3);
+      return x.toPrecision(4);
+    }
+
+    // Discrete colour scale matching the analysis maps (grey → magenta → blue → green → amber → pink).
+    const STOPS = [
+      [0.0, [219, 214, 214]],
+      [0.2, [157, 87, 154]],
+      [0.4, [0, 155, 213]],
+      [0.6, [94, 173, 53]],
+      [0.8, [250, 187, 0]],
+      [1.0, [206, 31, 94]],
+    ];
+    function colorAt(t) {
+      t = Math.max(0, Math.min(1, t));
+      for (let i = 0; i < STOPS.length - 1; i++) {
+        const [a, ca] = STOPS[i], [b, cb] = STOPS[i + 1];
+        if (t <= b) {
+          const u = (t - a) / (b - a || 1);
+          return [
+            Math.round(ca[0] + u * (cb[0] - ca[0])),
+            Math.round(ca[1] + u * (cb[1] - ca[1])),
+            Math.round(ca[2] + u * (cb[2] - ca[2])),
+          ];
+        }
+      }
+      return STOPS[STOPS.length - 1][1];
+    }
+
+    function toSignedLon(lon) {
+      lon = ((lon % 360) + 360) % 360;
+      return lon > 180 ? lon - 360 : lon;
+    }
+
+    function decodeField(b64, nlat, nlon) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const values = new Float32Array(bytes.buffer);
+      if (values.length !== nlat * nlon) throw new Error("field size does not match the grid");
+      return values;
+    }
+
+    function plainLabel(text) {
+      return String(text || "Color scale").replace(/\$|\{|\}/g, "");
+    }
+
+    function colorLimits() {
+      const z0 = Number(document.getElementById("cmin").value);
+      const z1 = Number(document.getElementById("cmax").value);
+      if (!Number.isFinite(z0) || !Number.isFinite(z1) || !(z1 > z0)) return null;
+      return [z0, z1];
+    }
+
+    function setLegend(title, z0, z1) {
+      document.getElementById("legend-title").textContent = plainLabel(title);
+      document.getElementById("tick-lo").textContent = fmt(z0);
+      document.getElementById("tick-mid").textContent = fmt((z0 + z1) / 2);
+      document.getElementById("tick-hi").textContent = fmt(z1);
+    }
+
+    const FieldCanvas = L.Layer.extend({
+      initialize(payload, values, z0, z1) {
+        this._payload = payload;
+        this._values = values;
+        this._z0 = z0;
+        this._z1 = z1;
+      },
+      onAdd(map) {
+        this._map = map;
+        this._canvas = L.DomUtil.create("canvas", "field-canvas");
+        this._canvas.style.pointerEvents = "none";
+        map.getPanes().overlayPane.appendChild(this._canvas);
+        map.on("moveend zoomend viewreset resize", this._reset, this);
+        this._reset();
+      },
+      onRemove(map) {
+        map.off("moveend zoomend viewreset resize", this._reset, this);
+        L.DomUtil.remove(this._canvas);
+      },
+      _reset() {
+        const map = this._map;
+        const size = map.getSize();
+        const dpr = window.devicePixelRatio || 1;
+        const canvas = this._canvas;
+        canvas.width = Math.max(1, size.x * dpr);
+        canvas.height = Math.max(1, size.y * dpr);
+        canvas.style.width = size.x + "px";
+        canvas.style.height = size.y + "px";
+        L.DomUtil.setPosition(canvas, map.containerPointToLayerPoint([0, 0]));
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, size.x, size.y);
+        const lon = this._payload.lon.map(Number);
+        const lat = this._payload.lat.map(Number);
+        const nlon = lon.length;
+        const nlat = lat.length;
+        const values = this._values;
+        const z0 = this._z0;
+        const span = this._z1 - z0 || 1;
+        const lonEdge = (i, side) => {
+          if (side === "w") {
+            return i === 0 ? lon[0] - (lon[1] - lon[0]) / 2 : (lon[i - 1] + lon[i]) / 2;
+          }
+          return i === nlon - 1 ? lon[i] + (lon[i] - lon[i - 1]) / 2 : (lon[i] + lon[i + 1]) / 2;
+        };
+        const latEdge = (j, side) => {
+          if (side === "n") {
+            return j === 0 ? lat[0] + (lat[0] - lat[1]) / 2 : (lat[j - 1] + lat[j]) / 2;
+          }
+          return j === nlat - 1 ? lat[j] + (lat[j] - lat[j - 1]) / 2 : (lat[j] + lat[j + 1]) / 2;
+        };
+        for (const shift of [-360, 0, 360]) {
+          for (let j = 0; j < nlat; j++) {
+            const north = latEdge(j, "n");
+            const south = latEdge(j, "s");
+            for (let i = 0; i < nlon; i++) {
+              const v = values[j * nlon + i];
+              if (!Number.isFinite(v)) continue;
+              const west = lonEdge(i, "w") + shift;
+              const east = lonEdge(i, "e") + shift;
+              const p1 = map.latLngToContainerPoint([north, west]);
+              const p2 = map.latLngToContainerPoint([south, east]);
+              const x = Math.min(p1.x, p2.x);
+              const y = Math.min(p1.y, p2.y);
+              const w = Math.abs(p2.x - p1.x);
+              const h = Math.abs(p2.y - p1.y);
+              if (x > size.x || y > size.y || x + w < 0 || y + h < 0) continue;
+              const [r, g, b] = colorAt((v - z0) / span);
+              ctx.fillStyle = `rgb(${r},${g},${b})`;
+              ctx.globalAlpha = 0.92;
+              ctx.fillRect(x, y, Math.max(w, 1), Math.max(h, 1));
+            }
+          }
+        }
+        ctx.globalAlpha = 1;
+      },
+    });
+
+    function clearFieldOverlays() {
+      for (const layer of state.overlays || []) map.removeLayer(layer);
+      state.overlays = [];
+      if (state.overlay) {
+        map.removeLayer(state.overlay);
+        state.overlay = null;
+      }
+      if (state.fieldLayer) {
+        map.removeLayer(state.fieldLayer);
+        state.fieldLayer = null;
+      }
+    }
+
+    function paintField() {
+      const payload = state.field;
+      const values = state.values;
+      if (!payload || !values) return;
+      const limits = colorLimits();
+      if (!limits) {
+        setStatus("Color maximum must be greater than the minimum.");
+        return;
+      }
+      const [z0, z1] = limits;
+      clearFieldOverlays();
+      // One canvas in the map projection. Each cell is placed from its own
+      // lat/lon corners, so a Gaussian grid lines up with the coastline.
+      // Web Mercator stretches a single image between the poles and does not.
+      if (state.fieldLayer) {
+        map.removeLayer(state.fieldLayer);
+        state.fieldLayer = null;
+      }
+      state.fieldLayer = new FieldCanvas(payload, values, z0, z1).addTo(map);
+      drawnItems.bringToFront();
+      if (state.boxLayer) state.boxLayer.bringToFront();
+      setLegend(payload.label, z0, z1);
+      const spacing = Number.isFinite(payload.grid_deg) ? payload.grid_deg.toFixed(2) + "° cells" : "native grid";
+      setStatus(`${plainLabel(payload.label)} · ${spacing} · ${payload.n_finite} cells · color ${fmt(z0)} to ${fmt(z1)}`);
+    }
+
+    function nearestCell(latlng) {
+      const payload = state.field;
+      const values = state.values;
+      if (!payload || !values) return null;
+      const lon = payload.lon.map(Number);
+      const lat = payload.lat.map(Number);
+      let lonWant = latlng.lng;
+      while (lonWant < -180) lonWant += 360;
+      while (lonWant > 180) lonWant -= 360;
+      let ix = 0, iy = 0, bestX = Infinity, bestY = Infinity;
+      for (let i = 0; i < lon.length; i++) {
+        const d = Math.abs(lon[i] - lonWant);
+        const wrap = Math.min(d, 360 - d);
+        if (wrap < bestX) { bestX = wrap; ix = i; }
+      }
+      for (let j = 0; j < lat.length; j++) {
+        const d = Math.abs(lat[j] - latlng.lat);
+        if (d < bestY) { bestY = d; iy = j; }
+      }
+      const v = values[iy * lon.length + ix];
+      return { lat: lat[iy], lon: lon[ix], value: v };
+    }
+
+    map.on("click", (e) => {
+      const cell = nearestCell(e.latlng);
+      const box = document.getElementById("cell-readout");
+      if (!cell) {
+        box.textContent = "Load a field, then click a cell.";
+        return;
+      }
+      const text = `lat ${cell.lat.toFixed(2)} · lon ${cell.lon.toFixed(2)} · value ${fmt(cell.value)}`;
+      box.textContent = text;
+      state.pickedCell = cell;
+      const read = document.getElementById("cycle-readout");
+      if (read) read.textContent = text;
+    });
+
+    async function syncPipeline() {
+      const panel = document.getElementById("pipeline-panel");
+      const on = document.getElementById("show-pipeline").checked;
+      panel.hidden = !on;
+      if (!on) return;
+      if (!state.pipelineNodes) {
+        const res = await fetch("/api/pipeline");
+        if (!res.ok) throw new Error(await res.text());
+        state.pipelineNodes = (await res.json()).nodes;
+      }
+      const byId = Object.fromEntries(state.pipelineNodes.map((n) => [n.id, n]));
+      const rows = [
+        ["spex_l2", "spex_regrid"],
+        ["polder"],
+        ["ensemble", "icon"],
+        ["regional", "polygons"],
+        ["figures"],
+      ];
+      const flow = document.getElementById("pipeline-flow");
+      flow.innerHTML = "";
+      rows.forEach((ids, rowIndex) => {
+        if (rowIndex) {
+          const arrow = document.createElement("div");
+          arrow.className = "flow-arrow";
+          arrow.textContent = "↓";
+          flow.appendChild(arrow);
+        }
+        const row = document.createElement("div");
+        row.style.display = "grid";
+        row.style.gridTemplateColumns = `repeat(${ids.length}, 1fr)`;
+        row.style.gap = "6px";
+        for (const id of ids) {
+          const node = byId[id];
+          if (!node) continue;
+          const box = document.createElement("div");
+          box.className = "flow-box";
+          box.title = node.path;
+          box.innerHTML = `<strong>${node.label}</strong><small>${node.path}</small>`;
+          box.addEventListener("click", () => {
+            copyText(node.path).then(() => setStatus(`Copied ${node.label}`));
+          });
+          row.appendChild(box);
+        }
+        flow.appendChild(row);
+      });
+    }
+
+    function renderField(payload) {
+      state.field = payload;
+      state.values = decodeField(payload.values_b64, payload.shape[0], payload.shape[1]);
+      const keep = document.getElementById("ckeep").checked && colorLimits();
+      if (!keep) {
+        document.getElementById("cmin").value = String(payload.zmin);
+        document.getElementById("cmax").value = String(payload.zmax);
+      }
+      paintField();
+    }
+
+    function applyColorInputs() {
+      paintField();
+    }
+
+    function drawBoxes() {
+      if (state.boxLayer) {
+        map.removeLayer(state.boxLayer);
+        state.boxLayer = null;
+      }
+      state.boxLayer = L.layerGroup();
+      for (const r of Object.values(state.boxes)) {
+        for (const shift of [-360, 0, 360]) {
+          const latlngs = r.ring.map(([lon, lat]) => [lat, lon + shift]);
+          L.polygon(latlngs, {
+            color: "#ffffff",
+            weight: 4.5,
+            opacity: 0.9,
+            fill: false,
+            pane: "borders",
+            interactive: false,
+          }).addTo(state.boxLayer);
+          L.polygon(latlngs, {
+            color: r.color || "#ff00aa",
+            weight: 2.2,
+            opacity: 1,
+            fill: false,
+            pane: "borders",
+          }).bindTooltip(r.name, { sticky: true }).addTo(state.boxLayer);
+        }
+      }
+      state.boxLayer.addTo(map);
+      const list = document.getElementById("box-list");
+      list.innerHTML = "";
+      for (const name of Object.keys(state.boxes)) {
+        const li = document.createElement("li");
+        const span = document.createElement("span");
+        span.textContent = name;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "Remove";
+        btn.addEventListener("click", () => {
+          delete state.boxes[name];
+          drawBoxes();
+        });
+        li.appendChild(span);
+        li.appendChild(btn);
+        list.appendChild(li);
+      }
+    }
+
+    function currentDataset() {
+      return document.getElementById("dataset").value;
+    }
+
+    function currentDs() {
+      return state.meta.datasets.find((d) => d.id === currentDataset());
+    }
+
+    function selectedMonths() {
+      return [...state.months].sort((a, b) => a - b);
+    }
+
+    function paintMonths() {
+      const box = document.getElementById("months");
+      box.innerHTML = "";
+      const available = new Set(currentDs().months || []);
+      for (let m = 1; m <= 12; m++) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = MONTHS[m - 1];
+        btn.disabled = !available.has(m);
+        if (state.months.has(m)) btn.classList.add("on");
+        btn.addEventListener("click", () => {
+          if (state.months.has(m)) state.months.delete(m);
+          else state.months.add(m);
+          paintMonths();
+        });
+        box.appendChild(btn);
+      }
+    }
+
+    function selectAnnual() {
+      state.months = new Set(currentDs().months || []);
+      paintMonths();
+    }
+
+    async function loadGeo(url, style) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(url + " " + res.status);
+      const gj = await res.json();
+      return L.geoJSON(gj, { pane: "borders", style }).addTo(map);
+    }
+
+    async function syncBorders() {
+      const wantCoast = document.getElementById("show-coast").checked;
+      const wantCountries = document.getElementById("show-countries").checked;
+      if (wantCoast && !state.coastLayer) {
+        state.coastLayer = await loadGeo("/static/geo/coastline.geojson", {
+          color: "#e7ecf3", weight: 1, fill: false,
+        });
+      }
+      if (!wantCoast && state.coastLayer) {
+        map.removeLayer(state.coastLayer);
+        state.coastLayer = null;
+      }
+      if (wantCountries && !state.countryLayer) {
+        state.countryLayer = await loadGeo("/static/geo/countries.geojson", {
+          color: "#9aa8bc", weight: 0.6, fill: false,
+        });
+      }
+      if (!wantCountries && state.countryLayer) {
+        map.removeLayer(state.countryLayer);
+        state.countryLayer = null;
+      }
+    }
+
+    function fillVariables() {
+      const dsId = currentDataset();
+      const ds = state.meta.datasets.find((d) => d.id === dsId);
+      const sel = document.getElementById("variable");
+      const prev = sel.value;
+      sel.innerHTML = "";
+      for (const v of ds.variables) {
+        const meta = state.meta.variables.find((x) => x.id === v) || { id: v, label: v };
+        const opt = document.createElement("option");
+        opt.value = v;
+        opt.textContent = meta.label.replace(/\$|\{|\}/g, "") + ` (${v})`;
+        sel.appendChild(opt);
+      }
+      if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    }
+
+    function fillMembers() {
+      const ds = currentDs();
+      const sel = document.getElementById("member");
+      const slow = ds.id === "icon2025" ? " (slow first time)" : "";
+      sel.innerHTML = `<option value="">Ensemble mean${slow}</option>`;
+      for (const m of (ds.members || [])) {
+        const opt = document.createElement("option");
+        opt.value = String(m);
+        opt.textContent = m < 0 ? "Control" : `ens ${m}`;
+        sel.appendChild(opt);
+      }
+      sel.disabled = ds.kind !== "ppe";
+      if (ds.default_member != null && [...sel.options].some((o) => o.value === String(ds.default_member))) {
+        sel.value = String(ds.default_member);
+      }
+      document.getElementById("note").textContent = ds.note || "";
+    }
+
+    function fillModels() {
+      const wrap = document.getElementById("model-wrap");
+      const spexWrap = document.getElementById("spex-wrap");
+      const ds = currentDs();
+      const isAero = ds && ds.kind === "aerocom";
+      const isSpex = ds && ds.id === "spexone";
+      wrap.style.display = isAero ? "block" : "none";
+      spexWrap.style.display = isSpex ? "block" : "none";
+      const sel = document.getElementById("model");
+      sel.innerHTML = "";
+      if (isAero) {
+        for (const m of ds.models || []) {
+          const opt = document.createElement("option");
+          opt.value = m;
+          opt.textContent = m;
+          sel.appendChild(opt);
+        }
+      }
+      if (isSpex) {
+        const resSel = document.getElementById("spex-res");
+        const have = new Set((ds.resolutions || [1]).map(Number));
+        for (const opt of resSel.options) {
+          opt.disabled = !have.has(Number(opt.value));
+        }
+        const first = [...have].sort((a, b) => b - a)[0];
+        if (first != null) resSel.value = String(first);
+        if (!ds.native_available) {
+          document.getElementById("spex-mode").value = "regridded";
+        }
+      }
+    }
+
+    function fillBoxes() {
+      const sel = document.getElementById("box-pick");
+      sel.innerHTML = "";
+      for (const r of state.meta.regions) {
+        const opt = document.createElement("option");
+        opt.value = r.name;
+        const season = (r.season_months || []).join(",");
+        opt.textContent = `${r.name} · ${r.surface_type} · months ${season}`;
+        sel.appendChild(opt);
+      }
+    }
+
+    async function loadMeta() {
+      setStatus("Loading metadata…");
+      const res = await fetch("/api/meta");
+      if (!res.ok) throw new Error(await res.text());
+      state.meta = await res.json();
+      const dsSel = document.getElementById("dataset");
+      dsSel.innerHTML = "";
+      for (const d of state.meta.datasets) {
+        const opt = document.createElement("option");
+        opt.value = d.id;
+        opt.textContent = d.label;
+        dsSel.appendChild(opt);
+      }
+      fillBoxes();
+      fillModels();
+      fillVariables();
+      fillMembers();
+      selectAnnual();
+      setStatus("Ready.");
+      if (document.getElementById("show-pipeline").checked) {
+        syncPipeline().catch((e) => setStatus(e.message));
+      }
+      syncBorders().catch((e) => setStatus("Border layer: " + e.message));
+    }
+
+    async function loadField() {
+      const btn = document.getElementById("load-btn");
+      btn.disabled = true;
+      setStatus("Loading field…");
+      try {
+        const ds = currentDataset();
+        const months = selectedMonths();
+        if (!months.length) throw new Error("Select at least one month, or Annual mean.");
+        const params = new URLSearchParams({
+          dataset: ds,
+          var: document.getElementById("variable").value,
+          months: months.join(","),
+        });
+        const ens = document.getElementById("member").value;
+        if (ens !== "") params.set("ens", ens);
+        if (ds === "aerocom") params.set("model", document.getElementById("model").value);
+        if (ds === "spexone") {
+          params.set("spex_mode", document.getElementById("spex-mode").value);
+          params.set("spex_res", document.getElementById("spex-res").value);
+          params.set("spex_year", document.getElementById("spex-year").value);
+        }
+        const res = await fetch("/api/field?" + params.toString());
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || res.statusText);
+        }
+        const payload = await res.json();
+        renderField(payload);
+      } catch (e) {
+        setStatus("Error: " + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function computeMean() {
+      if (!state.ring) return;
+      const btn = document.getElementById("mean-btn");
+      btn.disabled = true;
+      setStatus("Computing regional mean…");
+      try {
+        const ds = currentDataset();
+        const months = selectedMonths();
+        if (!months.length) throw new Error("Select at least one month, or Annual mean.");
+        const body = {
+          dataset: ds,
+          var: document.getElementById("variable").value,
+          months: months,
+          surface_type: document.getElementById("surface").value,
+          ring: state.ring,
+        };
+        const ens = document.getElementById("member").value;
+        if (ens !== "") body.ens = Number(ens);
+        if (ds === "aerocom") body.model = document.getElementById("model").value;
+        const res = await fetch("/api/region_mean", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || res.statusText);
+        }
+        const r = await res.json();
+        let text = `${r.label}\ncells kept: ${r.n_cells}\nsurface: ${r.surface_type}\nmean: ${fmt(r.mean)}`;
+        if (r.n_members) {
+          text += `\nmembers: ${r.n_members}`
+            + `\nmedian: ${fmt(r.median)}`
+            + `\n5–95%: ${fmt(r.p05)} – ${fmt(r.p95)}`
+            + `\nmin–max: ${fmt(r.min)} – ${fmt(r.max)}`;
+        }
+        document.getElementById("result").textContent = text;
+        setStatus("Regional mean ready.");
+      } catch (e) {
+        setStatus("Error: " + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById("dataset").addEventListener("change", () => {
+      fillModels();
+      fillVariables();
+      fillMembers();
+      selectAnnual();
+    });
+    document.getElementById("annual-btn").addEventListener("click", selectAnnual);
+    document.getElementById("show-coast").addEventListener("change", () => {
+      syncBorders().catch((e) => setStatus(e.message));
+    });
+    document.getElementById("show-countries").addEventListener("change", () => {
+      syncBorders().catch((e) => setStatus(e.message));
+    });
+    document.getElementById("show-pipeline").addEventListener("change", () => {
+      syncPipeline().catch((e) => setStatus(e.message));
+    });
+    document.getElementById("flow-btn").addEventListener("click", () => {
+      document.getElementById("show-pipeline").checked = true;
+      syncPipeline().catch((e) => setStatus(e.message));
+    });
+    document.getElementById("validate-btn").addEventListener("click", () => {
+      const names = Object.keys(state.boxes);
+      const q = names.length ? ("?region=" + encodeURIComponent(names[0])) : "";
+      window.open("/validate" + q, "model-vs-obs", "width=980,height=760");
+    });
+    document.getElementById("compare-all").addEventListener("click", async () => {
+      const month = state.pickedMonth || (selectedMonths()[0] || 1);
+      const region = Object.keys(state.boxes)[0] || state.savedName || "";
+      const body = {
+        var: document.getElementById("variable").value,
+        month,
+        region,
+        ring: state.ring,
+        surface_type: document.getElementById("surface").value,
+      };
+      document.getElementById("compare-list").textContent = "Comparing…";
+      try {
+        const res = await fetch("/api/compare", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || res.statusText);
+        }
+        const payload = await res.json();
+        const lines = payload.rows.map((r) =>
+          `${r.label}: ${fmt(r.value)}` + (r.n ? ` (n=${r.n})` : "") + (r.note ? ` — ${r.note}` : "")
+        );
+        document.getElementById("compare-list").textContent =
+          `${payload.var} · ${MONTHS[payload.month - 1]} · ${payload.where}\n` + lines.join("\n");
+      } catch (e) {
+        document.getElementById("compare-list").textContent = e.message;
+      }
+    });
+    document.getElementById("pipeline-close").addEventListener("click", () => {
+      document.getElementById("show-pipeline").checked = false;
+      document.getElementById("pipeline-panel").hidden = true;
+    });
+    document.getElementById("add-pipeline").addEventListener("click", async () => {
+      if (!state.savedSlug) {
+        setStatus("Save the polygon and wait for the aggregate to finish.");
+        return;
+      }
+      const btn = document.getElementById("add-pipeline");
+      btn.disabled = true;
+      setStatus("Adding polygon to extra_regions.csv and the regional parquet…");
+      try {
+        const res = await fetch("/api/pipeline/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            slug: state.savedSlug,
+            species: ["du", "ss", "bb", "total", "marine"],
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || res.statusText);
+        }
+        const out = await res.json();
+        setStatus(`Registered “${out.name}” in ${out.csv}`);
+        await loadMeta();
+      } catch (e) {
+        setStatus("Error: " + e.message);
+        btn.disabled = false;
+      }
+    });
+    document.getElementById("spex-regrid-btn").addEventListener("click", async () => {
+      const body = {
+        year: Number(document.getElementById("spex-year").value),
+        res: Number(document.getElementById("spex-res").value),
+      };
+      setStatus(`Submitting SPEXone ${body.res}° regrid for ${body.year}…`);
+      try {
+        const res = await fetch("/api/spex_regrid", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || res.statusText);
+        }
+        const job = await res.json();
+        setStatus(job.message || "SPEXone regrid submitted.");
+      } catch (e) {
+        setStatus("Error: " + e.message);
+      }
+    });
+    document.getElementById("add-box").addEventListener("click", () => {
+      const name = document.getElementById("box-pick").value;
+      const region = state.meta.regions.find((r) => r.name === name);
+      if (!region) return;
+      state.boxes[name] = region;
+      drawBoxes();
+    });
+    document.getElementById("plots-btn").addEventListener("click", () => {
+      const names = Object.keys(state.boxes);
+      const q = names.length ? ("?regions=" + encodeURIComponent(names.join(","))) : "";
+      const extra = state.savedSlug ? ((q ? "&" : "?") + "custom=" + encodeURIComponent(state.savedSlug)) : "";
+      window.open("/plots" + q + extra, "aggregate-plots", "width=1100,height=800");
+    });
+    async function saveFigure() {
+      if (!state.field) throw new Error("Load a map first.");
+      const limits = colorLimits();
+      if (!limits) throw new Error("Set a color minimum and maximum first.");
+      const months = selectedMonths();
+      if (!months.length) throw new Error("Select at least one month.");
+      const rings = Object.values(state.boxes).map((r) => ({
+        ring: r.ring, color: r.color || "#ff00aa", name: r.name,
+      }));
+      if (state.ring) rings.push({ ring: state.ring, color: "#ffffff", name: "drawn" });
+      const body = {
+        dataset: currentDataset(),
+        var: document.getElementById("variable").value,
+        months,
+        rings,
+        vmin: limits[0],
+        vmax: limits[1],
+      };
+      const ens = document.getElementById("member").value;
+      if (ens !== "") body.ens = Number(ens);
+      if (currentDataset() === "aerocom") body.model = document.getElementById("model").value;
+      setStatus("Saving figure…");
+      const res = await fetch("/api/figure.png", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || res.statusText);
+      }
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      const when = months.map((m) => "JFMAMJJASOND"[m - 1]).join("");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${body.dataset}_${body.var}_${when}.png`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setStatus("Figure saved.");
+    }
+
+    document.getElementById("load-btn").addEventListener("click", loadField);
+    document.getElementById("save-fig").addEventListener("click", () => {
+      saveFigure().catch((e) => setStatus("Error: " + e.message));
+    });
+    document.getElementById("cmin").addEventListener("change", applyColorInputs);
+    document.getElementById("cmax").addEventListener("change", applyColorInputs);
+    document.getElementById("creset").addEventListener("click", () => {
+      if (!state.field) return;
+      document.getElementById("ckeep").checked = false;
+      document.getElementById("cmin").value = String(state.field.zmin);
+      document.getElementById("cmax").value = String(state.field.zmax);
+      paintField();
+    });
+    document.getElementById("mean-btn").addEventListener("click", computeMean);
+    document.getElementById("clear-btn").addEventListener("click", () => {
+      drawnItems.clearLayers();
+      setRing(null);
+      document.getElementById("result").textContent = "Draw a polygon, then click “Mean of drawn polygon”.";
+    });
+    document.getElementById("save-poly-btn").addEventListener("click", () => {
+      savePolygon().catch((e) => setStatus("Error: " + e.message));
+    });
+    document.getElementById("cycle-btn").addEventListener("click", () => {
+      showAnnual().catch((e) => setStatus("Error: " + e.message));
+    });
+    document.getElementById("job-local").addEventListener("click", () => {
+      launchJob("local").catch((e) => setStatus("Error: " + e.message));
+    });
+    document.getElementById("job-slurm").addEventListener("click", () => {
+      launchJob("slurm").catch((e) => setStatus("Error: " + e.message));
+    });
+    document.getElementById("saved-poly").addEventListener("change", (ev) => {
+      const name = ev.target.value;
+      if (!name || !state.saved[name]) return;
+      showRingOnMap(state.saved[name].map((p) => p.slice()));
+    });
+
+    loadMeta().then(() => loadField()).catch((e) => setStatus("Init error: " + e.message));
+  </script>
+</body>
+</html>

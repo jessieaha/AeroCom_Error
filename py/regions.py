@@ -11,8 +11,10 @@ Longitudes are 0..360; a lon_range with lon0 > lon1 wraps across 0E.
 from __future__ import annotations
 
 import calendar
+import csv
 import hashlib
 import json
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 ALL_MONTHS = tuple(range(1, 13))
@@ -104,29 +106,28 @@ REGIONS: Dict[str, dict] = {
     ),
     # --- Mineral dust (primary dust seasons) ---
     "sahara": dict(
-        surface_type="land", lon_range=(343, 30), lat_range=(15, 30),
+        surface_type="land", lon_range=(342, 30), lat_range=(13, 30),
         season_months=(6, 7, 8), edge_weighted=False,
         species=("du",), role="source", color="#d4a017",
-        note="Western/central Sahara incl. Sahel border; JJA peak of the Saharan Air Layer.",
+        note="Sahara 18°W–30°E (lon 342–30), 13–30°N, land only. JJA.",
     ),
     "australia": dict(
-        surface_type="land", lon_range=(130, 145), lat_range=(-32, -22),
+        surface_type="land", lon_range=(115, 145), lat_range=(-32, -18),
         season_months=(9, 10, 11, 12, 1, 2), edge_weighted=False,
         species=("du",), role="source", color="#8c564b",
-        note="Lake Eyre basin; austral spring-summer (SON+DJF) dust season.",
+        note="Australia 115–145°E, 32–18°S, land only. Austral spring–summer.",
     ),
     "atacama": dict(
-        surface_type="land", lon_range=(288, 294), lat_range=(-28, -18),
+        surface_type="land", lon_range=(288, 300), lat_range=(-32, -20),
         season_months=(8, 9, 10, 11), edge_weighted=False,
         species=("du",), role="source", color="#9467bd",
-        note=("Atacama / Altiplano salars; only ~3x5 T63 cells, so regional means "
-              "are noisy and the box includes Andean terrain."),
+        note="Atacama / Altiplano, 72–60°W (lon 288–300), 32–20°S, land only. ASON.",
     ),
     "outflow_sahara": dict(
-        surface_type="ocean", lon_range=(330, 343), lat_range=(10, 25),
+        surface_type="ocean", lon_range=(310, 342), lat_range=(13, 30),
         season_months=(6, 7, 8), edge_weighted=True,
         species=("du",), role="outflow", source="sahara", color="#1f77b4",
-        note="Tropical North Atlantic off West Africa; dust outflow box.",
+        note="Atlantic 50°W–18°W (lon 310–342), 13–30°N, meeting the Sahara box at lon 342. Ocean only. JJA.",
     ),
 }
 
@@ -333,3 +334,48 @@ def definition_hash(names: Optional[Sequence[str]] = None) -> str:
     }
     blob = json.dumps(payload, sort_keys=True, default=list).encode()
     return hashlib.sha1(blob).hexdigest()[:12]
+
+
+EXTRA_REGIONS_CSV = (
+    Path(__file__).resolve().parent.parent / "Data" / "PPE_regional" / "extra_regions.csv"
+)
+
+
+def load_extra_regions(path: Optional[Path] = None) -> None:
+    """Merge dashboard-registered boxes into ``REGIONS``.
+
+    The CSV is the place a drawn polygon is stored. Built-in boxes stay in this
+    file; a row with the same name replaces only that extra entry on reload.
+    """
+    path = Path(path) if path else EXTRA_REGIONS_CSV
+    if not path.is_file():
+        return
+    with path.open(newline="") as handle:
+        for row in csv.DictReader(handle):
+            name = (row.get("name") or "").strip()
+            if not name:
+                continue
+            months_raw = (row.get("season_months") or "").replace(";", ",")
+            months = tuple(int(x) for x in months_raw.split(",") if x.strip())
+            species = tuple(
+                s.strip() for s in (row.get("species") or "du,ss,bb").replace(";", ",").split(",")
+                if s.strip()
+            )
+            cfg = dict(
+                surface_type=(row.get("surface_type") or "all").strip() or "all",
+                lon_range=(float(row["lon0"]), float(row["lon1"])),
+                lat_range=(float(row["lat0"]), float(row["lat1"])),
+                season_months=months or ALL_MONTHS,
+                edge_weighted=False,
+                species=species or ("du", "ss", "bb"),
+                role=(row.get("role") or "source").strip() or "source",
+                color=(row.get("color") or "#ff00aa").strip() or "#ff00aa",
+                note=(row.get("note") or "drawn polygon from the dashboard").strip(),
+            )
+            ring = (row.get("ring") or "").strip()
+            if ring:
+                cfg["ring"] = json.loads(ring)
+            REGIONS[name] = cfg
+
+
+load_extra_regions()

@@ -117,6 +117,7 @@ def scatter_by_region(
     obs_y: Optional[Mapping[Tuple[str, str], Tuple[float, str]]] = None,
     ylabel: Optional[str] = None,
     extra: Optional[Callable] = None,
+    region_titles: Optional[Mapping[str, str]] = None,
 ):
     """One panel per region; PPE clouds + fits, AeroCom diamonds, obs lines.
 
@@ -144,6 +145,7 @@ def scatter_by_region(
         if aerocom_df is not None and not aerocom_df.empty:
             xa, ya = xy(aerocom_df, region, xcol, aerocom_ycol or ycol, inverse_y)
             if len(xa):
+                n_drawn += len(xa)
                 ax.scatter(xa, ya, label=f"{AEROCOM_LABEL} (n={len(xa)})", **AEROCOM_STYLE)
                 if len(xa) >= 3:
                     s, i, r2 = fit_line(xa, ya, through_origin)
@@ -159,7 +161,8 @@ def scatter_by_region(
                        lw=1.2, label=lab)
         if extra is not None:
             extra(ax, region)
-        ax.set_title(region if n_drawn else f"{region}: no data", fontsize=11)
+        shown = (region_titles or {}).get(region, region)
+        ax.set_title(shown if n_drawn else f"{shown}: no data", fontsize=11)
         ax.set_xlabel(labels.get(xcol, xcol))
         ax.set_ylabel(ylabel or labels.get(f"inv_{ycol}" if inverse_y else ycol, ycol))
         ax.grid(True, alpha=0.3)

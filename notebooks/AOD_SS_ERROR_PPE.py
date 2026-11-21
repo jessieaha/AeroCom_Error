@@ -68,8 +68,9 @@ SPECIES = "ss"
 PPE_IDS: List[str] = ["pd2024", "pd2010", "icon2025"]
 EXCLUDE_MEMBERS: List[str] = []  # e.g. ["Control"] or ["pd2010:17"]
 
-# South Atlantic (SOND) and the remote South Pacific DJF box.
-_REGION_ORDER = ["SAO_SOND", "SPO_DJF"]
+# South Atlantic (SOND), the remote South Pacific DJF box, and the subtropical
+# Pacific AMJ polygon (April–June mean in the seasonal table).
+_REGION_ORDER = ["SAO_SOND", "SPO_DJF", "STPO_AMJ"]
 SOURCE_REGIONS = reg.source_regions(SPECIES)
 ANALYSIS_REGIONS = [r for r in _REGION_ORDER if r in SOURCE_REGIONS]
 
@@ -647,6 +648,22 @@ boxes.plot_study_map(
     title="PPE 2024 ensemble-mean sea-salt AOD$_{550}$ (DJF)",
     cbar_label=r"AOD$_{SS,550}$ [-]",
     filename=FIGURE_DIR / "ppe2024_seasalt_AOD_DJF_curved.png",
+)
+
+# Same layout as the dust Robinson map: full annual field, active boxes outlined.
+import cartopy.crs as ccrs
+_ss_annual = boxes.ensemble_mean_aod("pd2024", ["od550ss"])
+_ss_boxes = boxes.region_boxes(ANALYSIS_REGIONS)
+_ss_finite = np.asarray(_ss_annual.values, float)
+_ss_finite = _ss_finite[np.isfinite(_ss_finite)]
+_ss_z0 = float(np.nanpercentile(_ss_finite, 2))
+_ss_z1 = float(np.nanpercentile(_ss_finite, 98))
+boxes.plot_world_field(
+    _ss_annual, _ss_boxes, ccrs.Robinson(),
+    "PPE 2024 ensemble-mean sea-salt AOD$_{550}$, annual",
+    r"AOD$_{SS,550}$ [-]",
+    FIGURE_DIR / "ppe2024_seasalt_AOD550_global_sphere.png",
+    zmin=_ss_z0, zmax=_ss_z1,
 )
 
 print("\nDone.")

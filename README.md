@@ -74,6 +74,46 @@ Lifetimes are burden divided by emission after the regional mean. Sea salt plus 
 
 Boxed regional maps use `cameo_toolbox.fake_uba_map` through `plot_boxed_field` (Plate Carrée, so the rectangles stay straight). Maps with no analysis box use `uba_map_flex(..., projection_type="curved")` through `plot_curved_field`.
 
+## Dashboard
+
+A local page draws the monthly fields and the same area-weighted regional mean as the seasonal tables. Leaflet, the draw tool, the coastline and the country borders are stored in the repo, so the page does not download a basemap.
+
+```bash
+cd /home/jzhang1/AeroCom_Error
+PYTHONPATH=py:. .venv-1/bin/python -m uvicorn dashboard.app:app --host 127.0.0.1 --port 8765
+```
+
+From a laptop, `ssh -L 8765:127.0.0.1:8765 <user>@<host>` and open `http://127.0.0.1:8765`.
+
+| Control | What it does |
+| --- | --- |
+| Dataset | `pd2024`, `pd2010`, ICON-HAM 2024–25 (hjia, `icon2025`), one AeroCom model, SPEXone, or POLDER-GRASP 2010 |
+| Months | Annual mean (every month in that dataset) or any subset, averaged together |
+| Member | Ensemble mean, or one PPE member. ICON ensemble mean reads every native-grid member the first time |
+| Land / sea border | Coastline, on by default |
+| Country borders | Optional |
+| Region boxes | Dropdown adds one `py/regions.py` box at a time |
+| Drawn polygon | Area-weighted mean with the land/sea mask. ICON uses native R2B4 cell areas; the picture is a 1° bin |
+| Pipeline paths | Overlay of data-flow boxes; hover shows the absolute path, click copies it |
+| Click map | Latitude, longitude and cell value for the loaded field (field image repeats at lon ±360) |
+| Go to aggregate plots | Opens `/plots` with the boxes on the map. Monthly parquet tables, month choice, MAC/MEC/lifetime spreads, marine/total species, save PNG under `figure/dashboard/` |
+
+SPEXone offers **regridded** (resolution in the filename, e.g. `…_0.5deg_v4_0.parquet`; legacy files without a token are 1°) or **native overpass** from `Data/SPEXone/Extract*L2*`. **Submit SPEXone regrid (SLURM)** runs `dashboard/spex_regrid.sbatch` for 0.1 / 0.5 / 1°. POLDER is the 2010 collocation file, reduced to 1° with the same quality filter as the notebooks. The first request builds `dashboard/cache/`.
+
+A saved polygon has an annual cycle: for each month, the area-weighted spatial mean and the spatial standard deviation inside the box (y-axis labelled). **Annual cycle** uses the dataset and variable currently selected.
+
+**Aggregate on this node** or **Submit SLURM job (32 GB)** runs the full regional aggregate (netCDF4 field reads into `regional_columns`, plus ICON one file at a time) and writes Polars parquet (`{slug}_monthly.parquet` and `{slug}_seasonal.parquet`). The status block shows lon/lat and those paths. The SLURM script is `dashboard/aggregate_box.sbatch`.
+
+| What | Peak memory | What to reserve |
+| --- | --- | --- |
+| Dashboard, maps, one-variable annual cycle | about 2 GB | 8 GB is enough |
+| One ECHAM drawn box, all variables, 8 members at a time | about 4–8 GB | |
+| ICON drawn box, one native file at a time | about 2–4 GB | |
+| pd2024 + pd2010 + ICON together | about 8 GB, with 5 GB of pd2024 NetCDF on disk | **32 GB** |
+| Same job plus a notebook | | **64 GB** |
+
+When the SLURM job finishes, open **Go to aggregate plots**. The drawn name is passed through and the scatter uses the new monthly table.
+
 ## Notebook efficiency
 
 The older attribution scripts used to reopen every model file and repeat time handling, masks and regional means in each file. Those helpers now call `aerocom_data`, `notebook_setup.aggregate_region` and `ppe_io`. The PPE notebooks read the parquet and only plot. An older notebook can do the same: call `build_regional` once, then keep its attribution algebra.

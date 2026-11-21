@@ -38,12 +38,16 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # =============================================================================
 # SETTINGS
 # =============================================================================
-project_root = Path("/scistor/guest/gbb083/AeroCom")
-SPEXONE_DIR = project_root / "Data" / "SPEXone"
-OUT_DIR = project_root / "Data" / "SPEXone_regridded"
+# Prefer this checkout's Data/ when present; else the guest scistor tree.
+_here = Path(__file__).resolve().parent.parent
+_guest = Path("/scistor/guest/gbb083/AeroCom")
+project_root = _here if (_here / "Data").is_dir() else _guest
+SPEXONE_DIR = Path(os.environ.get("SPEXONE_DIR", project_root / "Data" / "SPEXone"))
+OUT_DIR = Path(os.environ.get("SPEX_OUT_DIR", project_root / "Data" / "SPEXone_regridded"))
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-GRID_RES_DEG = 1.0          # degrees; None to skip spatial binning
+# Grid spacing in degrees (0.1, 0.5, or 1). Override with SPEX_RES or argv[3].
+GRID_RES_DEG = float(os.environ.get("SPEX_RES", "1.0"))
 # Temporal averaging of L2 times into `date` (kept in output):
 #   '3H' (default) → df['date'].dt.round('3H')  — same as interpolate_model_to_spexone
 #   'H','6H','D'   → dt.round(...) for fixed offsets; 'MS'/'M' → monthly period start/end
@@ -69,9 +73,12 @@ MODEL_TIME_ROUND = "3H"
 # Month / year from argv (SLURM-friendly)
 # =============================================================================
 # Prefer argv; fall back to SLURM_ARRAY_TASK_ID for month.
+# argv: <month> <year> [res_deg]
 if len(sys.argv) >= 3:
     month = int(sys.argv[1])
     year = str(sys.argv[2])
+    if len(sys.argv) >= 4:
+        GRID_RES_DEG = float(sys.argv[3])
 elif len(sys.argv) == 2:
     month = int(sys.argv[1])
     year = os.environ.get("SPEX_YEAR", "2025")
@@ -79,18 +86,23 @@ elif "SLURM_ARRAY_TASK_ID" in os.environ:
     month = int(os.environ["SLURM_ARRAY_TASK_ID"])
     year = os.environ.get("SPEX_YEAR", "2025")
 else:
-    print("Usage: python SPEXone_regrid_model.py <month> <year>")
-    print("   or: SPEX_YEAR=2025 sbatch --array=1-12 ... (uses SLURM_ARRAY_TASK_ID)")
+    print("Usage: python SPEXone_regrid_model.py <month> <year> [res_deg]")
+    print("   or: SPEX_YEAR=2025 SPEX_RES=0.5 sbatch --array=1-12 ...")
     sys.exit(1)
 
 if not (1 <= month <= 12):
     print(f"Error: month must be 1–12, got {month}")
     sys.exit(1)
 
+# Pretty resolution token for the filename (1 → 1, 0.5 → 0.5, 0.1 → 0.1).
+_res_token = f"{GRID_RES_DEG:g}"
+
 spex_files = sorted(
     glob.glob(str(SPEXONE_DIR / f"Extract*L2*{year}_{month:02d}*v4.0.parquet"))
 )
-output_parquet = str(OUT_DIR / f"SPEXone_L2_regridded_{year}_{month:02d}_v4_0.parquet")
+output_parquet = str(
+    OUT_DIR / f"SPEXone_L2_regridded_{year}_{month:02d}_{_res_token}deg_v4_0.parquet"
+)
 
 print(f"Year={year} month={month:02d}")
 print(f"Input files ({len(spex_files)}): {spex_files}")

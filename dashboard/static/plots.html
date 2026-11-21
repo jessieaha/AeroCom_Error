@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Aggregate plots</title>
+  <style>
+    :root { --bg: #0f1419; --panel: #1a2332; --border: #2d3a4d; --text: #e7ecf3; --muted: #9aa8bc; --accent: #3d8bfd; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    header { padding: 14px 18px; background: var(--panel); border-bottom: 1px solid var(--border); }
+    header h1 { font-size: 1.1rem; margin: 0 0 6px; }
+    header p { margin: 0; color: var(--muted); font-size: 0.85rem; max-width: 70rem; }
+    #controls { display: flex; flex-wrap: wrap; gap: 16px; padding: 12px 18px; align-items: flex-end; }
+    label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; }
+    select, button { background: #0f1419; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; }
+    button { background: var(--accent); border-color: transparent; font-weight: 600; cursor: pointer; }
+    button.secondary { background: #243044; }
+    #regions { display: flex; flex-wrap: wrap; gap: 8px 14px; max-width: 52rem; }
+    #regions label { color: var(--text); font-size: 0.85rem; margin: 0; display: flex; gap: 6px; align-items: center; }
+    #months { display: flex; flex-wrap: wrap; gap: 4px; }
+    #months button { background: #243044; font-weight: 500; }
+    #months button.on { background: var(--accent); }
+    #status { padding: 0 18px 8px; color: var(--muted); font-size: 0.85rem; }
+    #gallery {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 10px; padding: 0 18px 12px;
+    }
+    #gallery button {
+      background: #0f1419; border: 1px solid var(--border); padding: 6px; text-align: left; font-weight: 500;
+    }
+    #gallery img { width: 100%; height: 140px; object-fit: contain; background: white; display: block; }
+    #gallery span { display: block; color: var(--muted); font-size: 0.72rem; margin-top: 4px; word-break: break-all; }
+    figure { margin: 8px 18px 22px; }
+    figure img { max-width: 100%; background: white; border-radius: 6px; }
+    figcaption { color: var(--muted); font-size: 0.8rem; margin-bottom: 6px; }
+    .species-row { display: flex; align-items: center; gap: 6px; }
+    .info {
+      width: 22px; height: 22px; border-radius: 50%; background: #243044; color: var(--text);
+      border: 1px solid var(--border); font-size: 0.75rem; font-weight: 700; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; padding: 0;
+    }
+    #marine-pop {
+      display: none; position: absolute; z-index: 5; max-width: 22rem; padding: 10px 12px;
+      background: #0f1419; border: 1px solid var(--border); border-radius: 8px;
+      color: var(--muted); font-size: 0.8rem; line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Lifetime and optics (monthly)</h1>
+    <p>
+      Saved figures for the selected species are shown below and are not redrawn.
+      Pick an x column and a y column, then Draw, to make one new scatter.
+    </p>
+  </header>
+  <div id="controls">
+    <div>
+      <label for="species">Species</label>
+      <div class="species-row">
+        <select id="species">
+          <option value="du">Dust</option>
+          <option value="ss">Sea salt</option>
+          <option value="bb">Biomass burning</option>
+          <option value="total">Total column (BC+OA+DU+SS+SO4)</option>
+          <option value="marine">Marine (SS + sulfate)</option>
+        </select>
+        <button type="button" class="info" id="marine-info" title="Marine definition">i</button>
+      </div>
+      <div id="marine-pop"></div>
+    </div>
+    <div>
+      <label for="xcol">X axis</label>
+      <select id="xcol"></select>
+    </div>
+    <div>
+      <label for="ycol">Y axis</label>
+      <select id="ycol"></select>
+    </div>
+    <div>
+      <label for="style">Spread / style</label>
+      <select id="style">
+        <option value="scatter">Scatter</option>
+        <option value="density">Density</option>
+        <option value="ppe_std">PPE median ± 1σ</option>
+        <option value="ppe_minmax">PPE median min–max (drop &gt;3σ)</option>
+        <option value="aerocom_std">AeroCom median ± 1σ</option>
+        <option value="aerocom_minmax">AeroCom median min–max</option>
+        <option value="aerocom_models">Tick AeroCom models</option>
+      </select>
+    </div>
+    <div>
+      <label for="lifetime">Lifetime source</label>
+      <select id="lifetime">
+        <option value="emission">Emission</option>
+        <option value="deposition">Deposition</option>
+      </select>
+    </div>
+    <div>
+      <label>Months</label>
+      <div id="months"></div>
+    </div>
+    <div>
+      <label>Region boxes</label>
+      <div id="regions">Loading…</div>
+    </div>
+    <button id="draw" type="button">Draw this x–y</button>
+    <button id="save" class="secondary" type="button">Save to folder</button>
+  </div>
+  <div id="status"></div>
+  <div id="gallery"></div>
+  <figure id="live" hidden>
+    <figcaption id="caption">Drawn plot</figcaption>
+    <img id="img" alt="aggregate plot" />
+  </figure>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const preset = new Set((params.get("regions") || "").split(",").filter(Boolean));
+    const custom = params.get("custom");
+    if (custom) preset.add(custom);
+    const MONTHS = ["J","F","M","A","M","J","J","A","S","O","N","D"];
+    const state = { months: new Set([1,2,3,4,5,6,7,8,9,10,11,12]) };
+
+    function chosen() {
+      return [...document.querySelectorAll("#regions input:checked")].map((el) => el.value);
+    }
+
+    function setStatus(msg) {
+      document.getElementById("status").textContent = msg || "";
+    }
+
+    function paintMonths() {
+      const box = document.getElementById("months");
+      box.innerHTML = "";
+      const all = document.createElement("button");
+      all.type = "button";
+      all.textContent = "All";
+      all.className = state.months.size === 12 ? "on" : "";
+      all.addEventListener("click", () => {
+        state.months = new Set([1,2,3,4,5,6,7,8,9,10,11,12]);
+        paintMonths();
+      });
+      box.appendChild(all);
+      for (let m = 1; m <= 12; m++) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = MONTHS[m - 1];
+        if (state.months.has(m)) btn.classList.add("on");
+        btn.addEventListener("click", () => {
+          if (state.months.has(m)) state.months.delete(m);
+          else state.months.add(m);
+          paintMonths();
+        });
+        box.appendChild(btn);
+      }
+    }
+
+    async function loadRegions() {
+      const res = await fetch("/api/meta");
+      if (!res.ok) throw new Error(await res.text());
+      const meta = await res.json();
+      const box = document.getElementById("regions");
+      box.innerHTML = "";
+      for (const r of meta.regions) {
+        const label = document.createElement("label");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = r.name;
+        input.checked = preset.size ? preset.has(r.name) : (r.species || []).includes("du");
+        label.appendChild(input);
+        label.appendChild(document.createTextNode(r.name));
+        box.appendChild(label);
+      }
+      if (preset.size) {
+        const first = meta.regions.find((r) => preset.has(r.name));
+        if (first && first.species && first.species[0]) {
+          document.getElementById("species").value = first.species[0];
+        }
+        for (const name of preset) {
+          if (meta.regions.some((r) => r.name === name)) continue;
+          const label = document.createElement("label");
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.value = name;
+          input.checked = true;
+          label.appendChild(input);
+          label.appendChild(document.createTextNode(name + " (drawn)"));
+          box.appendChild(label);
+        }
+      }
+    }
+
+    function fillAxes(columns) {
+      for (const id of ["xcol", "ycol"]) {
+        const sel = document.getElementById(id);
+        const cur = sel.value;
+        sel.innerHTML = "";
+        for (const name of columns) {
+          const opt = document.createElement("option");
+          opt.value = name;
+          opt.textContent = name;
+          sel.appendChild(opt);
+        }
+        if (columns.includes(cur)) sel.value = cur;
+      }
+      const species = document.getElementById("species").value;
+      const prefer = {
+        ss: ["AE", "MEC_ss"], du: ["AE", "MEC_du"], bb: ["1-SSA", "MAC"],
+        total: ["SSA", "od550aer"], marine: ["AE", "lifetime_marine"],
+      }[species] || ["SSA", "od550aer"];
+      if (!document.getElementById("xcol").value) document.getElementById("xcol").value = prefer[0];
+      if (columns.includes(prefer[0])) document.getElementById("xcol").value = prefer[0];
+      if (columns.includes(prefer[1])) document.getElementById("ycol").value = prefer[1];
+    }
+
+    async function loadColumns() {
+      const species = document.getElementById("species").value;
+      const res = await fetch("/api/plot_columns?species=" + encodeURIComponent(species));
+      if (!res.ok) throw new Error(await res.text());
+      fillAxes((await res.json()).columns);
+    }
+
+    async function loadGallery() {
+      const species = document.getElementById("species").value;
+      const box = document.getElementById("gallery");
+      box.innerHTML = "";
+      const res = await fetch("/api/figures?species=" + encodeURIComponent(species));
+      if (!res.ok) throw new Error(await res.text());
+      const figures = (await res.json()).figures;
+      if (!figures.length) {
+        box.textContent = "No saved figures for this species yet.";
+        return;
+      }
+      for (const fig of figures) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.innerHTML = `<img alt="" src="${fig.url}" /><span>${fig.name}</span>`;
+        btn.addEventListener("click", () => {
+          const live = document.getElementById("live");
+          live.hidden = false;
+          document.getElementById("img").src = fig.url;
+          document.getElementById("caption").textContent = fig.name;
+          setStatus("Showing the saved figure. Nothing was recomputed.");
+        });
+        box.appendChild(btn);
+      }
+    }
+
+    function query(save) {
+      const names = chosen();
+      if (!names.length) throw new Error("Select at least one region.");
+      if (!state.months.size) throw new Error("Select at least one month.");
+      const x = document.getElementById("xcol").value;
+      const y = document.getElementById("ycol").value;
+      if (!x || !y) throw new Error("Choose an x column and a y column.");
+      return new URLSearchParams({
+        kind: "xy",
+        species: document.getElementById("species").value,
+        regions: names.join(","),
+        months: [...state.months].sort((a,b)=>a-b).join(","),
+        style: document.getElementById("style").value,
+        lifetime_source: document.getElementById("lifetime").value,
+        x, y,
+        save: save ? "1" : "0",
+      });
+    }
+
+    async function showBlob(res, caption) {
+      const img = document.getElementById("img");
+      const note = res.headers.get("X-Plot-Note") || "";
+      const saved = res.headers.get("X-Saved-Path") || "";
+      const blob = await res.blob();
+      if (img._url) URL.revokeObjectURL(img._url);
+      img._url = URL.createObjectURL(blob);
+      img.src = img._url;
+      document.getElementById("caption").textContent = caption + (note ? " · " + note : "");
+      return saved;
+    }
+
+    async function draw(save) {
+      let q;
+      try { q = query(save); }
+      catch (e) { setStatus(e.message); return; }
+      const caption = `${q.get("y")} vs ${q.get("x")} · ${q.get("style")} · months ${q.get("months")}`;
+      document.getElementById("live").hidden = false;
+      setStatus(save ? "Saving into the species figure folder…" : "Drawing…");
+      try {
+        const res = await fetch("/api/plot.png?" + q.toString());
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || res.statusText);
+        }
+        const saved = await showBlob(res, caption);
+        setStatus(saved ? "Saved " + saved : "Drawn.");
+        if (saved) loadGallery().catch((err) => setStatus(err.message));
+      } catch (e) {
+        setStatus("Plot failed: " + e.message);
+      }
+    }
+
+    document.getElementById("marine-info").addEventListener("click", (e) => {
+      const pop = document.getElementById("marine-pop");
+      pop.textContent =
+        "Marine = sea salt + sulfate. Sulfate source is primary SO₄ plus half of SO₂ and DMS converted by molar mass (SO2_TO_SO4_FRAC × M_SO4/M_SO2 and M_SO4/M_DMS).";
+      pop.style.display = pop.style.display === "block" ? "none" : "block";
+      pop.style.left = e.pageX + "px";
+      pop.style.top = (e.pageY + 8) + "px";
+    });
+    document.getElementById("draw").addEventListener("click", () => draw(false));
+    document.getElementById("save").addEventListener("click", () => draw(true));
+    document.getElementById("species").addEventListener("change", () => {
+      Promise.all([loadColumns(), loadGallery()]).catch((e) => setStatus(e.message));
+    });
+    paintMonths();
+    Promise.all([loadRegions(), loadColumns(), loadGallery()]).catch((e) => setStatus(e.message));
+  </script>
+</body>
+</html>

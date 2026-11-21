@@ -266,6 +266,42 @@ def fake_uba_map(
     return fig
 
 
+def _box_span(lon_range) -> tuple:
+    """West and east edges in a continuous frame (358..30 → −2..30)."""
+    raw0, raw1 = (float(v) for v in lon_range)
+    if raw0 > raw1:
+        return raw0 - 360.0, raw1
+    if raw0 > 180.0:
+        return raw0 - 360.0, raw1 - 360.0
+    return raw0, raw1
+
+
+def box_segments(lon_range) -> list:
+    """Geographic (x0, width) pieces that do not cross 0°E."""
+    west, east = _box_span(lon_range)
+    if west < 0.0 < east:
+        return [(west, -west), (0.0, east)]
+    return [(west, east - west)]
+
+
+def draw_box_outline(ax, lon_range, lat_range, color="magenta", lw=1.5, ls="-"):
+    """Box outline with no stroke along the prime meridian.
+
+    A box that crosses 0°E is two horizontal runs, not two rectangles, so the
+    shared edge at longitude 0 is not drawn.
+    """
+    west, east = _box_span(lon_range)
+    lat0, lat1 = min(float(v) for v in lat_range), max(float(v) for v in lat_range)
+    kw = dict(color=color, lw=lw, ls=ls, transform=ccrs.PlateCarree(),
+              zorder=5, solid_capstyle="butt")
+    ax.plot([west, west], [lat0, lat1], **kw)
+    ax.plot([east, east], [lat0, lat1], **kw)
+    spans = [(west, 0.0), (0.0, east)] if west < 0.0 < east else [(west, east)]
+    for a, b in spans:
+        ax.plot([a, b], [lat0, lat0], **kw)
+        ax.plot([a, b], [lat1, lat1], **kw)
+
+
 def box_central_longitude(lon_range) -> float:
     """Mid-longitude of a box in 0..360 (handles wrap across 0°E)."""
     lo0, lo1 = float(lon_range[0]), float(lon_range[1])
@@ -312,25 +348,29 @@ def plot_boxed_field(
             lo0, lo1 = box["lon_range"]
             if lo0 > lo1:
                 central_longitude = box_central_longitude((lo0, lo1))
-                # display in [-180, 180] around that centre
                 if central_longitude > 180:
                     central_longitude = central_longitude - 360.0
                 break
     if central_longitude is None:
         central_longitude = 0.0
 
-    # Re-express longitudes relative to the map centre in [-180, 180]
-    lon_plot = (lon - central_longitude + 180.0) % 360.0 - 180.0
-    order = np.argsort(lon_plot)
-    lon_plot = lon_plot[order]
+    # Keep geographic longitudes. The projection centre only moves the view;
+    # shifting the array here drew the field and the boxes off the coastlines.
+    lon = np.mod(lon, 360.0)
+    order = np.argsort(lon)
+    lon = lon[order]
     data = data[:, order]
+
+    def _lon180(values):
+        return (np.asarray(values, dtype=float) + 180.0) % 360.0 - 180.0
 
     if extent is not None:
         lon0, lon1, lat0, lat1 = extent
-        # extent is already in the display frame when caller passes local coords
-        lon_ok = (lon_plot >= lon0) & (lon_plot <= lon1) if lon0 <= lon1 else (lon_plot >= lon0) | (lon_plot <= lon1)
+        lon_ok = (_lon180(lon) >= min(lon0, lon1)) & (_lon180(lon) <= max(lon0, lon1))
+        if lon0 > lon1:
+            lon_ok = (_lon180(lon) >= lon0) | (_lon180(lon) <= lon1)
         lat_ok = (lat >= min(lat0, lat1)) & (lat <= max(lat0, lat1))
-        shown = data[np.ix_(lat_ok, lon_ok)]
+        shown = data[np.ix_(lat_ok, lon_ok)] if lon_ok.any() and lat_ok.any() else data
         finite = shown[np.isfinite(shown)]
     else:
         finite = data[np.isfinite(data)]
@@ -342,40 +382,34 @@ def plot_boxed_field(
         zmin, zmax = 0.0, 1.0
 
     fig = fake_uba_map(
-        lon=lon_plot, lat=lat, c_array=data, zmin=zmin, zmax=zmax,
+        lon=lon, lat=lat, c_array=data, zmin=zmin, zmax=zmax,
         labels=cbar_label, title=title, region_boxes=None,
         cbar_orientation="vertical", cbar_extend="both",
-        show=False, savefile=None, central_longitude=0.0,
+        show=False, savefile=None, central_longitude=central_longitude,
         land_facecolor=land_facecolor, use_cell_edges=True, mycolor=mycolor,
     )
     ax = fig.axes[0]
     for box in boxes or []:
-        raw0, raw1 = box["lon_range"]
-        blat0, blat1 = box["lat_range"]
-        x0 = (raw0 - central_longitude + 180.0) % 360.0 - 180.0
-        width = (raw1 + 360.0 - raw0) if raw0 > raw1 else (raw1 - raw0)
-        rects = [(x0, width)]
-        for x0, width in rects:
-            ax.add_patch(_Rectangle(
-                (x0, min(blat0, blat1)), width, abs(blat1 - blat0),
-                fill=False, edgecolor=box.get("color", "magenta"),
-                linewidth=box.get("lw", 1.5), linestyle=box.get("ls", "--"),
-                transform=ccrs.PlateCarree(), zorder=5,
-            ))
+        blat0, blat1 = (float(v) for v in box["lat_range"])
+        draw_box_outline(
+            ax, box["lon_range"], box["lat_range"],
+            color=box.get("color", "magenta"), lw=box.get("lw", 1.5),
+            ls=box.get("ls", "-"),
+        )
         label = box.get("label")
-        if label and rects:
-            x0, width = rects[0]
+        if label:
+            west, east = _box_span(box["lon_range"])
             if box.get("label_below"):
                 y, va = min(blat0, blat1) - 0.8, "top"
             else:
                 y, va = max(blat0, blat1) + 0.8, "bottom"
             ax.text(
-                x0 + width / 2.0, y, label, transform=ccrs.PlateCarree(),
+                0.5 * (west + east), y, label, transform=ccrs.PlateCarree(),
                 ha="center", va=va, fontsize=9, color=box.get("color", "magenta"),
                 zorder=6, path_effects=[_pe.withStroke(linewidth=2.5, foreground="white")],
             )
     if extent is not None:
-        ax.set_extent(extent, crs=ccrs.PlateCarree())
+        ax.set_extent(list(extent), crs=ccrs.PlateCarree())
     if savefile:
         fig.savefig(savefile, bbox_inches="tight", dpi=300)
     try:
